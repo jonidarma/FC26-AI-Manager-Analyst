@@ -51,6 +51,13 @@
       "url": "https://www.futwiz.com/fc26/career-mode/nations",
       "edition": "FC 26",
       "licenseNotes": "Reference schema for nations preserving source naming alongside standardized ISO codes."
+    },
+    {
+      "sourceKey": "eafc26_datahub_player_data",
+      "name": "EAFC26 DataHub Player Dataset (Community / Kaggle-Derived)",
+      "url": "https://github.com/ismailoksuz/EAFC26-DataHub",
+      "edition": "FC 26",
+      "licenseNotes": "Community-distributed dataset derived from a Kaggle FC 26 player dataset (not an official EA SPORTS export). Check upstream license and usage terms before redistributing. External player/club/nation image URLs are ignored per third-party media policy."
     }
   ],
   "datasetStatus": {

@@ -22,6 +22,7 @@ FC26 AI Manager is a local-first Windows desktop application. To respect third-p
 | `fifplay_fc26_formations` | FIFPlay FC 26 Formations Reference | All 34 verified FC 26 formations (Back 3, Back 4, Back 5) and 11-slot positional layouts |
 | `fifplay_fc26_clubs` | FIFPlay FC 26 Clubs Directory | Men's and women's clubs tracked as strictly separate club entities |
 | `futwiz_fc26_career` | FUTWIZ FC 26 Career Mode Players, Leagues & Nations | Career Mode player ratings/potential/contracts schema, leagues, and nations |
+| `eafc26_datahub_player_data` | EAFC26 DataHub Player Dataset (Community / Kaggle-Derived) | Community-distributed FC 26 / SoFIFA-style `players.csv` (110+ attributes); not an official EA SPORTS export — verify upstream license/terms before redistribution |
 
 ---
 
@@ -99,6 +100,17 @@ Template file: `data/fc26/players/template_players.csv`
 | `height_cm`, `weight_kg` | Optional | Numeric |
 | `market_value_eur`, `wage_eur` | Optional | Integer EUR |
 | `contract_expiry` | Optional | Year or ISO date (e.g. `2029`) |
+
+#### EAFC26 DataHub / SoFIFA-Style Player CSV Adapter (Phase 1.2.1)
+Handled by `server/services/playerImportAdapters/eafc26DataHub.ts` and used identically by both the UI preview/execute endpoints and `scripts/data-import/import-players.ts`:
+
+- **Auto-detection**: Recognizes DataHub headers (`long_name`, `player_positions`, `nationality_name`, `physic`, `value_eur`, `club_contract_valid_until_year`, etc.) while keeping full backward compatibility with the standard FC26 CSV/JSON format.
+- **Stable ID Namespacing**: `player_id` is stored as `eafc26_datahub_<player_id>` in `external_source_id` so re-imports are idempotent and never collide with other sources.
+- **Name Fallback**: Maps `long_name` → `full_name` (falling back to `short_name` only when `long_name` is empty) while preserving `short_name`.
+- **Strict Position Parsing**: Splits `player_positions` (e.g. `"LW, LM"`, `"CM, LM, CAM"`) on `, ; | /`, uppercases and validates strictly against the 15 official FC 26 positions (never inventing or silently remapping unsupported codes). First valid token becomes `primary_position`; remaining unique valid tokens become `secondary_positions`. Explicit `primary_position` / `secondary_positions` columns take precedence if present.
+- **Extended Attribute Preservation**: All 90+ non-canonical flat attributes (`attacking_*`, `skill_*`, `movement_*`, `power_*`, `mentality_*`, `defending_*`, `goalkeeping_*`, `player_traits`, `work_rate`, positional ratings `ls..gk`, etc.) are preserved inside `catalog_players.attributes_json` with blank/source-null values normalized to JSON `null`.
+- **Media Exclusion Policy**: Third-party image/logo columns (`player_face_url`, `club_logo_url`, `nation_flag_url`, etc.) are intentionally stripped and never stored or hotlinked.
+- **Source Attribution**: Automatically records source provenance key `eafc26_datahub_player_data` (community/Kaggle-derived; check upstream license terms before redistribution).
 
 ### Clubs (`clubs`)
 Required fields: `name`, `team_category` (`mens` or `womens`). Optional: `external_source_id`, `short_name`, `league_name`, `nation_name`.

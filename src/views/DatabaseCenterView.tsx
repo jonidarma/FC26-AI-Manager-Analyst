@@ -336,6 +336,7 @@ export function DatabaseCenterView() {
         format: importFormat,
         rawContent: importRawContent,
         fileName: importFileName || `${importDatasetType}.${importFormat}`,
+        sourceKey: importPreview?.schemaDiagnostics?.detectedSourceKey ?? undefined,
         completeness: 'user_imported',
         mode: importMode,
       });
@@ -1520,7 +1521,9 @@ export function DatabaseCenterView() {
                 Batch Dataset Import (CSV / JSON)
               </h2>
               <p className="text-[12px] text-[#8A94A6] mt-0.5">
-                Idempotent upserts keyed by <span className="font-mono">external_source_id</span>. Operational Career Mode squads and matches are never overwritten.
+                Idempotent upserts keyed by <span className="font-mono">external_source_id</span>. Supports both{' '}
+                <span className="text-[#CBD3DF]">FC26 AI Manager Standard CSV/JSON</span> and{' '}
+                <span className="text-[#CBD3DF]">EAFC26 DataHub / SoFIFA-style CSV</span> (110+ columns with extended attributes preserved in <span className="font-mono">attributes_json</span>). Operational Career Mode squads and matches are never overwritten.
               </p>
             </div>
 
@@ -1582,7 +1585,7 @@ export function DatabaseCenterView() {
 
             <div>
               <label className="block text-[12px] text-[#8A94A6] mb-1">
-                Dataset Payload {importFileName ? `(${importFileName})` : '(or paste CSV/JSON directly)'}
+                Dataset Payload {importFileName ? `(${importFileName})` : '(or paste Standard or EAFC26 DataHub CSV/JSON directly)'}
               </label>
               <textarea
                 rows={5}
@@ -1591,7 +1594,7 @@ export function DatabaseCenterView() {
                   setImportRawContent(e.target.value);
                   setImportPreview(null);
                 }}
-                placeholder="external_source_id,full_name,club_name,league_name,nation_name,primary_position,secondary_positions,age,overall_rating,potential_rating,preferred_foot"
+                placeholder="Standard: external_source_id,full_name,primary_position,overall_rating... | DataHub: player_id,short_name,long_name,player_positions,overall,potential,physic,value_eur..."
                 className="w-full bg-[#171B22] border border-white/[0.1] rounded-md px-3 py-2 text-[12px] font-mono text-[#E2E8F0] focus:outline-none focus:border-emerald-500"
               />
             </div>
@@ -1618,48 +1621,271 @@ export function DatabaseCenterView() {
 
             {/* Preview Summary */}
             {importPreview && (
-              <div className="border border-emerald-500/30 bg-emerald-500/[0.04] rounded-lg p-4 space-y-3">
+              <div className="border border-emerald-500/30 bg-emerald-500/[0.04] rounded-lg p-4 space-y-4">
                 <div className="flex flex-wrap items-center justify-between gap-2 text-[13px]">
-                  <span className="font-semibold text-white">Import Validation Preview</span>
+                  <div className="flex flex-wrap items-center gap-2.5">
+                    <span className="font-semibold text-white">Import Validation Preview</span>
+                    {importPreview.schemaDiagnostics && (
+                      <span
+                        className={`text-[12px] font-medium px-2 py-0.5 rounded border ${
+                          importPreview.schemaDiagnostics.profileId === 'unknown_schema'
+                            ? 'border-amber-500/40 bg-amber-500/10 text-amber-300'
+                            : 'border-emerald-500/40 bg-emerald-500/10 text-emerald-300'
+                        }`}
+                      >
+                        {importPreview.schemaDiagnostics.profileLabel}
+                      </span>
+                    )}
+                  </div>
                   <span className="font-mono text-[11px] text-[#8A94A6]">
                     SHA-256: {importPreview.checksum.slice(0, 16)}…
                   </span>
                 </div>
-                <div className="grid grid-cols-2 sm:grid-cols-5 gap-3 text-[12px]">
+
+                {/* Schema-Level Diagnostics & Warnings (shown before row errors) */}
+                {importPreview.schemaDiagnostics && (
+                  <div className="space-y-3 border-t border-white/[0.08] pt-3">
+                    <div className="grid grid-cols-1 md:grid-cols-3 gap-3 text-[12px]">
+                      <div className="bg-[#12151B] border border-white/[0.07] rounded-md px-3 py-2">
+                        <div className="text-[#8A94A6]">Detected Source Schema</div>
+                        <div className="text-white font-medium mt-0.5">
+                          {importPreview.schemaDiagnostics.columnCount} columns ·{' '}
+                          {importPreview.schemaDiagnostics.recognizedMappings.length} canonical mapped
+                        </div>
+                        {importPreview.schemaDiagnostics.detectedSourceKey && (
+                          <div className="text-[11px] font-mono text-sky-300 mt-0.5">
+                            Provenance: {importPreview.schemaDiagnostics.detectedSourceKey}
+                          </div>
+                        )}
+                      </div>
+                      <div className="bg-[#12151B] border border-white/[0.07] rounded-md px-3 py-2">
+                        <div className="text-[#8A94A6]">Required Fields Status</div>
+                        <div className="mt-0.5 space-y-0.5 font-mono text-[11px]">
+                          <div
+                            className={
+                              importPreview.schemaDiagnostics.requiredFieldsMapped.name
+                                ? 'text-emerald-300'
+                                : 'text-amber-300'
+                            }
+                          >
+                            Name:{' '}
+                            {importPreview.schemaDiagnostics.requiredFieldsMapped.nameSource
+                              ? `mapped from ${importPreview.schemaDiagnostics.requiredFieldsMapped.nameSource}`
+                              : 'MISSING'}
+                          </div>
+                          <div
+                            className={
+                              importPreview.schemaDiagnostics.requiredFieldsMapped.position
+                                ? 'text-emerald-300'
+                                : 'text-amber-300'
+                            }
+                          >
+                            Position:{' '}
+                            {importPreview.schemaDiagnostics.requiredFieldsMapped.positionSource
+                              ? `mapped from ${importPreview.schemaDiagnostics.requiredFieldsMapped.positionSource}`
+                              : 'MISSING'}
+                          </div>
+                        </div>
+                      </div>
+                      <div className="bg-[#12151B] border border-white/[0.07] rounded-md px-3 py-2">
+                        <div className="text-[#8A94A6]">Extended Attributes &amp; Media Policy</div>
+                        <div className="mt-0.5 text-[11px] text-[#CBD3DF] space-y-0.5">
+                          <div>
+                            Preserved in <span className="font-mono">attributes_json</span>:{' '}
+                            <span className="font-mono text-emerald-300">
+                              {importPreview.schemaDiagnostics.extendedAttributeColumns.length}
+                            </span>{' '}
+                            known cols
+                            {importPreview.schemaDiagnostics.unrecognizedColumns.length > 0 && (
+                              <span className="text-[#8A94A6]">
+                                {' '}
+                                (+{importPreview.schemaDiagnostics.unrecognizedColumns.length} extra)
+                              </span>
+                            )}
+                          </div>
+                          <div>
+                            Third-party image URLs ignored:{' '}
+                            <span className="font-mono text-sky-300">
+                              {importPreview.schemaDiagnostics.ignoredMediaColumns.length}
+                            </span>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+
+                    {importPreview.schemaDiagnostics.schemaWarnings.length > 0 && (
+                      <div className="border border-amber-500/40 bg-amber-500/10 rounded-md px-3 py-2.5 text-[12px] text-amber-200 space-y-1">
+                        <div className="font-semibold text-amber-300">Schema Warnings</div>
+                        {importPreview.schemaDiagnostics.schemaWarnings.map((warn, idx) => (
+                          <div key={idx}>{warn}</div>
+                        ))}
+                      </div>
+                    )}
+
+                    {importPreview.schemaDiagnostics.recognizedMappings.length > 0 && (
+                      <div className="bg-[#12151B] border border-white/[0.07] rounded-md p-3 space-y-2">
+                        <div className="text-[11px] uppercase tracking-wider text-[#8A94A6] font-semibold">
+                          Recognized Field Mappings ({importPreview.schemaDiagnostics.recognizedMappings.length})
+                        </div>
+                        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-x-4 gap-y-1 text-[11px] font-mono">
+                          {importPreview.schemaDiagnostics.recognizedMappings.map((m) => (
+                            <div key={`${m.sourceColumn}-${m.targetField}`} className="truncate">
+                              <span className="text-sky-300">{m.sourceColumn}</span>
+                              <span className="text-[#8A94A6] mx-1.5">→</span>
+                              <span className="text-emerald-300">{m.targetField}</span>
+                            </div>
+                          ))}
+                        </div>
+                        {importPreview.schemaDiagnostics.unrecognizedColumns.length > 0 && (
+                          <div className="text-[11px] text-[#8A94A6] pt-1.5 border-t border-white/[0.06]">
+                            Unrecognized columns (preserved in <span className="font-mono">attributes_json</span>):{' '}
+                            <span className="font-mono text-[#CBD3DF]">
+                              {importPreview.schemaDiagnostics.unrecognizedColumns.slice(0, 12).join(', ')}
+                              {importPreview.schemaDiagnostics.unrecognizedColumns.length > 12
+                                ? ` (+${importPreview.schemaDiagnostics.unrecognizedColumns.length - 12} more)`
+                                : ''}
+                            </span>
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* Row Count Summary */}
+                <div className="grid grid-cols-2 sm:grid-cols-6 gap-3 text-[12px] border-t border-white/[0.08] pt-3">
                   <div>
                     <div className="text-[#8A94A6]">Total Rows</div>
                     <div className="font-mono text-[15px] font-semibold text-white">
-                      {importPreview.totalRows}
+                      {importPreview.totalRows.toLocaleString()}
+                    </div>
+                  </div>
+                  <div>
+                    <div className="text-[#8A94A6]">Valid Rows</div>
+                    <div className="font-mono text-[15px] font-semibold text-emerald-300">
+                      {importPreview.validCount.toLocaleString()}
                     </div>
                   </div>
                   <div>
                     <div className="text-[#8A94A6]">New Inserts</div>
                     <div className="font-mono text-[15px] font-semibold text-emerald-400">
-                      {importPreview.insertCount}
+                      {importPreview.insertCount.toLocaleString()}
                     </div>
                   </div>
                   <div>
                     <div className="text-[#8A94A6]">Updates</div>
                     <div className="font-mono text-[15px] font-semibold text-sky-400">
-                      {importPreview.updateCount}
+                      {importPreview.updateCount.toLocaleString()}
                     </div>
                   </div>
                   <div>
                     <div className="text-[#8A94A6]">Rejected</div>
                     <div className="font-mono text-[15px] font-semibold text-amber-400">
-                      {importPreview.rejectedCount}
+                      {importPreview.rejectedCount.toLocaleString()}
                     </div>
                   </div>
                   <div>
                     <div className="text-[#8A94A6]">In-File Duplicates</div>
                     <div className="font-mono text-[15px] font-semibold text-[#CBD3DF]">
-                      {importPreview.duplicatesInFile}
+                      {importPreview.duplicatesInFile.toLocaleString()}
                     </div>
                   </div>
                 </div>
 
+                {/* Normalized Sample Players Preview (first 5-8 rows) */}
+                {importPreview.datasetType === 'players' && importPreview.sampleRows.length > 0 && (
+                  <div className="border-t border-white/[0.08] pt-3 space-y-2">
+                    <div className="text-[12px] font-semibold text-white">
+                      Normalized Sample Players (first {importPreview.sampleRows.length} valid rows)
+                    </div>
+                    <div className="overflow-x-auto bg-[#12151B] border border-white/[0.08] rounded-md">
+                      <table className="w-full text-left text-[12px]">
+                        <thead className="bg-[#161A22] text-[#8A94A6] border-b border-white/[0.08]">
+                          <tr>
+                            <th className="px-3 py-1.5 font-medium">External ID</th>
+                            <th className="px-3 py-1.5 font-medium">Full Name / Short</th>
+                            <th className="px-3 py-1.5 font-medium">Positions</th>
+                            <th className="px-3 py-1.5 font-medium">Club / Nation</th>
+                            <th className="px-3 py-1.5 font-medium text-right">OVR / POT / Age</th>
+                            <th className="px-3 py-1.5 font-medium text-right">PHY / Value / Exp</th>
+                            <th className="px-3 py-1.5 font-medium text-right">Ext. Attrs</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-white/[0.06]">
+                          {importPreview.sampleRows.slice(0, 8).map((row, idx) => {
+                            const sec = Array.isArray(row.secondaryPositions)
+                              ? (row.secondaryPositions as string[])
+                              : [];
+                            const valueEur =
+                              typeof row.marketValueEur === 'number'
+                                ? row.marketValueEur >= 1_000_000
+                                  ? `€${(row.marketValueEur / 1_000_000).toFixed(1)}M`
+                                  : `€${row.marketValueEur.toLocaleString()}`
+                                : '—';
+                            const extCount =
+                              typeof row.extendedAttributeCount === 'number'
+                                ? row.extendedAttributeCount
+                                : 0;
+                            const shortNameStr =
+                              typeof row.shortName === 'string' && row.shortName.trim()
+                                ? row.shortName.trim()
+                                : '';
+                            const fullNameStr = String(row.fullName ?? '');
+                            const fmtNum = (val: unknown): string =>
+                              typeof val === 'number' || typeof val === 'string'
+                                ? String(val)
+                                : '—';
+                            return (
+                              <tr key={`${String(row.externalSourceId ?? idx)}-${idx}`}>
+                                <td className="px-3 py-1.5 font-mono text-[11px] text-[#8A94A6]">
+                                  {String(row.externalSourceId ?? '')}
+                                </td>
+                                <td className="px-3 py-1.5">
+                                  <div className="text-white font-medium">{fullNameStr}</div>
+                                  {shortNameStr && shortNameStr !== fullNameStr && (
+                                    <div className="text-[11px] text-[#8A94A6]">{shortNameStr}</div>
+                                  )}
+                                </td>
+                                <td className="px-3 py-1.5 font-mono">
+                                  <span className="text-emerald-300 font-semibold">
+                                    {String(row.primaryPosition ?? '')}
+                                  </span>
+                                  {sec.length > 0 && (
+                                    <span className="text-[#8A94A6] ml-1">· {sec.join(', ')}</span>
+                                  )}
+                                </td>
+                                <td className="px-3 py-1.5 text-[#CBD3DF]">
+                                  <div>{String(row.clubNameRaw || '—')}</div>
+                                  <div className="text-[11px] text-[#8A94A6]">
+                                    {String(row.nationNameRaw || '—')}
+                                  </div>
+                                </td>
+                                <td className="px-3 py-1.5 font-mono text-right text-white">
+                                  {fmtNum(row.overallRating)} / {fmtNum(row.potentialRating)} /{' '}
+                                  {fmtNum(row.age)}
+                                </td>
+                                <td className="px-3 py-1.5 font-mono text-right text-[#CBD3DF]">
+                                  {fmtNum(row.physicality)} · {valueEur} ·{' '}
+                                  {row.contractExpiry ? String(row.contractExpiry) : '—'}
+                                </td>
+                                <td className="px-3 py-1.5 font-mono text-right text-sky-300">
+                                  {extCount > 0 ? extCount : '—'}
+                                </td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                )}
+
                 {importPreview.validationErrors.length > 0 && (
-                  <div className="text-[12px] text-amber-300 space-y-1 max-h-32 overflow-y-auto pt-2 border-t border-white/[0.08]">
+                  <div className="text-[12px] text-amber-300 space-y-1 max-h-36 overflow-y-auto pt-2 border-t border-white/[0.08]">
+                    <div className="font-semibold text-amber-200">
+                      Row Validation Errors (showing {Math.min(10, importPreview.validationErrors.length)} of{' '}
+                      {importPreview.rejectedCount.toLocaleString()} rejected rows)
+                    </div>
                     {importPreview.validationErrors.slice(0, 10).map((err, i) => (
                       <div key={i}>
                         Row {err.row} ({err.field}): {err.message}

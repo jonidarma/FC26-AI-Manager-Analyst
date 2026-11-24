@@ -293,9 +293,9 @@ async function startServer() {
 
   const app = express();
   app.disable('x-powered-by');
-  // Higher payload limit strictly for large CSV/JSON catalog imports (20,000+ players)
-  app.use('/api/catalog/import', express.json({ limit: '25mb' }));
-  app.use('/api/database/restore', express.json({ limit: '25mb' }));
+  // Higher payload limit strictly for large CSV/JSON catalog imports (20,000+ players x 110+ columns)
+  app.use('/api/catalog/import', express.json({ limit: '60mb' }));
+  app.use('/api/database/restore', express.json({ limit: '60mb' }));
   app.use(express.json({ limit: '5mb' }));
 
   // Apply security headers & strict origin checks to all API routes

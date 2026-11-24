@@ -673,6 +673,38 @@ export interface ImportValidationError {
   message: string;
 }
 
+export type PlayerSourceProfileId =
+  | 'fc26_standard_csv'
+  | 'eafc26_datahub_csv'
+  | 'fc26_standard_json'
+  | 'eafc26_datahub_json'
+  | 'unknown_schema';
+
+export interface ImportFieldMappingInfo {
+  sourceColumn: string;
+  targetField: string;
+  note?: string;
+}
+
+export interface ImportSchemaDiagnostics {
+  profileId: PlayerSourceProfileId | string;
+  profileLabel: string;
+  detectedSourceKey: string | null;
+  columnCount: number;
+  detectedColumns: string[];
+  recognizedMappings: ImportFieldMappingInfo[];
+  requiredFieldsMapped: {
+    name: boolean;
+    position: boolean;
+    nameSource: string | null;
+    positionSource: string | null;
+  };
+  extendedAttributeColumns: string[];
+  ignoredMediaColumns: string[];
+  unrecognizedColumns: string[];
+  schemaWarnings: string[];
+}
+
 export interface ImportPreviewResult {
   datasetType: CatalogDatasetType;
   format: 'json' | 'csv';
@@ -685,6 +717,7 @@ export interface ImportPreviewResult {
   duplicatesInFile: number;
   sampleRows: Array<Record<string, unknown>>;
   validationErrors: ImportValidationError[];
+  schemaDiagnostics?: ImportSchemaDiagnostics;
 }
 
 export interface ImportExecuteResult {

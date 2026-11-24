@@ -7,26 +7,18 @@ import type {
   CatalogImportRun,
   DatasetCompleteness,
   ImportPreviewResult,
+  ImportSchemaDiagnostics,
   ImportValidationError,
 } from '../../src/types/domain.ts';
+import {
+  EAFC26_DATAHUB_SOURCE_KEY,
+  EAFC26_DATAHUB_SOURCE_METADATA,
+  VALID_FC26_POSITIONS,
+  detectPlayerSourceProfile,
+  normalizePlayerRecord,
+} from './playerImportAdapters/eafc26DataHub.ts';
 
-const VALID_POSITIONS = new Set([
-  'GK',
-  'CB',
-  'LB',
-  'RB',
-  'LWB',
-  'RWB',
-  'CDM',
-  'CM',
-  'CAM',
-  'LM',
-  'RM',
-  'LW',
-  'RW',
-  'CF',
-  'ST',
-]);
+const VALID_POSITIONS = VALID_FC26_POSITIONS;
 
 const MAX_STORED_ERRORS = 150;
 
@@ -34,7 +26,10 @@ export function computeSha256(content: string): string {
   return crypto.createHash('sha256').update(content, 'utf8').digest('hex');
 }
 
-export function parseCsvRecords(rawCsv: string): Array<Record<string, string>> {
+export function parseCsvWithHeaders(rawCsv: string): {
+  headers: string[];
+  records: Array<Record<string, string>>;
+} {
   const cleaned = rawCsv.replace(/^\uFEFF/, '');
   const rows: string[][] = [];
   let currentRow: string[] = [];
@@ -83,23 +78,30 @@ export function parseCsvRecords(rawCsv: string): Array<Record<string, string>> {
   }
 
   const nonEmptyRows = rows.filter((r) => r.some((cell) => cell.trim().length > 0));
-  if (nonEmptyRows.length < 2) return [];
+  if (nonEmptyRows.length === 0) return { headers: [], records: [] };
 
-  const headers = nonEmptyRows[0].map((h) => h.trim());
+  const headers = nonEmptyRows[0].map((h) => h.trim()).filter(Boolean);
+  if (nonEmptyRows.length < 2) return { headers, records: [] };
+
+  const rawHeaders = nonEmptyRows[0].map((h) => h.trim());
   const records: Array<Record<string, string>> = [];
 
   for (let i = 1; i < nonEmptyRows.length; i += 1) {
     const values = nonEmptyRows[i];
     const obj: Record<string, string> = {};
-    for (let j = 0; j < headers.length; j += 1) {
-      const key = headers[j];
+    for (let j = 0; j < rawHeaders.length; j += 1) {
+      const key = rawHeaders[j];
       if (!key) continue;
       obj[key] = (values[j] ?? '').trim();
     }
     records.push(obj);
   }
 
-  return records;
+  return { headers, records };
+}
+
+export function parseCsvRecords(rawCsv: string): Array<Record<string, string>> {
+  return parseCsvWithHeaders(rawCsv).records;
 }
 
 function getField(row: Record<string, unknown>, ...keys: string[]): unknown {
@@ -138,15 +140,6 @@ function toSlug(value: string): string {
     .slice(0, 80);
 }
 
-function normalizePreferredFoot(val: unknown): 'Right' | 'Left' | 'Both' | null {
-  const s = toStringOrEmpty(val).toLowerCase();
-  if (!s) return null;
-  if (s === 'right' || s === 'r') return 'Right';
-  if (s === 'left' || s === 'l') return 'Left';
-  if (s === 'both' || s === 'either') return 'Both';
-  return null;
-}
-
 function normalizeTeamCategory(val: unknown): 'mens' | 'womens' {
   const s = toStringOrEmpty(val).toLowerCase();
   if (s === 'womens' || s === 'women' || s === 'female' || s === 'f') return 'womens';
@@ -160,11 +153,26 @@ function normalizeLeagueCategory(val: unknown): 'mens' | 'womens' | 'mixed' {
   return 'mens';
 }
 
+function extractJsonHeaders(records: Array<Record<string, unknown>>): string[] {
+  const seen = new Set<string>();
+  const sampleLimit = Math.min(records.length, 20);
+  for (let i = 0; i < sampleLimit; i += 1) {
+    const rec = records[i];
+    if (rec && typeof rec === 'object' && !Array.isArray(rec)) {
+      for (const key of Object.keys(rec)) {
+        if (key.trim()) seen.add(key.trim());
+      }
+    }
+  }
+  return Array.from(seen);
+}
+
 function parseRawPayload(
   datasetType: CatalogDatasetType,
   format: 'json' | 'csv',
   rawContent: string
 ): {
+  headers: string[];
   records: Array<Record<string, unknown>>;
   extraCompatibility?: Array<Record<string, unknown>>;
   meta?: {
@@ -174,12 +182,14 @@ function parseRawPayload(
   };
 } {
   if (format === 'csv') {
-    return { records: parseCsvRecords(rawContent) };
+    const { headers, records } = parseCsvWithHeaders(rawContent);
+    return { headers, records };
   }
 
   const parsed = JSON.parse(rawContent) as unknown;
   if (Array.isArray(parsed)) {
-    return { records: parsed as Array<Record<string, unknown>> };
+    const records = parsed as Array<Record<string, unknown>>;
+    return { headers: extractJsonHeaders(records), records };
   }
   if (parsed && typeof parsed === 'object') {
     const obj = parsed as Record<string, unknown>;
@@ -192,8 +202,10 @@ function parseRawPayload(
     };
 
     if (datasetType === 'focuses' && Array.isArray(obj.focuses)) {
+      const records = obj.focuses as Array<Record<string, unknown>>;
       return {
-        records: obj.focuses as Array<Record<string, unknown>>,
+        headers: extractJsonHeaders(records),
+        records,
         extraCompatibility: Array.isArray(obj.compatibility)
           ? (obj.compatibility as Array<Record<string, unknown>>)
           : undefined,
@@ -201,13 +213,16 @@ function parseRawPayload(
       };
     }
     if (datasetType === 'sources' && Array.isArray(obj.sources)) {
-      return { records: obj.sources as Array<Record<string, unknown>>, meta };
+      const records = obj.sources as Array<Record<string, unknown>>;
+      return { headers: extractJsonHeaders(records), records, meta };
     }
     if (Array.isArray(obj.records)) {
-      return { records: obj.records as Array<Record<string, unknown>>, meta };
+      const records = obj.records as Array<Record<string, unknown>>;
+      return { headers: extractJsonHeaders(records), records, meta };
     }
     if (Array.isArray(obj.items)) {
-      return { records: obj.items as Array<Record<string, unknown>>, meta };
+      const records = obj.items as Array<Record<string, unknown>>;
+      return { headers: extractJsonHeaders(records), records, meta };
     }
   }
 
@@ -221,7 +236,8 @@ interface NormalizedRow {
 
 function validateAndNormalizeRows(
   datasetType: CatalogDatasetType,
-  rawRecords: Array<Record<string, unknown>>
+  rawRecords: Array<Record<string, unknown>>,
+  playerProfile?: ImportSchemaDiagnostics
 ): {
   validRows: NormalizedRow[];
   errors: ImportValidationError[];
@@ -374,82 +390,20 @@ function validateAndNormalizeRows(
     }
 
     if (datasetType === 'players') {
-      const fullName = toStringOrEmpty(getField(raw, 'fullName', 'full_name', 'name'));
-      const primaryPosition = toStringOrEmpty(
-        getField(raw, 'primaryPosition', 'primary_position', 'position')
-      ).toUpperCase();
-      if (!fullName) {
-        pushError(rowNum, 'full_name', 'Player full_name is required.');
+      const effectiveProfile =
+        playerProfile ?? detectPlayerSourceProfile(Object.keys(raw), 'csv');
+      const normalized = normalizePlayerRecord(raw, effectiveProfile);
+      if (!normalized.ok) {
+        pushError(rowNum, normalized.field, normalized.message);
         continue;
       }
-      if (!VALID_POSITIONS.has(primaryPosition)) {
-        pushError(rowNum, 'primary_position', `Invalid primary position "${primaryPosition}".`);
-        continue;
-      }
-      const clubNameRaw = toStringOrEmpty(getField(raw, 'clubName', 'club_name', 'club'));
-      const leagueNameRaw = toStringOrEmpty(getField(raw, 'leagueName', 'league_name', 'league'));
-      const nationNameRaw = toStringOrEmpty(getField(raw, 'nationName', 'nation_name', 'nation', 'nationality'));
-      const externalSourceId =
-        toStringOrEmpty(getField(raw, 'externalSourceId', 'external_source_id', 'player_id', 'id')) ||
-        `player_${toSlug(fullName)}_${toSlug(clubNameRaw || 'free')}_${primaryPosition.toLowerCase()}`;
 
-      const rawSec = getField(raw, 'secondaryPositions', 'secondary_positions', 'alt_positions');
-      let secondaryPositions: string[] = [];
-      if (Array.isArray(rawSec)) {
-        secondaryPositions = rawSec
-          .map((p) => String(p).trim().toUpperCase())
-          .filter((p) => VALID_POSITIONS.has(p) && p !== primaryPosition);
-      } else if (typeof rawSec === 'string' && rawSec.trim()) {
-        secondaryPositions = rawSec
-          .split(/[|;,/]+/)
-          .map((p) => p.trim().toUpperCase())
-          .filter((p) => VALID_POSITIONS.has(p) && p !== primaryPosition);
-      }
-
-      const ovr = toNullableInt(getField(raw, 'overallRating', 'overall_rating', 'ovr', 'overall'), 1, 99);
-      const pot = toNullableInt(getField(raw, 'potentialRating', 'potential_rating', 'pot', 'potential'), 1, 99);
-      const explicitGrowth = toNullableInt(getField(raw, 'growth'), -30, 50);
-      const growth = explicitGrowth !== null ? explicitGrowth : ovr !== null && pot !== null ? pot - ovr : null;
-
-      if (seenKeys.has(externalSourceId)) duplicatesInFile += 1;
-      seenKeys.add(externalSourceId);
-
-      const extraAttrs = raw.attributes && typeof raw.attributes === 'object' ? raw.attributes : null;
+      if (seenKeys.has(normalized.key)) duplicatesInFile += 1;
+      seenKeys.add(normalized.key);
 
       validRows.push({
-        key: externalSourceId,
-        data: {
-          externalSourceId,
-          fullName,
-          shortName: toStringOrEmpty(getField(raw, 'shortName', 'short_name')),
-          clubExternalId: toStringOrEmpty(getField(raw, 'clubExternalId', 'club_external_id')),
-          leagueExternalId: toStringOrEmpty(getField(raw, 'leagueExternalId', 'league_external_id')),
-          nationExternalId: toStringOrEmpty(getField(raw, 'nationExternalId', 'nation_external_id')),
-          clubNameRaw,
-          leagueNameRaw,
-          nationNameRaw,
-          primaryPosition,
-          secondaryPositions: Array.from(new Set(secondaryPositions)),
-          age: toNullableInt(getField(raw, 'age'), 14, 55),
-          overallRating: ovr,
-          potentialRating: pot,
-          growth,
-          pace: toNullableInt(getField(raw, 'pace', 'pac'), 1, 99),
-          shooting: toNullableInt(getField(raw, 'shooting', 'sho'), 1, 99),
-          passing: toNullableInt(getField(raw, 'passing', 'pas'), 1, 99),
-          dribbling: toNullableInt(getField(raw, 'dribbling', 'dri'), 1, 99),
-          defending: toNullableInt(getField(raw, 'defending', 'def'), 1, 99),
-          physicality: toNullableInt(getField(raw, 'physicality', 'phy', 'physical'), 1, 99),
-          preferredFoot: normalizePreferredFoot(getField(raw, 'preferredFoot', 'preferred_foot', 'foot')),
-          weakFoot: toNullableInt(getField(raw, 'weakFoot', 'weak_foot', 'wf'), 1, 5),
-          skillMoves: toNullableInt(getField(raw, 'skillMoves', 'skill_moves', 'sm'), 1, 5),
-          heightCm: toNullableInt(getField(raw, 'heightCm', 'height_cm', 'height'), 130, 230),
-          weightKg: toNullableInt(getField(raw, 'weightKg', 'weight_kg', 'weight'), 40, 140),
-          marketValueEur: toNullableInt(getField(raw, 'marketValueEur', 'market_value_eur', 'value', 'market_value'), 0),
-          wageEur: toNullableInt(getField(raw, 'wageEur', 'wage_eur', 'wage'), 0),
-          contractExpiry: toStringOrEmpty(getField(raw, 'contractExpiry', 'contract_expiry', 'contract')) || null,
-          attributesJson: extraAttrs ? JSON.stringify(extraAttrs) : null,
-        },
+        key: normalized.key,
+        data: normalized.data,
       });
       continue;
     }
@@ -590,6 +544,27 @@ function getExistingKeySet(db: Database.Database, datasetType: CatalogDatasetTyp
   return new Set(rows.map((r) => String(r.key)));
 }
 
+function ensureKnownCatalogSource(db: Database.Database, sourceKey?: string): void {
+  if (!sourceKey) return;
+  if (sourceKey === EAFC26_DATAHUB_SOURCE_KEY) {
+    const now = new Date().toISOString();
+    db.prepare(`
+      INSERT OR IGNORE INTO catalog_sources (
+        id, source_key, name, url, edition, license_notes, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      crypto.randomUUID(),
+      EAFC26_DATAHUB_SOURCE_METADATA.sourceKey,
+      EAFC26_DATAHUB_SOURCE_METADATA.name,
+      EAFC26_DATAHUB_SOURCE_METADATA.url,
+      EAFC26_DATAHUB_SOURCE_METADATA.edition,
+      EAFC26_DATAHUB_SOURCE_METADATA.licenseNotes,
+      now,
+      now
+    );
+  }
+}
+
 export function previewCatalogImport(
   db: Database.Database,
   datasetType: CatalogDatasetType,
@@ -597,8 +572,14 @@ export function previewCatalogImport(
   rawContent: string
 ): ImportPreviewResult {
   const checksum = computeSha256(rawContent);
-  const { records } = parseRawPayload(datasetType, format, rawContent);
-  const { validRows, errors, duplicatesInFile } = validateAndNormalizeRows(datasetType, records);
+  const { headers, records } = parseRawPayload(datasetType, format, rawContent);
+  const schemaDiagnostics =
+    datasetType === 'players' ? detectPlayerSourceProfile(headers, format) : undefined;
+  const { validRows, errors, duplicatesInFile } = validateAndNormalizeRows(
+    datasetType,
+    records,
+    schemaDiagnostics
+  );
   const existingKeys = getExistingKeySet(db, datasetType);
 
   let insertCount = 0;
@@ -627,6 +608,7 @@ export function previewCatalogImport(
     duplicatesInFile,
     sampleRows: validRows.slice(0, 8).map((r) => r.data),
     validationErrors: errors,
+    schemaDiagnostics,
   };
 }
 
@@ -650,10 +632,23 @@ export function executeCatalogImport(
   const checksum = computeSha256(rawContent);
   const mode = options.mode ?? 'upsert';
 
-  const { records, extraCompatibility, meta } = parseRawPayload(datasetType, format, rawContent);
-  const { validRows, errors } = validateAndNormalizeRows(datasetType, records);
+  const { headers, records, extraCompatibility, meta } = parseRawPayload(
+    datasetType,
+    format,
+    rawContent
+  );
+  const schemaDiagnostics =
+    datasetType === 'players' ? detectPlayerSourceProfile(headers, format) : undefined;
+  const { validRows, errors } = validateAndNormalizeRows(
+    datasetType,
+    records,
+    schemaDiagnostics
+  );
 
-  const effectiveSourceKey = options.sourceKey ?? meta?.sourceKey;
+  const effectiveSourceKey =
+    options.sourceKey ?? meta?.sourceKey ?? schemaDiagnostics?.detectedSourceKey ?? undefined;
+  ensureKnownCatalogSource(db, effectiveSourceKey);
+
   const sourceRow = effectiveSourceKey
     ? (db
         .prepare('SELECT id, name FROM catalog_sources WHERE source_key = ?')
@@ -1473,9 +1468,45 @@ export function bootstrapLocalReferenceCatalogs(db: Database.Database, customDir
   ];
 
   for (const step of steps) {
-    if (hasRun(step.datasetType)) continue;
     const fullPath = path.resolve(refDir, step.relativePath);
     if (!fullPath.startsWith(refDir + path.sep) || !fs.existsSync(fullPath)) continue;
+
+    if (hasRun(step.datasetType)) {
+      // Idempotently register any newly added catalog sources (e.g. eafc26_datahub_player_data)
+      // on existing installations without modifying user data or creating duplicate import runs.
+      if (step.datasetType === 'sources') {
+        try {
+          const raw = fs.readFileSync(fullPath, 'utf8');
+          const { records } = parseRawPayload('sources', 'json', raw);
+          const now = new Date().toISOString();
+          const insertMissingSource = db.prepare(`
+            INSERT OR IGNORE INTO catalog_sources (
+              id, source_key, name, url, edition, license_notes, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+          `);
+          for (const rec of records) {
+            const sourceKey = toStringOrEmpty(getField(rec, 'sourceKey', 'source_key'));
+            const name = toStringOrEmpty(getField(rec, 'name'));
+            const url = toStringOrEmpty(getField(rec, 'url'));
+            if (!sourceKey || !name || !url) continue;
+            insertMissingSource.run(
+              crypto.randomUUID(),
+              sourceKey,
+              name,
+              url,
+              toStringOrEmpty(getField(rec, 'edition')) || 'FC 26',
+              toStringOrEmpty(getField(rec, 'licenseNotes', 'license_notes')),
+              now,
+              now
+            );
+          }
+        } catch {
+          // Non-fatal: skip malformed manifest sync
+        }
+      }
+      continue;
+    }
+
     const raw = fs.readFileSync(fullPath, 'utf8');
     executeCatalogImport(db, step.datasetType, 'json', raw, {
       fileName: step.relativePath,
