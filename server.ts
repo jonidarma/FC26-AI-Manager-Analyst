@@ -143,13 +143,42 @@ const clubSchema = z.object({
   preferredAttackingStyle: z.string().trim().max(80).default('Balanced'),
   preferredDefensiveStyle: z.string().trim().max(80).default('Balanced'),
   setActive: z.boolean().optional(),
+  rosterInitMode: z.enum(['default_roster', 'empty']).optional(),
 });
+
+const squadStatusEnum = z.enum([
+  'active',
+  'loaned_in',
+  'loaned_out',
+  'transferred_out',
+  'youth_academy',
+  'released',
+]);
+
+const playerAvailabilityEnum = z.enum([
+  'available',
+  'injured',
+  'suspended',
+  'doubtful',
+  'unavailable',
+]);
 
 const playerSchema = z.object({
   clubId: z.string().uuid(),
   catalogPlayerId: z.string().uuid().nullable().optional(),
-  name: z.string().trim().min(1).max(100),
+  name: z.string().trim().min(1).max(120),
+  displayNameOverride: z.string().trim().max(100).nullable().optional(),
+  shortName: z.string().trim().max(100).nullable().optional(),
+  fullName: z.string().trim().max(140).nullable().optional(),
   position: z.string().trim().min(1).max(12),
+  secondaryPositions: z.array(z.string().trim().min(1).max(12)).max(6).optional(),
+  squadNumber: z.number().int().min(1).max(99).nullable().optional(),
+  squadStatus: squadStatusEnum.optional(),
+  availability: playerAvailabilityEnum.optional(),
+  injuryStatus: z.string().trim().max(200).nullable().optional(),
+  suspensionStatus: z.string().trim().max(200).nullable().optional(),
+  membershipStartDate: z.string().trim().max(32).nullable().optional(),
+  membershipEndDate: z.string().trim().max(32).nullable().optional(),
   overallRating: z.number().int().min(1).max(99).nullable().default(null),
   potentialRating: z.number().int().min(1).max(99).nullable().optional(),
   age: z.number().int().min(14).max(55).nullable().optional(),
@@ -162,11 +191,20 @@ const playerSchema = z.object({
   strengths: z.string().trim().max(400).default(''),
   weaknesses: z.string().trim().max(400).default(''),
   preferredInstructions: z.string().trim().max(400).default(''),
+  notes: z.string().trim().max(1000).optional(),
 });
 
 const importPlayerFromCatalogSchema = z.object({
   catalogPlayerId: z.string().uuid(),
+  displayNameOverride: z.string().trim().max(100).nullable().optional(),
   position: z.string().trim().min(1).max(12).optional(),
+  squadNumber: z.number().int().min(1).max(99).nullable().optional(),
+  squadStatus: squadStatusEnum.optional(),
+  availability: playerAvailabilityEnum.optional(),
+  injuryStatus: z.string().trim().max(200).nullable().optional(),
+  suspensionStatus: z.string().trim().max(200).nullable().optional(),
+  membershipStartDate: z.string().trim().max(32).nullable().optional(),
+  membershipEndDate: z.string().trim().max(32).nullable().optional(),
   overallRating: z.number().int().min(1).max(99).nullable().optional(),
   potentialRating: z.number().int().min(1).max(99).nullable().optional(),
   age: z.number().int().min(14).max(55).nullable().optional(),
@@ -176,7 +214,31 @@ const importPlayerFromCatalogSchema = z.object({
   strengths: z.string().trim().max(400).optional(),
   weaknesses: z.string().trim().max(400).optional(),
   preferredInstructions: z.string().trim().max(400).optional(),
+  notes: z.string().trim().max(1000).optional(),
 });
+
+const tacticalPresetAssignmentSchema = z.object({
+  slotOrder: z.number().int().min(0).max(10),
+  positionCode: z.string().trim().min(1).max(12),
+  playerId: z.string().uuid().nullable(),
+  role: z.string().trim().max(80).default(''),
+  focus: z.string().trim().max(80).default(''),
+});
+
+const tacticalPresetCreateSchema = z.object({
+  name: z.string().trim().min(1).max(120),
+  formationId: z.string().uuid().nullable().optional(),
+  formationName: z.string().trim().min(1).max(60),
+  buildUpStyle: z.string().trim().min(1).max(80),
+  defensiveApproach: z.string().trim().min(1).max(80),
+  defensiveLineHeight: z.number().int().min(1).max(100),
+  isDefault: z.boolean().optional(),
+  benchPlayerIds: z.array(z.string().uuid()).max(12).optional(),
+  notes: z.string().trim().max(1200).optional(),
+  assignments: z.array(tacticalPresetAssignmentSchema).max(11).default([]),
+});
+
+const tacticalPresetUpdateSchema = tacticalPresetCreateSchema.partial();
 
 const opponentSchema = z.object({
   name: z.string().trim().min(1).max(120),
@@ -193,7 +255,7 @@ const roleAssignmentSchema = z.object({
   slotIndex: z.number().int().min(0).max(10),
   positionCode: z.string().trim().min(1).max(12),
   playerId: z.string().uuid().nullable(),
-  playerName: z.string().max(100).nullable(),
+  playerName: z.string().max(120).nullable(),
   role: z.string().trim().max(80),
   focus: z.string().trim().max(80),
 });
@@ -211,13 +273,27 @@ const matchCreateSchema = z.object({
   benchIds: z.array(z.string().uuid()).max(12).default([]),
   objective: z.string().trim().max(300).default(''),
   preMatchNotes: z.string().trim().max(1500).default(''),
+  sourcePresetId: z.string().uuid().nullable().optional(),
   tacticalSetup: z.object({
+    formationId: z.string().uuid().nullable().optional(),
     buildUpStyle: z.string().trim().min(1).max(80),
     defensiveApproach: z.string().trim().min(1).max(80),
     defensiveLineHeight: z.number().int().min(1).max(100),
     playerAssignments: z.array(roleAssignmentSchema).max(11).default([]),
     customParameters: z.record(z.string(), z.string()).optional(),
   }),
+});
+
+const matchTacticalSnapshotInputSchema = z.object({
+  sourcePresetId: z.string().uuid().nullable().optional(),
+  formationId: z.string().uuid().nullable().optional(),
+  formationName: z.string().trim().min(1).max(60),
+  buildUpStyle: z.string().trim().min(1).max(80),
+  defensiveApproach: z.string().trim().min(1).max(80),
+  defensiveLineHeight: z.number().int().min(1).max(100),
+  playerAssignments: z.array(roleAssignmentSchema).max(11).default([]),
+  benchIds: z.array(z.string().uuid()).max(12).optional(),
+  notes: z.string().trim().max(1500).optional(),
 });
 
 const matchUpdateSchema = z.object({
@@ -434,6 +510,102 @@ async function startServer() {
     return res.json({ deleted: true });
   });
 
+  // Phase 2.1 — Default Club Roster Initialization & Import
+  app.get('/api/catalog/clubs/:catalogClubId/default-roster-preview', (req, res) => {
+    try {
+      return res.json(repo.previewDefaultClubRosterByCatalogClubId(req.params.catalogClubId));
+    } catch (err) {
+      return res.status(400).json({
+        error: err instanceof Error ? err.message : 'Failed to preview default roster',
+      });
+    }
+  });
+
+  app.get('/api/clubs/:clubId/default-roster/preview', (req, res) => {
+    try {
+      return res.json(repo.previewDefaultClubRoster(req.params.clubId));
+    } catch (err) {
+      return res.status(404).json({
+        error: err instanceof Error ? err.message : 'Failed to preview club default roster',
+      });
+    }
+  });
+
+  app.post('/api/clubs/:clubId/default-roster/import', (req, res) => {
+    try {
+      return res.json(repo.importDefaultClubRoster(req.params.clubId));
+    } catch (err) {
+      return res.status(404).json({
+        error: err instanceof Error ? err.message : 'Failed to import club default roster',
+      });
+    }
+  });
+
+  // Phase 2.1 — Club Tactical Presets
+  app.get('/api/clubs/:clubId/tactical-presets', (req, res) => {
+    return res.json(repo.listTacticalPresets(req.params.clubId));
+  });
+
+  app.post('/api/clubs/:clubId/tactical-presets', (req, res) => {
+    const parsed = tacticalPresetCreateSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return res
+        .status(400)
+        .json({ error: 'Invalid tactical preset payload', details: parsed.error.flatten() });
+    }
+    try {
+      const created = repo.createTacticalPreset(req.params.clubId, parsed.data);
+      return res.status(201).json(created);
+    } catch (err) {
+      return res.status(400).json({
+        error: err instanceof Error ? err.message : 'Failed to create tactical preset',
+      });
+    }
+  });
+
+  app.put('/api/tactical-presets/:id', (req, res) => {
+    const parsed = tacticalPresetUpdateSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return res
+        .status(400)
+        .json({ error: 'Invalid tactical preset update', details: parsed.error.flatten() });
+    }
+    try {
+      const updated = repo.updateTacticalPreset(req.params.id, parsed.data);
+      if (!updated) return res.status(404).json({ error: 'Tactical preset not found' });
+      return res.json(updated);
+    } catch (err) {
+      return res.status(400).json({
+        error: err instanceof Error ? err.message : 'Failed to update tactical preset',
+      });
+    }
+  });
+
+  app.post('/api/tactical-presets/:id/duplicate', (req, res) => {
+    const customName = typeof req.body?.name === 'string' ? req.body.name : undefined;
+    try {
+      const duplicated = repo.duplicateTacticalPreset(req.params.id, customName);
+      if (!duplicated) return res.status(404).json({ error: 'Tactical preset not found' });
+      return res.status(201).json(duplicated);
+    } catch (err) {
+      return res.status(400).json({
+        error: err instanceof Error ? err.message : 'Failed to duplicate tactical preset',
+      });
+    }
+  });
+
+  app.post('/api/tactical-presets/:id/set-default', (req, res) => {
+    const updated = repo.setDefaultTacticalPreset(req.params.id);
+    if (!updated) return res.status(404).json({ error: 'Tactical preset not found' });
+    return res.json(updated);
+  });
+
+  app.delete('/api/tactical-presets/:id', (req, res) => {
+    const deleted = repo.deleteTacticalPreset(req.params.id);
+    if (!deleted) return res.status(404).json({ error: 'Tactical preset not found' });
+    return res.json({ deleted: true });
+  });
+
   // Opponents
   app.get('/api/opponents', (_req, res) => {
     res.json(repo.listOpponents());
@@ -498,6 +670,45 @@ async function startServer() {
     const deleted = repo.deleteMatch(req.params.id);
     if (!deleted) return res.status(404).json({ error: 'Match not found' });
     return res.json({ deleted: true });
+  });
+
+  // Phase 2.1 — Immutable Match Tactical Snapshots & In-Match Adjustments
+  app.get('/api/matches/:id/tactical-snapshots', (req, res) => {
+    return res.json(repo.listMatchTacticalSnapshots(req.params.id));
+  });
+
+  app.put('/api/matches/:id/tactical-snapshot', (req, res) => {
+    const parsed = matchTacticalSnapshotInputSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return res
+        .status(400)
+        .json({ error: 'Invalid pre-match tactical snapshot payload', details: parsed.error.flatten() });
+    }
+    try {
+      const updated = repo.updatePreMatchTacticalSnapshot(req.params.id, parsed.data);
+      return res.json(updated);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Failed to update tactical snapshot';
+      const status = message.toLowerCase().includes('locked') ? 409 : 400;
+      return res.status(status).json({ error: message });
+    }
+  });
+
+  app.post('/api/matches/:id/tactical-adjustments', (req, res) => {
+    const parsed = matchTacticalSnapshotInputSchema.omit({ sourcePresetId: true }).safeParse(req.body);
+    if (!parsed.success) {
+      return res
+        .status(400)
+        .json({ error: 'Invalid in-match tactical adjustment payload', details: parsed.error.flatten() });
+    }
+    try {
+      const created = repo.createInMatchTacticalAdjustment(req.params.id, parsed.data);
+      return res.status(201).json(created);
+    } catch (err) {
+      return res.status(400).json({
+        error: err instanceof Error ? err.message : 'Failed to save in-match tactical adjustment',
+      });
+    }
   });
 
   // Reports & Feedback
@@ -666,10 +877,25 @@ async function startServer() {
       req.query.teamCategory === 'mens' || req.query.teamCategory === 'womens'
         ? req.query.teamCategory
         : '';
+    const sortBy =
+      typeof req.query.sortBy === 'string' &&
+      ['name', 'code', 'category', 'league', 'nation', 'players'].includes(req.query.sortBy)
+        ? (req.query.sortBy as catalogRepo.ClubSortBy)
+        : 'name';
+    const sortDir = req.query.sortDir === 'desc' ? 'desc' : 'asc';
     const page = parseOptionalInt(req.query.page) ?? 1;
     const pageSize = parseOptionalInt(req.query.pageSize) ?? 40;
     res.json(
-      catalogRepo.searchCatalogClubs({ q, leagueId, nationId, teamCategory, page, pageSize })
+      catalogRepo.searchCatalogClubs({
+        q,
+        leagueId,
+        nationId,
+        teamCategory,
+        sortBy,
+        sortDir,
+        page,
+        pageSize,
+      })
     );
   });
 
@@ -693,9 +919,17 @@ async function startServer() {
         : '';
     const sortBy =
       typeof req.query.sortBy === 'string' &&
-      ['overall', 'potential', 'growth', 'age', 'name', 'pace', 'market_value'].includes(
-        req.query.sortBy
-      )
+      [
+        'overall',
+        'potential',
+        'growth',
+        'age',
+        'name',
+        'pace',
+        'market_value',
+        'position',
+        'club',
+      ].includes(req.query.sortBy)
         ? (req.query.sortBy as catalogRepo.PlayerSearchFilters['sortBy'])
         : 'overall';
     const sortDir = req.query.sortDir === 'asc' ? 'asc' : 'desc';
@@ -872,6 +1106,8 @@ async function startServer() {
     'paused',
     'finalizing',
     'completed',
+    'partial',
+    'failed',
     'recovered',
     'discarded',
   ]);
@@ -893,6 +1129,9 @@ async function startServer() {
     audioEnabled: z.boolean().optional(),
     outputDirectory: z.string().max(500).nullable().optional(),
     integrityStatus: integrityStatusEnum.optional(),
+    aiEligible: z.boolean().optional(),
+    failureReason: z.string().max(1500).nullable().optional(),
+    diagnosticsPath: z.string().max(600).nullable().optional(),
     recoveryNotes: z.string().max(2000).nullable().optional(),
     startedAt: z.string().max(64).nullable().optional(),
     endedAt: z.string().max(64).nullable().optional(),
@@ -908,6 +1147,9 @@ async function startServer() {
     audioEnabled: z.boolean().optional(),
     outputDirectory: z.string().max(500).nullable().optional(),
     integrityStatus: integrityStatusEnum.optional(),
+    aiEligible: z.boolean().optional(),
+    failureReason: z.string().max(1500).nullable().optional(),
+    diagnosticsPath: z.string().max(600).nullable().optional(),
     recoveryNotes: z.string().max(2000).nullable().optional(),
     endedAt: z.string().max(64).nullable().optional(),
   });
@@ -926,6 +1168,12 @@ async function startServer() {
     integrityStatus: integrityStatusEnum.optional(),
     startedAt: z.string().max(64).nullable().optional(),
     endedAt: z.string().max(64).nullable().optional(),
+  });
+
+  const recordingDiagnosticsSaveSchema = z.object({
+    matchId: z.string().uuid(),
+    failureReason: z.string().max(1500).nullable().optional(),
+    payload: z.record(z.string(), z.unknown()),
   });
 
   app.get('/api/recording-sessions', (req, res) => {
@@ -990,6 +1238,34 @@ async function startServer() {
     } catch (err) {
       return res.status(400).json({
         error: err instanceof Error ? err.message : 'Failed to persist recording segment',
+      });
+    }
+  });
+
+  app.get('/api/recording-sessions/:id/diagnostics', (req, res) => {
+    const diag = repo.getRecordingDiagnostics(req.params.id);
+    if (!diag) return res.status(404).json({ error: 'Recording diagnostics not found for this session' });
+    return res.json(diag);
+  });
+
+  app.put('/api/recording-sessions/:id/diagnostics', (req, res) => {
+    const parsed = recordingDiagnosticsSaveSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return res
+        .status(400)
+        .json({ error: 'Invalid recording diagnostics payload', details: parsed.error.flatten() });
+    }
+    try {
+      const saved = repo.saveRecordingDiagnostics({
+        sessionId: req.params.id,
+        matchId: parsed.data.matchId,
+        failureReason: parsed.data.failureReason ?? null,
+        payload: parsed.data.payload as unknown as Parameters<typeof repo.saveRecordingDiagnostics>[0]['payload'],
+      });
+      return res.json(saved);
+    } catch (err) {
+      return res.status(400).json({
+        error: err instanceof Error ? err.message : 'Failed to save recording diagnostics',
       });
     }
   });

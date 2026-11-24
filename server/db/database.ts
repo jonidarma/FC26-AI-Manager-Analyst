@@ -130,10 +130,14 @@ const OPERATIONAL_TABLES = [
   'clubs',
   'career_profiles',
   'players',
+  'tactical_presets',
+  'tactical_preset_assignments',
   'opponents',
   'matches',
+  'match_tactical_snapshots',
   'match_sessions',
   'recording_segments',
+  'recording_diagnostics',
   'evidence_frames',
   'match_observations',
   'tactical_configurations',
@@ -194,7 +198,7 @@ export function getDatabaseMetadata(): {
     storageMode,
     dbDirectory: dataDir,
     sizeBytes,
-    schemaVersion: versionRow?.version ?? 3,
+    schemaVersion: versionRow?.version ?? 4,
     tableCounts,
   };
 }
@@ -210,9 +214,9 @@ export function exportDatabaseBackup(): Record<string, unknown> {
     .get() as { version: number | null };
 
   return {
-    format: 'fc26-ai-manager-backup-v2',
+    format: 'fc26-ai-manager-backup-v4',
     exportedAt: new Date().toISOString(),
-    schemaVersion: versionRow?.version ?? 3,
+    schemaVersion: versionRow?.version ?? 4,
     tables: data,
   };
 }
@@ -222,18 +226,19 @@ export function restoreDatabaseBackup(payload: {
   tables?: Record<string, Array<Record<string, unknown>>>;
 }): void {
   const isV1 = payload.format === 'fc26-ai-manager-backup-v1';
-  const isV2 =
+  const isFullBackup =
     payload.format === 'fc26-ai-manager-backup-v2' ||
-    payload.format === 'fc26-ai-manager-backup-v3';
+    payload.format === 'fc26-ai-manager-backup-v3' ||
+    payload.format === 'fc26-ai-manager-backup-v4';
 
-  if ((!isV1 && !isV2) || !payload.tables) {
+  if ((!isV1 && !isFullBackup) || !payload.tables) {
     throw new Error(
-      'Invalid backup format. Expected fc26-ai-manager-backup-v2 or fc26-ai-manager-backup-v1.'
+      'Invalid backup format. Expected fc26-ai-manager-backup-v4 (or legacy v1/v2/v3).'
     );
   }
 
   const db = getDb();
-  const targetTables = isV2 ? ALLOWED_RESTORE_TABLES : OPERATIONAL_TABLES;
+  const targetTables = isFullBackup ? ALLOWED_RESTORE_TABLES : OPERATIONAL_TABLES;
   const tableColumns = new Map<string, Set<string>>();
   for (const table of targetTables) {
     const info = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;

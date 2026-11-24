@@ -1,17 +1,25 @@
 /**
- * FC26 AI Manager — Phase 2 App-Level Recording Controller (Renderer Singleton)
+ * FC26 AI Manager — Phase 2.1 App-Level Recording Controller (Renderer Singleton)
  *
- * Architectural Guarantee:
+ * Architectural Guarantees:
  * - Owned outside individual React views (subscribed by AppContext) so active recording
  *   continues uninterrupted when the user navigates away from Match Capture or minimizes the app.
  * - Invokes navigator.mediaDevices.getDisplayMedia() synchronously from user action.
- * - Streams MediaRecorder WebM chunks directly as transferable binary ArrayBuffers over
- *   Electron's MessagePort bridge (zero Base64, zero Express JSON video uploads).
- * - Handles pause/resume cleanly by flushing and closing the active MediaRecorder/FFmpeg segment
- *   while preserving the live MediaStream and sessionId, then restarting cleanly on resume.
+ * - Waits deterministically for the preload binary MessagePort handshake (with bounded preload buffering
+ *   so chunk #0 WebM EBML header is never dropped).
+ * - Tracks measured renderer-side diagnostics (MediaStream, video/audio tracks, MediaRecorder state,
+ *   negotiated MIME type, chunks/bytes generated, chunks/bytes transmitted, failed transports) and
+ *   reports them to Electron Main for real-time Diagnostics UI and Startup/Stall Watchdogs.
+ * - Maps finalized manifest status honestly ('completed' | 'partial' | 'failed') — NEVER forces
+ *   a 0-byte or failed session to appear as 'completed'.
  */
 import { desktopBridge } from './desktopBridge';
-import type { CaptureManifest, RecordingTelemetry } from '../types/domain';
+import type {
+  CaptureManifest,
+  RecordingPipelineDiagnostics,
+  RecordingTelemetry,
+  RendererCaptureDiagnostics,
+} from '../types/domain';
 
 export interface StartCaptureOptions {
   matchId: string;
@@ -28,6 +36,52 @@ export interface StartCaptureOptions {
 }
 
 type TelemetryListener = (telemetry: RecordingTelemetry) => void;
+
+export const INITIAL_RENDERER_DIAGNOSTICS: RendererCaptureDiagnostics = {
+  mediaStreamActive: false,
+  videoTrackState: 'none',
+  videoTrackLabel: null,
+  audioTrackState: 'none',
+  mediaRecorderState: 'none',
+  negotiatedMimeType: null,
+  transportPortReady: false,
+  chunksGenerated: 0,
+  bytesGenerated: 0,
+  chunksTransmitted: 0,
+  bytesTransmitted: 0,
+  chunksFailedTransport: 0,
+  lastChunkGeneratedAt: null,
+  lastRendererError: null,
+};
+
+export const INITIAL_PIPELINE_DIAGNOSTICS: RecordingPipelineDiagnostics = {
+  sessionId: null,
+  matchId: null,
+  transportPortAttached: false,
+  transportPortReadyAck: false,
+  chunksReceivedMain: 0,
+  bytesReceivedMain: 0,
+  ffmpegPid: null,
+  ffmpegState: 'idle',
+  ffmpegStdinBytesWritten: 0,
+  ffmpegExitCode: null,
+  ffmpegExitSignal: null,
+  queueSizeChunks: 0,
+  queueSizeBytes: 0,
+  backpressureEvents: 0,
+  droppedChunks: 0,
+  currentOutputFileBytes: 0,
+  completedSegmentsCount: 0,
+  lastChunkReceivedAt: null,
+  startupWatchdogState: 'idle',
+  stallWatchdogState: 'idle',
+  startupTimeoutSeconds: 10,
+  stallTimeoutSeconds: 18,
+  lastFfmpegError: null,
+  lastPipelineError: null,
+  diagnosticsLogPath: null,
+  renderer: { ...INITIAL_RENDERER_DIAGNOSTICS },
+};
 
 export const INITIAL_RECORDING_TELEMETRY: RecordingTelemetry = {
   uiStatus: 'idle',
@@ -58,10 +112,13 @@ export const INITIAL_RECORDING_TELEMETRY: RecordingTelemetry = {
   backpressureActive: false,
   outputDirectory: null,
   integrityStatus: 'pending',
+  aiEligible: false,
+  failureReason: null,
   maxRecordingWarning: false,
   lastWarning: null,
   lastError: null,
   segments: [],
+  diagnostics: { ...INITIAL_PIPELINE_DIAGNOSTICS, renderer: { ...INITIAL_RENDERER_DIAGNOSTICS } },
 };
 
 function selectSupportedMediaRecorderMime(hasAudio: boolean): string {
@@ -77,11 +134,7 @@ function selectSupportedMediaRecorderMime(hasAudio: boolean): string {
         'video/webm;codecs=vp8',
         'video/webm',
       ]
-    : [
-        'video/webm;codecs=vp9',
-        'video/webm;codecs=vp8',
-        'video/webm',
-      ];
+    : ['video/webm;codecs=vp9', 'video/webm;codecs=vp8', 'video/webm'];
 
   for (const mime of candidates) {
     if (MediaRecorder.isTypeSupported(mime)) {
@@ -91,8 +144,35 @@ function selectSupportedMediaRecorderMime(hasAudio: boolean): string {
   return 'video/webm';
 }
 
+function mapManifestStatusToUiStatus(
+  status: CaptureManifest['status']
+): RecordingTelemetry['uiStatus'] {
+  switch (status) {
+    case 'completed':
+      return 'completed';
+    case 'partial':
+      return 'partial';
+    case 'recovered':
+      return 'recovered';
+    case 'failed':
+      return 'failed';
+    case 'discarded':
+      return 'discarded';
+    case 'paused':
+      return 'paused';
+    case 'finalizing':
+      return 'finalizing';
+    default:
+      return 'recording';
+  }
+}
+
 class RecordingController {
-  private telemetry: RecordingTelemetry = { ...INITIAL_RECORDING_TELEMETRY };
+  private telemetry: RecordingTelemetry = {
+    ...INITIAL_RECORDING_TELEMETRY,
+    diagnostics: { ...INITIAL_PIPELINE_DIAGNOSTICS, renderer: { ...INITIAL_RENDERER_DIAGNOSTICS } },
+  };
+  private rendererDiagnostics: RendererCaptureDiagnostics = { ...INITIAL_RENDERER_DIAGNOSTICS };
   private listeners = new Set<TelemetryListener>();
   private mediaStream: MediaStream | null = null;
   private mediaRecorder: MediaRecorder | null = null;
@@ -104,6 +184,8 @@ class RecordingController {
   private initializedBridgeListeners = false;
   private lastCompletedManifest: CaptureManifest | null = null;
   private intentionalStop = false;
+  private portReadyWaiters = new Map<string, Array<() => void>>();
+  private diagSyncTimer: number | null = null;
 
   public ensureInitialized(): void {
     if (this.initializedBridgeListeners) return;
@@ -111,11 +193,54 @@ class RecordingController {
 
     if (desktopBridge.isElectron()) {
       desktopBridge.onRecordingTelemetry((incoming) => {
-        this.telemetry = incoming;
+        // Merge freshest local renderer counters if this telemetry is for our active session
+        const mergedRenderer =
+          incoming.sessionId && incoming.sessionId === this.activeSessionId
+            ? {
+                ...incoming.diagnostics?.renderer,
+                ...this.rendererDiagnostics,
+              }
+            : incoming.diagnostics?.renderer ?? { ...INITIAL_RENDERER_DIAGNOSTICS };
+
+        this.telemetry = {
+          ...incoming,
+          diagnostics: {
+            ...(incoming.diagnostics ?? INITIAL_PIPELINE_DIAGNOSTICS),
+            renderer: mergedRenderer,
+          },
+        };
+
+        // If main-process watchdog terminated/failed the session, stop local MediaRecorder & stream cleanly
+        if (
+          this.activeSessionId &&
+          incoming.sessionId === this.activeSessionId &&
+          (incoming.uiStatus === 'failed' ||
+            incoming.uiStatus === 'partial' ||
+            incoming.uiStatus === 'completed' ||
+            incoming.uiStatus === 'discarded')
+        ) {
+          this.intentionalStop = true;
+          this.stopDiagnosticsSyncTimer();
+          this.cleanupLocalMedia();
+          this.activeSessionId = null;
+        }
+
         this.emit();
       });
 
       desktopBridge.onTransportControl((msg) => {
+        if (msg.type === 'port-ready') {
+          if (msg.sessionId === this.activeSessionId) {
+            this.rendererDiagnostics.transportPortReady = true;
+          }
+          const waiters = this.portReadyWaiters.get(msg.sessionId);
+          if (waiters) {
+            this.portReadyWaiters.delete(msg.sessionId);
+            for (const resolve of waiters) resolve();
+          }
+          return;
+        }
+
         if (msg.type === 'backpressure') {
           this.telemetry = {
             ...this.telemetry,
@@ -173,11 +298,108 @@ class RecordingController {
   }
 
   private updateLocalTelemetry(patch: Partial<RecordingTelemetry>): void {
-    this.telemetry = { ...this.telemetry, ...patch };
+    this.telemetry = {
+      ...this.telemetry,
+      ...patch,
+      diagnostics: {
+        ...this.telemetry.diagnostics,
+        ...(patch.diagnostics ?? {}),
+        renderer: { ...this.rendererDiagnostics },
+      },
+    };
     this.emit();
   }
 
+  private resetRendererDiagnostics(): void {
+    this.rendererDiagnostics = { ...INITIAL_RENDERER_DIAGNOSTICS };
+  }
+
+  private refreshTrackDiagnostics(): void {
+    const stream = this.mediaStream;
+    const videoTrack = stream?.getVideoTracks()[0];
+    const audioTrack = stream?.getAudioTracks()[0];
+
+    this.rendererDiagnostics.mediaStreamActive = Boolean(stream?.active);
+    this.rendererDiagnostics.videoTrackState = videoTrack
+      ? videoTrack.readyState === 'live'
+        ? 'live'
+        : 'ended'
+      : 'none';
+    this.rendererDiagnostics.videoTrackLabel = videoTrack?.label ?? null;
+    this.rendererDiagnostics.audioTrackState = audioTrack
+      ? audioTrack.readyState === 'live'
+        ? 'live'
+        : 'ended'
+      : 'none';
+    this.rendererDiagnostics.mediaRecorderState = this.mediaRecorder
+      ? this.mediaRecorder.state
+      : 'none';
+    this.rendererDiagnostics.transportPortReady = this.activeSessionId
+      ? desktopBridge.isTransportPortReady(this.activeSessionId)
+      : false;
+  }
+
+  private syncRendererDiagnosticsToMain(): void {
+    if (!this.activeSessionId || !desktopBridge.isElectron()) return;
+    this.refreshTrackDiagnostics();
+    void desktopBridge
+      .reportRendererDiagnostics({
+        sessionId: this.activeSessionId,
+        renderer: { ...this.rendererDiagnostics },
+      })
+      .catch(() => {
+        // ignore transient IPC error
+      });
+  }
+
+  private startDiagnosticsSyncTimer(): void {
+    this.stopDiagnosticsSyncTimer();
+    this.diagSyncTimer = window.setInterval(() => {
+      this.syncRendererDiagnosticsToMain();
+    }, 1000);
+  }
+
+  private stopDiagnosticsSyncTimer(): void {
+    if (this.diagSyncTimer !== null) {
+      window.clearInterval(this.diagSyncTimer);
+      this.diagSyncTimer = null;
+    }
+  }
+
+  private waitForTransportPortReady(sessionId: string, timeoutMs = 1500): Promise<boolean> {
+    if (desktopBridge.isTransportPortReady(sessionId)) {
+      this.rendererDiagnostics.transportPortReady = true;
+      return Promise.resolve(true);
+    }
+
+    return new Promise((resolve) => {
+      let settled = false;
+      const done = (ready: boolean) => {
+        if (settled) return;
+        settled = true;
+        window.clearTimeout(timer);
+        if (ready) {
+          this.rendererDiagnostics.transportPortReady = true;
+        }
+        resolve(ready);
+      };
+
+      const list = this.portReadyWaiters.get(sessionId) ?? [];
+      list.push(() => done(true));
+      this.portReadyWaiters.set(sessionId, list);
+
+      const timer = window.setTimeout(() => {
+        const current = this.portReadyWaiters.get(sessionId);
+        if (current) {
+          this.portReadyWaiters.delete(sessionId);
+        }
+        done(desktopBridge.isTransportPortReady(sessionId));
+      }, timeoutMs);
+    });
+  }
+
   private cleanupLocalMedia(): void {
+    this.stopDiagnosticsSyncTimer();
     if (this.mediaRecorder) {
       try {
         if (this.mediaRecorder.state !== 'inactive') {
@@ -200,6 +422,7 @@ class RecordingController {
       }
       this.mediaStream = null;
     }
+    this.refreshTrackDiagnostics();
   }
 
   private startMediaRecorderOnCurrentStream(sessionId: string): void {
@@ -209,6 +432,7 @@ class RecordingController {
 
     const mimeType = selectSupportedMediaRecorderMime(this.activeAudio);
     this.activeMimeType = mimeType;
+    this.rendererDiagnostics.negotiatedMimeType = mimeType;
 
     const recorder = new MediaRecorder(this.mediaStream, {
       mimeType,
@@ -217,13 +441,37 @@ class RecordingController {
 
     recorder.ondataavailable = (event: BlobEvent) => {
       if (!event.data || event.data.size === 0) return;
+
+      const chunkSize = event.data.size;
+      this.rendererDiagnostics.chunksGenerated += 1;
+      this.rendererDiagnostics.bytesGenerated += chunkSize;
+      this.rendererDiagnostics.lastChunkGeneratedAt = new Date().toISOString();
+
       const transferPromise = event.data
         .arrayBuffer()
         .then((buf) => {
-          desktopBridge.sendRecordingChunk(sessionId, buf);
+          const sendRes = desktopBridge.sendRecordingChunk(sessionId, buf);
+          if (sendRes.ok) {
+            this.rendererDiagnostics.chunksTransmitted += 1;
+            this.rendererDiagnostics.bytesTransmitted += sendRes.bytes;
+          } else {
+            this.rendererDiagnostics.chunksFailedTransport += 1;
+            this.rendererDiagnostics.lastRendererError =
+              sendRes.error ?? 'Failed to transmit binary recording chunk to preload transport.';
+            this.updateLocalTelemetry({
+              lastWarning: this.rendererDiagnostics.lastRendererError,
+            });
+          }
         })
-        .catch(() => {
-          // ignore transient chunk read error
+        .catch((err) => {
+          this.rendererDiagnostics.chunksFailedTransport += 1;
+          this.rendererDiagnostics.lastRendererError =
+            err instanceof Error
+              ? `Chunk ArrayBuffer read failed: ${err.message}`
+              : 'Chunk ArrayBuffer read failed.';
+          this.updateLocalTelemetry({
+            lastWarning: this.rendererDiagnostics.lastRendererError,
+          });
         })
         .finally(() => {
           this.pendingChunkTransfers.delete(transferPromise);
@@ -231,10 +479,15 @@ class RecordingController {
       this.pendingChunkTransfers.add(transferPromise);
     };
 
-    recorder.onerror = () => {
+    recorder.onerror = (ev) => {
       if (!this.intentionalStop) {
+        const errMsg =
+          (ev as Event & { error?: DOMException }).error?.message ||
+          'Browser MediaRecorder reported an encoding error.';
+        this.rendererDiagnostics.lastRendererError = errMsg;
+        this.syncRendererDiagnosticsToMain();
         this.updateLocalTelemetry({
-          lastError: 'Browser MediaRecorder reported an encoding error.',
+          lastError: errMsg,
         });
       }
     };
@@ -242,9 +495,13 @@ class RecordingController {
     this.mediaRecorder = recorder;
     // 1000ms timeslice gives low latency and bounded chunk sizes for FFmpeg stdin
     recorder.start(1000);
+    this.refreshTrackDiagnostics();
+    this.syncRendererDiagnosticsToMain();
+    this.startDiagnosticsSyncTimer();
   }
 
   private async stopCurrentMediaRecorderAndFlush(sessionId: string): Promise<void> {
+    this.stopDiagnosticsSyncTimer();
     const recorder = this.mediaRecorder;
     this.mediaRecorder = null;
 
@@ -272,6 +529,7 @@ class RecordingController {
       await Promise.allSettled(Array.from(this.pendingChunkTransfers));
     }
 
+    this.syncRendererDiagnosticsToMain();
     desktopBridge.endRecordingTransport(sessionId);
   }
 
@@ -279,18 +537,25 @@ class RecordingController {
     this.ensureInitialized();
 
     if (!desktopBridge.isElectron()) {
-      throw new Error('Native video recording is only available in the Windows Electron desktop application.');
+      throw new Error(
+        'Native video recording is only available in the Windows Electron desktop application.'
+      );
     }
     if (this.isRecordingOrBusy()) {
-      throw new Error('A recording session is already active. Stop or discard it before starting a new one.');
+      throw new Error(
+        'A recording session is already active. Stop or discard it before starting a new one.'
+      );
     }
 
     this.intentionalStop = false;
     this.lastCompletedManifest = null;
+    this.resetRendererDiagnostics();
     this.updateLocalTelemetry({
       uiStatus: 'initializing',
       lastError: null,
       lastWarning: null,
+      failureReason: null,
+      aiEligible: false,
     });
 
     try {
@@ -304,7 +569,8 @@ class RecordingController {
 
       if (!auth.authorized) {
         throw new Error(
-          auth.reason ?? 'Selected capture source is no longer available. Refresh sources and select again.'
+          auth.reason ??
+            'Selected capture source is no longer available. Refresh sources and select again.'
         );
       }
 
@@ -333,6 +599,8 @@ class RecordingController {
       this.activeBitrateKbps = options.bitrateKbps;
       this.activeAudio = audioActive;
       this.activeMimeType = mimeType;
+      this.rendererDiagnostics.negotiatedMimeType = mimeType;
+      this.refreshTrackDiagnostics();
 
       // Step 3: Start Main Process FFmpeg session & attach binary MessagePort
       const started = await desktopBridge.startRecordingSession({
@@ -360,8 +628,8 @@ class RecordingController {
         void this.handleStreamEndedUnexpectedly(sid);
       };
 
-      // Allow transferred MessagePort event to deliver to preload before first chunk
-      await new Promise((r) => window.setTimeout(r, 60));
+      // Wait deterministically for preload MessagePort attachment (preload also buffers early chunks)
+      await this.waitForTransportPortReady(started.sessionId, 1500);
       this.startMediaRecorderOnCurrentStream(started.sessionId);
 
       return started.manifest;
@@ -369,10 +637,13 @@ class RecordingController {
       this.cleanupLocalMedia();
       this.activeSessionId = null;
       const message = err instanceof Error ? err.message : 'Failed to start recording.';
+      this.rendererDiagnostics.lastRendererError = message;
       this.updateLocalTelemetry({
         uiStatus: 'failed',
         ffmpegStatus: 'error',
         lastError: message,
+        failureReason: message,
+        aiEligible: false,
       });
       throw err;
     }
@@ -392,11 +663,17 @@ class RecordingController {
       if (res.manifest) {
         this.lastCompletedManifest = res.manifest;
       }
+      if (res.telemetry) {
+        this.telemetry = res.telemetry;
+        this.emit();
+        return;
+      }
       this.updateLocalTelemetry({
-        uiStatus: 'interrupted',
+        uiStatus: res.manifest?.status === 'failed' ? 'failed' : 'interrupted',
         sourceAvailable: false,
         lastError:
-          'Capture source window closed during recording. Completed segments were saved and verified.',
+          res.manifest?.failureReason ??
+          'Capture source window closed during recording. Any valid segments were saved and verified.',
       });
     } catch {
       this.updateLocalTelemetry({
@@ -440,7 +717,7 @@ class RecordingController {
     this.telemetry = updated;
     this.emit();
 
-    await new Promise((r) => window.setTimeout(r, 60));
+    await this.waitForTransportPortReady(sessionId, 1500);
     this.startMediaRecorderOnCurrentStream(sessionId);
   }
 
@@ -464,16 +741,31 @@ class RecordingController {
     this.telemetry = result.manifest
       ? {
           ...result.telemetry,
-          uiStatus: 'completed',
+          uiStatus: mapManifestStatusToUiStatus(result.manifest.status),
           sessionId: result.manifest.sessionId,
           matchId: result.manifest.matchId,
           half: result.manifest.half,
           activeDurationSeconds: result.manifest.activeDurationSeconds,
-          completedSegmentCount: result.manifest.segments.filter((s) => s.finalized).length,
+          completedSegmentCount: result.manifest.segments.filter(
+            (s) =>
+              (s.finalized || s.status === 'finalized' || s.status === 'recovered') &&
+              s.sizeBytes > 0 &&
+              s.durationSeconds > 0
+          ).length,
           totalBytes: result.manifest.totalBytes,
           outputDirectory: result.manifest.outputDirectory,
           integrityStatus: result.manifest.integrityStatus,
+          aiEligible: result.manifest.aiEligible,
+          failureReason: result.manifest.failureReason,
+          lastError:
+            result.manifest.status === 'failed'
+              ? result.manifest.failureReason ?? result.telemetry.lastError
+              : result.telemetry.lastError,
           segments: result.manifest.segments,
+          diagnostics: {
+            ...(result.telemetry.diagnostics ?? INITIAL_PIPELINE_DIAGNOSTICS),
+            renderer: { ...this.rendererDiagnostics },
+          },
         }
       : result.telemetry;
     this.emit();
@@ -493,7 +785,12 @@ class RecordingController {
     if (this.lastCompletedManifest?.sessionId === sessionId) {
       this.lastCompletedManifest = null;
     }
-    this.telemetry = { ...INITIAL_RECORDING_TELEMETRY, uiStatus: 'discarded' };
+    this.resetRendererDiagnostics();
+    this.telemetry = {
+      ...INITIAL_RECORDING_TELEMETRY,
+      uiStatus: 'discarded',
+      diagnostics: { ...INITIAL_PIPELINE_DIAGNOSTICS, renderer: { ...INITIAL_RENDERER_DIAGNOSTICS } },
+    };
     this.emit();
     return res;
   }

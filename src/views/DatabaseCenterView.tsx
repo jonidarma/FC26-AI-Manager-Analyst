@@ -10,10 +10,13 @@ import {
   UserPlus,
   X,
 } from 'lucide-react';
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import { SortableTh } from '../components/common/SortableTh';
 import { TacticalPitchSVG } from '../components/pitch/TacticalPitchSVG';
 import { useApp } from '../context/AppContext';
+import { type SortDirection, useTableSort } from '../hooks/useTableSort';
 import { desktopBridge } from '../services/desktopBridge';
+import { hasDistinctFullName, resolvePlayerDisplayName } from '../utils/playerDisplayName';
 import type {
   CatalogClub,
   CatalogCompatibilityRow,
@@ -43,6 +46,55 @@ type DatabaseTab =
   | 'roles'
   | 'focuses'
   | 'imports';
+
+type PlayerServerSortKey =
+  | 'overall'
+  | 'potential'
+  | 'growth'
+  | 'age'
+  | 'name'
+  | 'pace'
+  | 'market_value'
+  | 'position'
+  | 'club';
+
+type ClubServerSortKey = 'name' | 'code' | 'category' | 'league' | 'nation' | 'players';
+type CompletenessSortKey = 'dataset' | 'records' | 'status';
+type LeagueSortKey = 'league' | 'country' | 'tier' | 'category' | 'clubs' | 'players';
+type NationSortKey = 'displayName' | 'sourceName' | 'iso' | 'region' | 'leagues' | 'clubs';
+type PositionSortKey = 'code' | 'label' | 'category' | 'tacticalLine' | 'roles';
+type CompatSortKey = 'position' | 'role' | 'focus' | 'evidence';
+type SamplePreviewSortKey =
+  | 'externalId'
+  | 'fullName'
+  | 'position'
+  | 'clubNation'
+  | 'overall'
+  | 'value'
+  | 'extAttrs';
+type ImportRunSortKey = 'dataset' | 'file' | 'status' | 'counts' | 'checksum' | 'timestamp';
+
+const PLAYER_SORT_PRESETS: Array<{ value: string; label: string }> = [
+  { value: 'overall:desc', label: 'OVR High → Low' },
+  { value: 'potential:desc', label: 'POT High → Low' },
+  { value: 'growth:desc', label: 'Growth High → Low' },
+  { value: 'age:asc', label: 'Age Youngest' },
+  { value: 'pace:desc', label: 'Pace High → Low' },
+  { value: 'market_value:desc', label: 'Value High → Low' },
+  { value: 'name:asc', label: 'Name A → Z' },
+];
+
+const PLAYER_SORT_FIELD_LABELS: Record<PlayerServerSortKey, string> = {
+  overall: 'OVR',
+  potential: 'POT',
+  growth: 'Growth',
+  age: 'Age',
+  name: 'Player',
+  pace: 'Pace',
+  market_value: 'Value',
+  position: 'Pos',
+  club: 'Club',
+};
 
 const TABS: Array<{ id: DatabaseTab; label: string }> = [
   { id: 'overview', label: 'Overview' },
@@ -116,10 +168,8 @@ export function DatabaseCenterView() {
   const [playerMinPot, setPlayerMinPot] = useState('');
   const [playerMaxAge, setPlayerMaxAge] = useState('');
   const [playerFoot, setPlayerFoot] = useState<'' | 'Right' | 'Left' | 'Both'>('');
-  const [playerSortBy, setPlayerSortBy] = useState<
-    'overall' | 'potential' | 'growth' | 'age' | 'name' | 'pace' | 'market_value'
-  >('overall');
-  const [playerSortDir, setPlayerSortDir] = useState<'asc' | 'desc'>('desc');
+  const [playerSortBy, setPlayerSortBy] = useState<PlayerServerSortKey>('overall');
+  const [playerSortDir, setPlayerSortDir] = useState<SortDirection>('desc');
   const [playerPage, setPlayerPage] = useState(1);
   const [playerResults, setPlayerResults] = useState<PaginatedResult<CatalogPlayer>>({
     items: [],
@@ -135,6 +185,8 @@ export function DatabaseCenterView() {
   const [clubQuery, setClubQuery] = useState('');
   const [clubLeagueId, setClubLeagueId] = useState('');
   const [clubCategory, setClubCategory] = useState<'' | 'mens' | 'womens'>('');
+  const [clubSortBy, setClubSortBy] = useState<ClubServerSortKey>('name');
+  const [clubSortDir, setClubSortDir] = useState<SortDirection>('asc');
   const [clubPage, setClubPage] = useState(1);
   const [clubResults, setClubResults] = useState<PaginatedResult<CatalogClub>>({
     items: [],
@@ -259,6 +311,8 @@ export function DatabaseCenterView() {
         q: clubQuery || undefined,
         leagueId: clubLeagueId || undefined,
         teamCategory: clubCategory || undefined,
+        sortBy: clubSortBy,
+        sortDir: clubSortDir,
         page: clubPage,
         pageSize: 30,
       });
@@ -266,13 +320,33 @@ export function DatabaseCenterView() {
     } catch (err) {
       notify('error', err instanceof Error ? err.message : 'Failed to search clubs');
     }
-  }, [clubQuery, clubLeagueId, clubCategory, clubPage, notify]);
+  }, [clubQuery, clubLeagueId, clubCategory, clubSortBy, clubSortDir, clubPage, notify]);
 
   useEffect(() => {
     if (activeTab === 'clubs') {
       void loadClubs();
     }
   }, [activeTab, loadClubs]);
+
+  function handlePlayerHeaderSort(key: PlayerServerSortKey, defaultDir: SortDirection = 'asc') {
+    if (playerSortBy === key) {
+      setPlayerSortDir((prev) => (prev === 'asc' ? 'desc' : 'asc'));
+    } else {
+      setPlayerSortBy(key);
+      setPlayerSortDir(defaultDir);
+    }
+    setPlayerPage(1);
+  }
+
+  function handleClubHeaderSort(key: ClubServerSortKey, defaultDir: SortDirection = 'asc') {
+    if (clubSortBy === key) {
+      setClubSortDir((prev) => (prev === 'asc' ? 'desc' : 'asc'));
+    } else {
+      setClubSortBy(key);
+      setClubSortDir(defaultDir);
+    }
+    setClubPage(1);
+  }
 
   function togglePlayerPos(pos: string) {
     setPlayerPage(1);
@@ -393,24 +467,32 @@ export function DatabaseCenterView() {
   const selectedFormation =
     filteredFormations.find((f) => f.id === selectedFormationId) ?? filteredFormations[0] ?? null;
 
-  const filteredLeagues = leagues.filter((l) => {
-    const matchQ =
-      !leagueQuery.trim() ||
-      l.name.toLowerCase().includes(leagueQuery.toLowerCase()) ||
-      l.countryName.toLowerCase().includes(leagueQuery.toLowerCase());
-    const matchCat = !leagueCategory || l.category === leagueCategory;
-    return matchQ && matchCat;
-  });
+  const filteredLeagues = useMemo(
+    () =>
+      leagues.filter((l) => {
+        const matchQ =
+          !leagueQuery.trim() ||
+          l.name.toLowerCase().includes(leagueQuery.toLowerCase()) ||
+          l.countryName.toLowerCase().includes(leagueQuery.toLowerCase());
+        const matchCat = !leagueCategory || l.category === leagueCategory;
+        return matchQ && matchCat;
+      }),
+    [leagues, leagueQuery, leagueCategory]
+  );
 
-  const filteredNations = nations.filter((n) => {
-    const matchQ =
-      !nationQuery.trim() ||
-      n.displayName.toLowerCase().includes(nationQuery.toLowerCase()) ||
-      n.sourceName.toLowerCase().includes(nationQuery.toLowerCase()) ||
-      n.isoCode.toLowerCase().includes(nationQuery.toLowerCase());
-    const matchReg = !nationRegion || n.region === nationRegion;
-    return matchQ && matchReg;
-  });
+  const filteredNations = useMemo(
+    () =>
+      nations.filter((n) => {
+        const matchQ =
+          !nationQuery.trim() ||
+          n.displayName.toLowerCase().includes(nationQuery.toLowerCase()) ||
+          n.sourceName.toLowerCase().includes(nationQuery.toLowerCase()) ||
+          n.isoCode.toLowerCase().includes(nationQuery.toLowerCase());
+        const matchReg = !nationRegion || n.region === nationRegion;
+        return matchQ && matchReg;
+      }),
+    [nations, nationQuery, nationRegion]
+  );
 
   const filteredRoles = roles.filter((r) => {
     const matchPos = !rolePosFilter || r.eligiblePositions.includes(rolePosFilter);
@@ -418,11 +500,205 @@ export function DatabaseCenterView() {
     return matchPos && matchNew;
   });
 
-  const filteredCompat = compatMatrix.filter((row) => {
-    const matchPos = !compatPosFilter || row.positionCode === compatPosFilter;
-    const matchRole = !compatRoleFilter || row.roleName === compatRoleFilter;
-    return matchPos && matchRole;
-  });
+  const filteredCompat = useMemo(
+    () =>
+      compatMatrix.filter((row) => {
+        const matchPos = !compatPosFilter || row.positionCode === compatPosFilter;
+        const matchRole = !compatRoleFilter || row.roleName === compatRoleFilter;
+        return matchPos && matchRole;
+      }),
+    [compatMatrix, compatPosFilter, compatRoleFilter]
+  );
+
+  // Table 6a: Catalog Completeness rows
+  const completenessRows = useMemo(() => {
+    if (!overview) return [];
+    const items: Array<{
+      key: keyof CatalogOverview['completeness'];
+      label: string;
+      count: number;
+      statusText: string;
+      tone: string;
+    }> = (
+      [
+        ['positions', 'Player Positions', overview.counts.positions],
+        ['roles', 'FC IQ Player Roles', overview.counts.roles],
+        ['focuses', 'FC IQ Player Focuses', overview.counts.focuses],
+        ['formations', 'Tactical Formations', overview.counts.formations],
+        ['nations', 'Nations', overview.counts.nations],
+        ['leagues', 'Leagues', overview.counts.leagues],
+        ['clubs', 'Clubs (Men & Women)', overview.counts.clubs],
+        ['players', 'Career Mode Players', overview.counts.players],
+      ] as Array<[keyof CatalogOverview['completeness'], string, number]>
+    ).map(([key, label, count]) => ({
+      key,
+      label,
+      count,
+      statusText: COMPLETENESS_LABEL[overview.completeness[key]].text,
+      tone: COMPLETENESS_LABEL[overview.completeness[key]].tone,
+    }));
+    return items;
+  }, [overview]);
+
+  const completenessAccessors = useMemo<
+    Record<CompletenessSortKey, (row: (typeof completenessRows)[number]) => string | number | null>
+  >(
+    () => ({
+      dataset: (r) => r.label,
+      records: (r) => r.count,
+      status: (r) => r.statusText,
+    }),
+    []
+  );
+  const {
+    sortedRows: sortedCompletenessRows,
+    sortKey: completenessSortKey,
+    sortDir: completenessSortDir,
+    toggleSort: toggleCompletenessSort,
+  } = useTableSort(completenessRows, completenessAccessors);
+
+  // Table 6d: Leagues
+  const leagueAccessors = useMemo<
+    Record<LeagueSortKey, (l: CatalogLeague) => string | number | null>
+  >(
+    () => ({
+      league: (l) => l.name,
+      country: (l) => l.countryName || null,
+      tier: (l) => l.tier,
+      category: (l) => (l.category === 'womens' ? "Women's" : "Men's"),
+      clubs: (l) => l.clubCount ?? 0,
+      players: (l) => l.playerCount ?? 0,
+    }),
+    []
+  );
+  const {
+    sortedRows: sortedLeagues,
+    sortKey: leagueSortKey,
+    sortDir: leagueSortDir,
+    toggleSort: toggleLeagueSort,
+  } = useTableSort(filteredLeagues, leagueAccessors);
+
+  // Table 6e: Nations
+  const nationAccessors = useMemo<
+    Record<NationSortKey, (n: CatalogNation) => string | number | null>
+  >(
+    () => ({
+      displayName: (n) => n.displayName,
+      sourceName: (n) => n.sourceName,
+      iso: (n) => n.isoCode || null,
+      region: (n) => n.region || null,
+      leagues: (n) => n.leagueCount ?? 0,
+      clubs: (n) => n.clubCount ?? 0,
+    }),
+    []
+  );
+  const {
+    sortedRows: sortedNations,
+    sortKey: nationSortKey,
+    sortDir: nationSortDir,
+    toggleSort: toggleNationSort,
+  } = useTableSort(filteredNations, nationAccessors);
+
+  // Table 6f: Positions
+  const positionsWithRoles = useMemo(
+    () =>
+      positions.map((pos) => ({
+        ...pos,
+        posRoles: roles
+          .filter((r) => r.eligiblePositions.includes(pos.code))
+          .map((r) => r.name),
+      })),
+    [positions, roles]
+  );
+  const positionAccessors = useMemo<
+    Record<PositionSortKey, (pos: (typeof positionsWithRoles)[number]) => string | number | null>
+  >(
+    () => ({
+      code: (p) => p.code,
+      label: (p) => p.label,
+      category: (p) => p.category,
+      tacticalLine: (p) => p.tacticalLine,
+      roles: (p) => p.posRoles.length,
+    }),
+    []
+  );
+  const {
+    sortedRows: sortedPositions,
+    sortKey: positionSortKey,
+    sortDir: positionSortDir,
+    toggleSort: togglePositionSort,
+  } = useTableSort(positionsWithRoles, positionAccessors);
+
+  // Table 6g: Role & Focus Compatibility Matrix
+  const compatAccessors = useMemo<
+    Record<CompatSortKey, (row: CatalogCompatibilityRow) => string | number | null>
+  >(
+    () => ({
+      position: (r) => r.positionCode,
+      role: (r) => r.roleName,
+      focus: (r) => r.focusName,
+      evidence: (r) => r.evidence,
+    }),
+    []
+  );
+  const {
+    sortedRows: sortedCompat,
+    sortKey: compatSortKey,
+    sortDir: compatSortDir,
+    toggleSort: toggleCompatSort,
+  } = useTableSort(filteredCompat, compatAccessors);
+
+  // Table 6h: Normalized Sample Players Preview
+  const samplePreviewRows = useMemo(
+    () =>
+      importPreview?.datasetType === 'players' ? importPreview.sampleRows.slice(0, 8) : [],
+    [importPreview]
+  );
+  const samplePreviewAccessors = useMemo<
+    Record<SamplePreviewSortKey, (row: Record<string, unknown>) => string | number | null>
+  >(
+    () => ({
+      externalId: (row) => String(row.externalSourceId ?? ''),
+      fullName: (row) => String(row.fullName ?? ''),
+      position: (row) => String(row.primaryPosition ?? ''),
+      clubNation: (row) => String(row.clubNameRaw || row.nationNameRaw || ''),
+      overall: (row) => (typeof row.overallRating === 'number' ? row.overallRating : null),
+      value: (row) => (typeof row.marketValueEur === 'number' ? row.marketValueEur : null),
+      extAttrs: (row) =>
+        typeof row.extendedAttributeCount === 'number' ? row.extendedAttributeCount : 0,
+    }),
+    []
+  );
+  const {
+    sortedRows: sortedSamplePreviewRows,
+    sortKey: samplePreviewSortKey,
+    sortDir: samplePreviewSortDir,
+    toggleSort: toggleSamplePreviewSort,
+  } = useTableSort(samplePreviewRows, samplePreviewAccessors);
+
+  // Table 6i: Import & Update History
+  const importRunAccessors = useMemo<
+    Record<ImportRunSortKey, (run: CatalogImportRun) => string | number | null>
+  >(
+    () => ({
+      dataset: (r) => r.datasetType,
+      file: (r) => r.fileName,
+      status: (r) => r.status,
+      counts: (r) => r.insertedCount + r.updatedCount,
+      checksum: (r) => r.checksum,
+      timestamp: (r) => r.startedAt,
+    }),
+    []
+  );
+  const {
+    sortedRows: sortedImportRuns,
+    sortKey: importRunSortKey,
+    sortDir: importRunSortDir,
+    toggleSort: toggleImportRunSort,
+  } = useTableSort(importRuns, importRunAccessors, { key: 'timestamp', dir: 'desc' });
+
+  const playerSortPresetKey = `${playerSortBy}:${playerSortDir}`;
+  const isCustomPlayerSort = !PLAYER_SORT_PRESETS.some((p) => p.value === playerSortPresetKey);
 
   return (
     <div className="space-y-6">
@@ -547,37 +823,46 @@ export function DatabaseCenterView() {
               <table className="w-full text-left text-[13px]">
                 <thead className="bg-[#161A22] text-[#8A94A6] border-b border-white/[0.08]">
                   <tr>
-                    <th className="px-5 py-2.5 font-medium">Dataset</th>
-                    <th className="px-5 py-2.5 font-medium">Records</th>
-                    <th className="px-5 py-2.5 font-medium">Status</th>
+                    <SortableTh
+                      label="Dataset"
+                      columnKey="dataset"
+                      activeKey={completenessSortKey}
+                      direction={completenessSortDir}
+                      onSort={toggleCompletenessSort}
+                      className="px-5 py-2.5 font-medium"
+                    />
+                    <SortableTh
+                      label="Records"
+                      columnKey="records"
+                      activeKey={completenessSortKey}
+                      direction={completenessSortDir}
+                      onSort={toggleCompletenessSort}
+                      defaultDir="desc"
+                      className="px-5 py-2.5 font-medium"
+                    />
+                    <SortableTh
+                      label="Status"
+                      columnKey="status"
+                      activeKey={completenessSortKey}
+                      direction={completenessSortDir}
+                      onSort={toggleCompletenessSort}
+                      className="px-5 py-2.5 font-medium"
+                    />
                     <th className="px-5 py-2.5 font-medium text-right">Export</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-white/[0.06]">
-                  {(
-                    [
-                      ['positions', 'Player Positions', overview.counts.positions],
-                      ['roles', 'FC IQ Player Roles', overview.counts.roles],
-                      ['focuses', 'FC IQ Player Focuses', overview.counts.focuses],
-                      ['formations', 'Tactical Formations', overview.counts.formations],
-                      ['nations', 'Nations', overview.counts.nations],
-                      ['leagues', 'Leagues', overview.counts.leagues],
-                      ['clubs', 'Clubs (Men & Women)', overview.counts.clubs],
-                      ['players', 'Career Mode Players', overview.counts.players],
-                    ] as Array<[keyof CatalogOverview['completeness'], string, number]>
-                  ).map(([key, label, count]) => (
-                    <tr key={key} className="hover:bg-white/[0.02]">
-                      <td className="px-5 py-2.5 font-medium text-white">{label}</td>
+                  {sortedCompletenessRows.map((row) => (
+                    <tr key={row.key} className="hover:bg-white/[0.02]">
+                      <td className="px-5 py-2.5 font-medium text-white">{row.label}</td>
                       <td className="px-5 py-2.5 font-mono tabular-nums text-[#D0D7E2]">
-                        {count.toLocaleString()}
+                        {row.count.toLocaleString()}
                       </td>
-                      <td className={`px-5 py-2.5 font-medium ${COMPLETENESS_LABEL[overview.completeness[key]].tone}`}>
-                        {COMPLETENESS_LABEL[overview.completeness[key]].text}
-                      </td>
+                      <td className={`px-5 py-2.5 font-medium ${row.tone}`}>{row.statusText}</td>
                       <td className="px-5 py-2.5 text-right">
                         <button
                           type="button"
-                          onClick={() => void handleExportDataset(key)}
+                          onClick={() => void handleExportDataset(row.key)}
                           className="inline-flex items-center gap-1 text-[12px] text-[#9AA4B4] hover:text-white"
                         >
                           <Download className="w-3.5 h-3.5" />
@@ -731,22 +1016,26 @@ export function DatabaseCenterView() {
                 <option value="Both">Both</option>
               </select>
               <select
-                value={`${playerSortBy}:${playerSortDir}`}
+                value={playerSortPresetKey}
                 onChange={(e) => {
                   const [sb, sd] = e.target.value.split(':');
-                  setPlayerSortBy(sb as typeof playerSortBy);
-                  setPlayerSortDir(sd as 'asc' | 'desc');
+                  setPlayerSortBy(sb as PlayerServerSortKey);
+                  setPlayerSortDir(sd as SortDirection);
                   setPlayerPage(1);
                 }}
                 className="bg-[#171B22] border border-white/[0.1] rounded-md px-3 py-1.5 text-[13px] text-white"
               >
-                <option value="overall:desc">OVR High → Low</option>
-                <option value="potential:desc">POT High → Low</option>
-                <option value="growth:desc">Growth High → Low</option>
-                <option value="age:asc">Age Youngest</option>
-                <option value="pace:desc">Pace High → Low</option>
-                <option value="market_value:desc">Value High → Low</option>
-                <option value="name:asc">Name A → Z</option>
+                {PLAYER_SORT_PRESETS.map((preset) => (
+                  <option key={preset.value} value={preset.value}>
+                    {preset.label}
+                  </option>
+                ))}
+                {isCustomPlayerSort && (
+                  <option value={playerSortPresetKey}>
+                    {PLAYER_SORT_FIELD_LABELS[playerSortBy]}{' '}
+                    {playerSortDir === 'asc' ? 'Asc ↑' : 'Desc ↓'}
+                  </option>
+                )}
               </select>
             </div>
 
@@ -831,13 +1120,69 @@ export function DatabaseCenterView() {
                     <table className="w-full text-left text-[13px]">
                       <thead className="bg-[#161A22] text-[#8A94A6] border-b border-white/[0.08]">
                         <tr>
-                          <th className="px-4 py-2.5 font-medium">Player</th>
-                          <th className="px-3 py-2.5 font-medium">Pos</th>
-                          <th className="px-3 py-2.5 font-medium">Club</th>
-                          <th className="px-3 py-2.5 font-medium text-right">Age</th>
-                          <th className="px-3 py-2.5 font-medium text-right">OVR</th>
-                          <th className="px-3 py-2.5 font-medium text-right">POT</th>
-                          <th className="px-3 py-2.5 font-medium text-right">Value</th>
+                          <SortableTh
+                            label="Player"
+                            columnKey="name"
+                            activeKey={playerSortBy}
+                            direction={playerSortDir}
+                            onSort={handlePlayerHeaderSort}
+                            className="px-4 py-2.5 font-medium"
+                          />
+                          <SortableTh
+                            label="Pos"
+                            columnKey="position"
+                            activeKey={playerSortBy}
+                            direction={playerSortDir}
+                            onSort={handlePlayerHeaderSort}
+                            className="px-3 py-2.5 font-medium"
+                          />
+                          <SortableTh
+                            label="Club"
+                            columnKey="club"
+                            activeKey={playerSortBy}
+                            direction={playerSortDir}
+                            onSort={handlePlayerHeaderSort}
+                            className="px-3 py-2.5 font-medium"
+                          />
+                          <SortableTh
+                            label="Age"
+                            columnKey="age"
+                            activeKey={playerSortBy}
+                            direction={playerSortDir}
+                            onSort={handlePlayerHeaderSort}
+                            align="right"
+                            className="px-3 py-2.5 font-medium"
+                          />
+                          <SortableTh
+                            label="OVR"
+                            columnKey="overall"
+                            activeKey={playerSortBy}
+                            direction={playerSortDir}
+                            onSort={handlePlayerHeaderSort}
+                            defaultDir="desc"
+                            align="right"
+                            className="px-3 py-2.5 font-medium"
+                          />
+                          <SortableTh
+                            label="POT"
+                            columnKey="potential"
+                            activeKey={playerSortBy}
+                            direction={playerSortDir}
+                            onSort={handlePlayerHeaderSort}
+                            defaultDir="desc"
+                            align="right"
+                            className="px-3 py-2.5 font-medium"
+                          />
+                          <SortableTh
+                            label="Value"
+                            columnKey="market_value"
+                            activeKey={playerSortBy}
+                            direction={playerSortDir}
+                            onSort={handlePlayerHeaderSort}
+                            defaultDir="desc"
+                            align="right"
+                            className="px-3 py-2.5 font-medium"
+                          />
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-white/[0.06]">
@@ -852,11 +1197,23 @@ export function DatabaseCenterView() {
                             }`}
                           >
                             <td className="px-4 py-2.5">
-                              <div className="font-medium text-white">{p.fullName}</div>
-                              <div className="text-[11px] text-[#7D8798]">
-                                {p.nationName ?? 'Unknown Nation'}
-                                {p.preferredFoot ? ` · ${p.preferredFoot}` : ''}
-                              </div>
+                              {(() => {
+                                const displayName = resolvePlayerDisplayName(p);
+                                return (
+                                  <>
+                                    <div className="font-medium text-white" title={p.fullName}>
+                                      {displayName}
+                                    </div>
+                                    <div className="text-[11px] text-[#7D8798]">
+                                      {hasDistinctFullName(displayName, p.fullName)
+                                        ? `${p.fullName} · `
+                                        : ''}
+                                      {p.nationName ?? 'Unknown Nation'}
+                                      {p.preferredFoot ? ` · ${p.preferredFoot}` : ''}
+                                    </div>
+                                  </>
+                                );
+                              })()}
                             </td>
                             <td className="px-3 py-2.5 font-mono text-[12px] text-emerald-300">
                               {p.primaryPosition}
@@ -918,7 +1275,15 @@ export function DatabaseCenterView() {
               <div className="lg:col-span-4 bg-[#12151B] border border-white/[0.08] rounded-lg p-5 space-y-4 h-fit">
                 <div className="flex items-start justify-between gap-2">
                   <div>
-                    <h3 className="text-[16px] font-bold text-white">{selectedPlayer.fullName}</h3>
+                    <h3 className="text-[16px] font-bold text-white">
+                      {resolvePlayerDisplayName(selectedPlayer)}
+                    </h3>
+                    {hasDistinctFullName(
+                      resolvePlayerDisplayName(selectedPlayer),
+                      selectedPlayer.fullName
+                    ) && (
+                      <div className="text-[12px] text-[#A4AEBE]">{selectedPlayer.fullName}</div>
+                    )}
                     <div className="text-[12px] text-[#8A94A6] mt-0.5">
                       {selectedPlayer.primaryPosition}
                       {selectedPlayer.secondaryPositions.length > 0
@@ -1072,12 +1437,56 @@ export function DatabaseCenterView() {
               <table className="w-full text-left text-[13px]">
                 <thead className="bg-[#161A22] text-[#8A94A6] border-b border-white/[0.08]">
                   <tr>
-                    <th className="px-5 py-2.5 font-medium">Club Name</th>
-                    <th className="px-4 py-2.5 font-medium">Code</th>
-                    <th className="px-4 py-2.5 font-medium">Category</th>
-                    <th className="px-4 py-2.5 font-medium">League</th>
-                    <th className="px-4 py-2.5 font-medium">Nation</th>
-                    <th className="px-4 py-2.5 font-medium text-right">Indexed Players</th>
+                    <SortableTh
+                      label="Club Name"
+                      columnKey="name"
+                      activeKey={clubSortBy}
+                      direction={clubSortDir}
+                      onSort={handleClubHeaderSort}
+                      className="px-5 py-2.5 font-medium"
+                    />
+                    <SortableTh
+                      label="Code"
+                      columnKey="code"
+                      activeKey={clubSortBy}
+                      direction={clubSortDir}
+                      onSort={handleClubHeaderSort}
+                      className="px-4 py-2.5 font-medium"
+                    />
+                    <SortableTh
+                      label="Category"
+                      columnKey="category"
+                      activeKey={clubSortBy}
+                      direction={clubSortDir}
+                      onSort={handleClubHeaderSort}
+                      className="px-4 py-2.5 font-medium"
+                    />
+                    <SortableTh
+                      label="League"
+                      columnKey="league"
+                      activeKey={clubSortBy}
+                      direction={clubSortDir}
+                      onSort={handleClubHeaderSort}
+                      className="px-4 py-2.5 font-medium"
+                    />
+                    <SortableTh
+                      label="Nation"
+                      columnKey="nation"
+                      activeKey={clubSortBy}
+                      direction={clubSortDir}
+                      onSort={handleClubHeaderSort}
+                      className="px-4 py-2.5 font-medium"
+                    />
+                    <SortableTh
+                      label="Indexed Players"
+                      columnKey="players"
+                      activeKey={clubSortBy}
+                      direction={clubSortDir}
+                      onSort={handleClubHeaderSort}
+                      defaultDir="desc"
+                      align="right"
+                      className="px-4 py-2.5 font-medium"
+                    />
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-white/[0.06]">
@@ -1130,16 +1539,62 @@ export function DatabaseCenterView() {
             <table className="w-full text-left text-[13px]">
               <thead className="bg-[#161A22] text-[#8A94A6] border-b border-white/[0.08]">
                 <tr>
-                  <th className="px-5 py-2.5 font-medium">League</th>
-                  <th className="px-4 py-2.5 font-medium">Country</th>
-                  <th className="px-4 py-2.5 font-medium">Tier</th>
-                  <th className="px-4 py-2.5 font-medium">Category</th>
-                  <th className="px-4 py-2.5 font-medium text-right">Clubs</th>
-                  <th className="px-4 py-2.5 font-medium text-right">Players</th>
+                  <SortableTh
+                    label="League"
+                    columnKey="league"
+                    activeKey={leagueSortKey}
+                    direction={leagueSortDir}
+                    onSort={toggleLeagueSort}
+                    className="px-5 py-2.5 font-medium"
+                  />
+                  <SortableTh
+                    label="Country"
+                    columnKey="country"
+                    activeKey={leagueSortKey}
+                    direction={leagueSortDir}
+                    onSort={toggleLeagueSort}
+                    className="px-4 py-2.5 font-medium"
+                  />
+                  <SortableTh
+                    label="Tier"
+                    columnKey="tier"
+                    activeKey={leagueSortKey}
+                    direction={leagueSortDir}
+                    onSort={toggleLeagueSort}
+                    className="px-4 py-2.5 font-medium"
+                  />
+                  <SortableTh
+                    label="Category"
+                    columnKey="category"
+                    activeKey={leagueSortKey}
+                    direction={leagueSortDir}
+                    onSort={toggleLeagueSort}
+                    className="px-4 py-2.5 font-medium"
+                  />
+                  <SortableTh
+                    label="Clubs"
+                    columnKey="clubs"
+                    activeKey={leagueSortKey}
+                    direction={leagueSortDir}
+                    onSort={toggleLeagueSort}
+                    defaultDir="desc"
+                    align="right"
+                    className="px-4 py-2.5 font-medium"
+                  />
+                  <SortableTh
+                    label="Players"
+                    columnKey="players"
+                    activeKey={leagueSortKey}
+                    direction={leagueSortDir}
+                    onSort={toggleLeagueSort}
+                    defaultDir="desc"
+                    align="right"
+                    className="px-4 py-2.5 font-medium"
+                  />
                 </tr>
               </thead>
               <tbody className="divide-y divide-white/[0.06]">
-                {filteredLeagues.map((l) => (
+                {sortedLeagues.map((l) => (
                   <tr key={l.id} className="hover:bg-white/[0.02]">
                     <td className="px-5 py-2.5 font-medium text-white">{l.name}</td>
                     <td className="px-4 py-2.5 text-[#CBD3DF]">{l.countryName || '—'}</td>
@@ -1193,16 +1648,62 @@ export function DatabaseCenterView() {
             <table className="w-full text-left text-[13px]">
               <thead className="bg-[#161A22] text-[#8A94A6] border-b border-white/[0.08]">
                 <tr>
-                  <th className="px-5 py-2.5 font-medium">Display Name</th>
-                  <th className="px-4 py-2.5 font-medium">Source Name</th>
-                  <th className="px-4 py-2.5 font-medium">ISO</th>
-                  <th className="px-4 py-2.5 font-medium">Confederation</th>
-                  <th className="px-4 py-2.5 font-medium text-right">Leagues</th>
-                  <th className="px-4 py-2.5 font-medium text-right">Clubs</th>
+                  <SortableTh
+                    label="Display Name"
+                    columnKey="displayName"
+                    activeKey={nationSortKey}
+                    direction={nationSortDir}
+                    onSort={toggleNationSort}
+                    className="px-5 py-2.5 font-medium"
+                  />
+                  <SortableTh
+                    label="Source Name"
+                    columnKey="sourceName"
+                    activeKey={nationSortKey}
+                    direction={nationSortDir}
+                    onSort={toggleNationSort}
+                    className="px-4 py-2.5 font-medium"
+                  />
+                  <SortableTh
+                    label="ISO"
+                    columnKey="iso"
+                    activeKey={nationSortKey}
+                    direction={nationSortDir}
+                    onSort={toggleNationSort}
+                    className="px-4 py-2.5 font-medium"
+                  />
+                  <SortableTh
+                    label="Confederation"
+                    columnKey="region"
+                    activeKey={nationSortKey}
+                    direction={nationSortDir}
+                    onSort={toggleNationSort}
+                    className="px-4 py-2.5 font-medium"
+                  />
+                  <SortableTh
+                    label="Leagues"
+                    columnKey="leagues"
+                    activeKey={nationSortKey}
+                    direction={nationSortDir}
+                    onSort={toggleNationSort}
+                    defaultDir="desc"
+                    align="right"
+                    className="px-4 py-2.5 font-medium"
+                  />
+                  <SortableTh
+                    label="Clubs"
+                    columnKey="clubs"
+                    activeKey={nationSortKey}
+                    direction={nationSortDir}
+                    onSort={toggleNationSort}
+                    defaultDir="desc"
+                    align="right"
+                    className="px-4 py-2.5 font-medium"
+                  />
                 </tr>
               </thead>
               <tbody className="divide-y divide-white/[0.06]">
-                {filteredNations.map((n) => (
+                {sortedNations.map((n) => (
                   <tr key={n.id} className="hover:bg-white/[0.02]">
                     <td className="px-5 py-2.5 font-medium text-white">{n.displayName}</td>
                     <td className="px-4 py-2.5 text-[#9AA4B4]">{n.sourceName}</td>
@@ -1315,32 +1816,63 @@ export function DatabaseCenterView() {
           <table className="w-full text-left text-[13px]">
             <thead className="bg-[#161A22] text-[#8A94A6] border-b border-white/[0.08]">
               <tr>
-                <th className="px-5 py-2.5 font-medium">Code</th>
-                <th className="px-4 py-2.5 font-medium">Position Name</th>
-                <th className="px-4 py-2.5 font-medium">Category</th>
-                <th className="px-4 py-2.5 font-medium">Tactical Line</th>
-                <th className="px-4 py-2.5 font-medium">Compatible FC IQ Roles</th>
+                <SortableTh
+                  label="Code"
+                  columnKey="code"
+                  activeKey={positionSortKey}
+                  direction={positionSortDir}
+                  onSort={togglePositionSort}
+                  className="px-5 py-2.5 font-medium"
+                />
+                <SortableTh
+                  label="Position Name"
+                  columnKey="label"
+                  activeKey={positionSortKey}
+                  direction={positionSortDir}
+                  onSort={togglePositionSort}
+                  className="px-4 py-2.5 font-medium"
+                />
+                <SortableTh
+                  label="Category"
+                  columnKey="category"
+                  activeKey={positionSortKey}
+                  direction={positionSortDir}
+                  onSort={togglePositionSort}
+                  className="px-4 py-2.5 font-medium"
+                />
+                <SortableTh
+                  label="Tactical Line"
+                  columnKey="tacticalLine"
+                  activeKey={positionSortKey}
+                  direction={positionSortDir}
+                  onSort={togglePositionSort}
+                  className="px-4 py-2.5 font-medium"
+                />
+                <SortableTh
+                  label="Compatible FC IQ Roles"
+                  columnKey="roles"
+                  activeKey={positionSortKey}
+                  direction={positionSortDir}
+                  onSort={togglePositionSort}
+                  defaultDir="desc"
+                  className="px-4 py-2.5 font-medium"
+                />
               </tr>
             </thead>
             <tbody className="divide-y divide-white/[0.06]">
-              {positions.map((pos) => {
-                const posRoles = roles
-                  .filter((r) => r.eligiblePositions.includes(pos.code))
-                  .map((r) => r.name);
-                return (
-                  <tr key={pos.code} className="hover:bg-white/[0.02]">
-                    <td className="px-5 py-2.5 font-mono font-semibold text-emerald-300">
-                      {pos.code}
-                    </td>
-                    <td className="px-4 py-2.5 font-medium text-white">{pos.label}</td>
-                    <td className="px-4 py-2.5 text-[#CBD3DF]">{pos.category}</td>
-                    <td className="px-4 py-2.5 font-mono text-[#9AA4B4]">{pos.tacticalLine}</td>
-                    <td className="px-4 py-2.5 text-[12px] text-[#9AA4B4]">
-                      {posRoles.join(' · ') || '—'}
-                    </td>
-                  </tr>
-                );
-              })}
+              {sortedPositions.map((pos) => (
+                <tr key={pos.code} className="hover:bg-white/[0.02]">
+                  <td className="px-5 py-2.5 font-mono font-semibold text-emerald-300">
+                    {pos.code}
+                  </td>
+                  <td className="px-4 py-2.5 font-medium text-white">{pos.label}</td>
+                  <td className="px-4 py-2.5 text-[#CBD3DF]">{pos.category}</td>
+                  <td className="px-4 py-2.5 font-mono text-[#9AA4B4]">{pos.tacticalLine}</td>
+                  <td className="px-4 py-2.5 text-[12px] text-[#9AA4B4]">
+                    {pos.posRoles.join(' · ') || '—'}
+                  </td>
+                </tr>
+              ))}
             </tbody>
           </table>
         </div>
@@ -1490,14 +2022,42 @@ export function DatabaseCenterView() {
               <table className="w-full text-left text-[13px]">
                 <thead className="bg-[#161A22] text-[#8A94A6] border-b border-white/[0.08] sticky top-0">
                   <tr>
-                    <th className="px-5 py-2 font-medium">Position</th>
-                    <th className="px-4 py-2 font-medium">Player Role</th>
-                    <th className="px-4 py-2 font-medium">Allowed Focus</th>
-                    <th className="px-4 py-2 font-medium">Verification Reference</th>
+                    <SortableTh
+                      label="Position"
+                      columnKey="position"
+                      activeKey={compatSortKey}
+                      direction={compatSortDir}
+                      onSort={toggleCompatSort}
+                      className="px-5 py-2 font-medium"
+                    />
+                    <SortableTh
+                      label="Player Role"
+                      columnKey="role"
+                      activeKey={compatSortKey}
+                      direction={compatSortDir}
+                      onSort={toggleCompatSort}
+                      className="px-4 py-2 font-medium"
+                    />
+                    <SortableTh
+                      label="Allowed Focus"
+                      columnKey="focus"
+                      activeKey={compatSortKey}
+                      direction={compatSortDir}
+                      onSort={toggleCompatSort}
+                      className="px-4 py-2 font-medium"
+                    />
+                    <SortableTh
+                      label="Verification Reference"
+                      columnKey="evidence"
+                      activeKey={compatSortKey}
+                      direction={compatSortDir}
+                      onSort={toggleCompatSort}
+                      className="px-4 py-2 font-medium"
+                    />
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-white/[0.06]">
-                  {filteredCompat.map((row, idx) => (
+                  {sortedCompat.map((row, idx) => (
                     <tr key={`${row.positionCode}-${row.roleId}-${row.focusId}-${idx}`}>
                       <td className="px-5 py-2 font-mono text-emerald-300">{row.positionCode}</td>
                       <td className="px-4 py-2 font-medium text-white">{row.roleName}</td>
@@ -1802,17 +2362,72 @@ export function DatabaseCenterView() {
                       <table className="w-full text-left text-[12px]">
                         <thead className="bg-[#161A22] text-[#8A94A6] border-b border-white/[0.08]">
                           <tr>
-                            <th className="px-3 py-1.5 font-medium">External ID</th>
-                            <th className="px-3 py-1.5 font-medium">Full Name / Short</th>
-                            <th className="px-3 py-1.5 font-medium">Positions</th>
-                            <th className="px-3 py-1.5 font-medium">Club / Nation</th>
-                            <th className="px-3 py-1.5 font-medium text-right">OVR / POT / Age</th>
-                            <th className="px-3 py-1.5 font-medium text-right">PHY / Value / Exp</th>
-                            <th className="px-3 py-1.5 font-medium text-right">Ext. Attrs</th>
+                            <SortableTh
+                              label="External ID"
+                              columnKey="externalId"
+                              activeKey={samplePreviewSortKey}
+                              direction={samplePreviewSortDir}
+                              onSort={toggleSamplePreviewSort}
+                              className="px-3 py-1.5 font-medium"
+                            />
+                            <SortableTh
+                              label="Full Name / Short"
+                              columnKey="fullName"
+                              activeKey={samplePreviewSortKey}
+                              direction={samplePreviewSortDir}
+                              onSort={toggleSamplePreviewSort}
+                              className="px-3 py-1.5 font-medium"
+                            />
+                            <SortableTh
+                              label="Positions"
+                              columnKey="position"
+                              activeKey={samplePreviewSortKey}
+                              direction={samplePreviewSortDir}
+                              onSort={toggleSamplePreviewSort}
+                              className="px-3 py-1.5 font-medium"
+                            />
+                            <SortableTh
+                              label="Club / Nation"
+                              columnKey="clubNation"
+                              activeKey={samplePreviewSortKey}
+                              direction={samplePreviewSortDir}
+                              onSort={toggleSamplePreviewSort}
+                              className="px-3 py-1.5 font-medium"
+                            />
+                            <SortableTh
+                              label="OVR / POT / Age"
+                              columnKey="overall"
+                              activeKey={samplePreviewSortKey}
+                              direction={samplePreviewSortDir}
+                              onSort={toggleSamplePreviewSort}
+                              defaultDir="desc"
+                              align="right"
+                              className="px-3 py-1.5 font-medium"
+                            />
+                            <SortableTh
+                              label="PHY / Value / Exp"
+                              columnKey="value"
+                              activeKey={samplePreviewSortKey}
+                              direction={samplePreviewSortDir}
+                              onSort={toggleSamplePreviewSort}
+                              defaultDir="desc"
+                              align="right"
+                              className="px-3 py-1.5 font-medium"
+                            />
+                            <SortableTh
+                              label="Ext. Attrs"
+                              columnKey="extAttrs"
+                              activeKey={samplePreviewSortKey}
+                              direction={samplePreviewSortDir}
+                              onSort={toggleSamplePreviewSort}
+                              defaultDir="desc"
+                              align="right"
+                              className="px-3 py-1.5 font-medium"
+                            />
                           </tr>
                         </thead>
                         <tbody className="divide-y divide-white/[0.06]">
-                          {importPreview.sampleRows.slice(0, 8).map((row, idx) => {
+                          {sortedSamplePreviewRows.map((row, idx) => {
                             const sec = Array.isArray(row.secondaryPositions)
                               ? (row.secondaryPositions as string[])
                               : [];
@@ -1906,17 +2521,62 @@ export function DatabaseCenterView() {
               <table className="w-full text-left text-[13px]">
                 <thead className="bg-[#161A22] text-[#8A94A6] border-b border-white/[0.08]">
                   <tr>
-                    <th className="px-4 py-2.5 font-medium">Dataset</th>
-                    <th className="px-4 py-2.5 font-medium">File</th>
-                    <th className="px-4 py-2.5 font-medium">Status</th>
-                    <th className="px-4 py-2.5 font-medium text-right">Ins / Upd / Rej</th>
-                    <th className="px-4 py-2.5 font-medium">SHA-256</th>
-                    <th className="px-4 py-2.5 font-medium">Timestamp</th>
+                    <SortableTh
+                      label="Dataset"
+                      columnKey="dataset"
+                      activeKey={importRunSortKey}
+                      direction={importRunSortDir}
+                      onSort={toggleImportRunSort}
+                      className="px-4 py-2.5 font-medium"
+                    />
+                    <SortableTh
+                      label="File"
+                      columnKey="file"
+                      activeKey={importRunSortKey}
+                      direction={importRunSortDir}
+                      onSort={toggleImportRunSort}
+                      className="px-4 py-2.5 font-medium"
+                    />
+                    <SortableTh
+                      label="Status"
+                      columnKey="status"
+                      activeKey={importRunSortKey}
+                      direction={importRunSortDir}
+                      onSort={toggleImportRunSort}
+                      className="px-4 py-2.5 font-medium"
+                    />
+                    <SortableTh
+                      label="Ins / Upd / Rej"
+                      columnKey="counts"
+                      activeKey={importRunSortKey}
+                      direction={importRunSortDir}
+                      onSort={toggleImportRunSort}
+                      defaultDir="desc"
+                      align="right"
+                      className="px-4 py-2.5 font-medium"
+                    />
+                    <SortableTh
+                      label="SHA-256"
+                      columnKey="checksum"
+                      activeKey={importRunSortKey}
+                      direction={importRunSortDir}
+                      onSort={toggleImportRunSort}
+                      className="px-4 py-2.5 font-medium"
+                    />
+                    <SortableTh
+                      label="Timestamp"
+                      columnKey="timestamp"
+                      activeKey={importRunSortKey}
+                      direction={importRunSortDir}
+                      onSort={toggleImportRunSort}
+                      defaultDir="desc"
+                      className="px-4 py-2.5 font-medium"
+                    />
                     <th className="px-4 py-2.5 font-medium text-right">Action</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-white/[0.06]">
-                  {importRuns.map((run) => (
+                  {sortedImportRuns.map((run) => (
                     <tr key={run.id} className="hover:bg-white/[0.02]">
                       <td className="px-4 py-2.5 font-medium text-white capitalize">
                         {run.datasetType}

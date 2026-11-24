@@ -8,10 +8,44 @@ import {
   XAxis,
   YAxis,
 } from 'recharts';
+import { useMemo } from 'react';
+import { SortableTh } from '../components/common/SortableTh';
 import { useApp } from '../context/AppContext';
+import { useTableSort } from '../hooks/useTableSort';
+import type { MatchRecord } from '../types/domain';
+
+type RecentMatchSortKey = 'opponent' | 'competition' | 'formation' | 'score' | 'status';
 
 export function DashboardView() {
   const { dashboard, activeClub, setActiveSection, setSelectedMatchId, capabilities } = useApp();
+
+  const recentMatches = dashboard?.recentMatches ?? [];
+  const recentMatchAccessors = useMemo<
+    Record<RecentMatchSortKey, (m: MatchRecord) => string | number | null>
+  >(
+    () => ({
+      opponent: (m) => m.opponentName,
+      competition: (m) => m.competition,
+      formation: (m) => m.startingFormation,
+      score: (m) => {
+        if (m.finalScoreFor !== null && m.finalScoreAgainst !== null) {
+          return (m.finalScoreFor - m.finalScoreAgainst) * 100 + m.finalScoreFor;
+        }
+        if (m.halftimeScoreFor !== null && m.halftimeScoreAgainst !== null) {
+          return (m.halftimeScoreFor - m.halftimeScoreAgainst) * 100 + m.halftimeScoreFor;
+        }
+        return null;
+      },
+      status: (m) => m.status.replace(/_/g, ' '),
+    }),
+    []
+  );
+  const {
+    sortedRows: sortedRecentMatches,
+    sortKey: recentSortKey,
+    sortDir: recentSortDir,
+    toggleSort: toggleRecentSort,
+  } = useTableSort(recentMatches, recentMatchAccessors);
 
   if (!activeClub) {
     return (
@@ -250,15 +284,53 @@ export function DashboardView() {
                 <table className="w-full text-left text-[13px]">
                   <thead>
                     <tr className="border-b border-white/[0.08] text-[12px] text-[#7D8798]">
-                      <th className="py-2 pr-3 font-medium">Opponent</th>
-                      <th className="py-2 pr-3 font-medium">Competition</th>
-                      <th className="py-2 pr-3 font-medium">Formation</th>
-                      <th className="py-2 pr-3 font-medium text-right">Score</th>
-                      <th className="py-2 font-medium text-right">Status</th>
+                      <SortableTh
+                        label="Opponent"
+                        columnKey="opponent"
+                        activeKey={recentSortKey}
+                        direction={recentSortDir}
+                        onSort={toggleRecentSort}
+                        className="py-2 pr-3 font-medium"
+                      />
+                      <SortableTh
+                        label="Competition"
+                        columnKey="competition"
+                        activeKey={recentSortKey}
+                        direction={recentSortDir}
+                        onSort={toggleRecentSort}
+                        className="py-2 pr-3 font-medium"
+                      />
+                      <SortableTh
+                        label="Formation"
+                        columnKey="formation"
+                        activeKey={recentSortKey}
+                        direction={recentSortDir}
+                        onSort={toggleRecentSort}
+                        className="py-2 pr-3 font-medium"
+                      />
+                      <SortableTh
+                        label="Score"
+                        columnKey="score"
+                        activeKey={recentSortKey}
+                        direction={recentSortDir}
+                        onSort={toggleRecentSort}
+                        defaultDir="desc"
+                        align="right"
+                        className="py-2 pr-3 font-medium"
+                      />
+                      <SortableTh
+                        label="Status"
+                        columnKey="status"
+                        activeKey={recentSortKey}
+                        direction={recentSortDir}
+                        onSort={toggleRecentSort}
+                        align="right"
+                        className="py-2 font-medium"
+                      />
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-white/[0.06]">
-                    {dashboard.recentMatches.map((m) => (
+                    {sortedRecentMatches.map((m) => (
                       <tr
                         key={m.id}
                         className="hover:bg-white/[0.02] cursor-pointer"

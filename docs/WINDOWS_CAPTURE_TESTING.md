@@ -1,7 +1,7 @@
-# Windows 10/11 Live Capture Acceptance Test Checklist (Phase 2)
+# Windows 10/11 Live Capture & Phase 2.1 Manual Acceptance Test Checklist
 
 > **Purpose**: Manual verification procedure on a real Windows 10/11 x64 machine running **EA SPORTS FC 26**.
-> Automated Linux container tests verify FFmpeg/FFprobe segmentation, manifests, state transitions, IPC validation, and SQLite persistence using synthetic video streams — they **cannot** substitute for real Windows `desktopCapturer`, DirectX/Borderless Windowed capture, Windows loopback audio, or NSIS installer verification.
+> Automated Linux container tests (`npm run test:capture`, `npm run test:players`, `npm run test:phase21`) verify FFmpeg/FFprobe segmentation, IPC transport contract, watchdogs, diagnostics, SQLite Migration v4, Default Club Roster import, Tactical Presets, and Immutable Match Snapshots using synthetic streams and isolated temp databases — they **cannot** substitute for real Windows `desktopCapturer`, DirectX/Borderless Windowed capture, Windows loopback audio, or NSIS installer verification.
 
 ---
 
@@ -9,38 +9,47 @@
 
 1. Build and install on Windows 10/11 x64:
    ```powershell
+   bun install
+   npx electron-builder install-app-deps
    npm run prepare:ffmpeg:win64 -- --from-dir "C:\path\to\ffmpeg-win64\bin"
+   npm run build:desktop
    npm run electron:dist:win
    ```
-2. Install `release/FC26 AI Manager — Windows Setup.exe`.
-3. Launch **EA SPORTS FC 26** and set Display Mode to **Borderless Windowed** (recommended).
-4. Launch **FC26 AI Manager**, confirm active Career Mode club exists, and create a new match in **Match Preparation**.
+2. Install and launch `release/FC26 AI Manager — Windows Setup.exe`.
+3. Verify `%APPDATA%\FC26 AI Manager\logs\backend-startup.log` records a clean backend start with zero `ERR_MODULE_NOT_FOUND` errors and that existing FC26 catalog players (`18,405`) are preserved after Migration v4.
+4. Launch **EA SPORTS FC 26** and set Display Mode to **Borderless Windowed** (recommended).
 
 ---
 
-## 22-Item Windows Acceptance Checklist
+## Section A — Recording Pipeline, Reliability & Watchdogs (Phase 2.1 Scenarios 1–12)
 
 | # | Test Case | Steps | Expected Result | Pass / Fail |
 |---|---|---|---|---|
-| 1 | **Packaged FFmpeg Resolution** | Open **Match Capture** → click **Inspect Prerequisites**. | All 8 prerequisites show `PASS`; source shows `packaged-resource` under `<installDir>\resources\ffmpeg\ffmpeg.exe`; `localFfmpegRecording` is active. | [ ] |
-| 2 | **Browser Preview Isolation** | Open the web preview in Chrome/Edge (`npm run dev` on `127.0.0.1:3000`). | Capture controls remain disabled; banner honestly states native Windows capture requires Electron. | [ ] |
-| 3 | **FC 26 Window Enumeration** | With FC 26 running, click **Refresh Sources**. | EA SPORTS FC 26 appears at the top tagged `[FC 26 Detected]`; live thumbnail renders. | [ ] |
-| 4 | **Display Fallback Privacy Notice** | Select a `[Display Fallback]` monitor source. | Amber Display Fallback Privacy Notice appears warning about desktop notifications, taskbar, and Alt-Tab content. | [ ] |
-| 5 | **Single Match Binding** | Select the prepared match in **Bound Match ID**. | Match selector locks once recording starts; cannot switch matches mid-recording. | [ ] |
-| 6 | **First-Half Recording Start** | Select FC 26 window → click **Start First-Half Recording**. | Recording starts cleanly; TopBar displays live red `REC · 1st Half` timer & segment #; FFmpeg status shows `running`. | [ ] |
-| 7 | **Zero Live AI / Zero Gameplay Interruption** | Play 4+ minutes of first-half FC 26 gameplay. | Zero AI notifications, zero popups, zero Gemini API calls, zero controller/keyboard interception. | [ ] |
-| 8 | **Automatic Segmentation (2–5 min)** | Set Segment Length to 2 min and record for ~4.5 minutes. | `segment_001.mp4`, `segment_002.mp4`, and `segment_003.mp4` created inside `%APPDATA%\FC26 AI Manager\recordings\<matchId>\<sessionId>\` (NO duplicate `recordings\recordings\` folder!). | [ ] |
-| 9 | **Navigation Persistence** | While recording is active, navigate to Dashboard, Tactical Board, Match History, and Settings. | Recording continues uninterrupted; TopBar timer keeps ticking; clicking TopBar badge returns to Match Capture. | [ ] |
-| 10 | **Minimize / Background Recording** | Minimize FC26 AI Manager while playing FC 26 in Borderless Windowed mode. | Capture continues smoothly without frame drop freeze or stream stop. | [ ] |
-| 11 | **Pause & Resume Continuity** | Click **Pause Recording**, wait 15 seconds, click **Resume Recording**, record 30 seconds. | Same `sessionId` retained; active duration excludes the 15s pause; paused segment cleanly closed and resumed segment increments index (`segment_002.mp4`). | [ ] |
-| 12 | **End First Half & Finalization** | Click **End First Half & Save**. | Transitions through `finalizing` → `completed`; every segment verified with FFprobe & SHA-256; Match status updates to `halftime_ready`. | [ ] |
-| 13 | **Local MP4 Playback & Quality** | Click **Play Segment** on each recorded `.mp4` (or open in VLC / Windows Media Player). | H.264 (`yuv420p`) playback is smooth, pitch markings & players are crisp, aspect ratio is preserved (no stretching). | [ ] |
-| 14 | **Video-Only Default & Microphone Block** | Verify default recording (`audioEnabled = false`) in VLC / FFprobe. | Zero audio track present; Windows microphone privacy indicator NEVER activates at any point. | [ ] |
-| 15 | **Optional Windows Loopback Audio** | Enable Game Audio in **Settings**, record 30s of FC 26 gameplay, play segment. | AAC game audio plays cleanly in sync; microphone remains inactive. | [ ] |
-| 16 | **Second-Half Optional Lifecycle** | Click **Start Second-Half Recording**, record 1 min, click **End Second Half & Save**. | Separate `sessionId` created for `second_half`; `hasSecondHalfRecording` becomes `Yes` in UI and SQLite. | [ ] |
-| 17 | **Match History Persistence** | Restart FC26 AI Manager → open **Match History** → click **Recordings**. | Both First Half and Second Half sessions persist across restart with durations, sizes, integrity statuses, and working **Play MP4** / **Folder** buttons. | [ ] |
-| 18 | **Discard With Explicit Confirmation** | Start a short recording → click **Discard** → confirm; then test **Discard** on a finalized session. | Active discard requires 1 confirmation; finalized discard requires 2-step confirmation; ONLY that session's MP4 files are removed; other sessions & matches untouched. | [ ] |
-| 19 | **Unexpected Game Window Closure** | Start recording FC 26 window → force-close FC 26 (`Alt+F4`). | Renderer `track.onended` triggers graceful finalization; completed segments are preserved and verified; clear interruption message shown. | [ ] |
-| 20 | **Crash Recovery After Force-Kill** | Start recording for 2.5 minutes (so `segment_001.mp4` completes and `segment_002.mp4` is writing) → kill Electron via Task Manager → relaunch app. | **Interrupted Recording Sessions Detected** panel appears in Match Capture; **Inspect Recovery Details** shows segment counts; **Recover Session** verifies `segment_001.mp4`, repairs or classifies `segment_002.mp4`, and syncs to SQLite. | [ ] |
-| 21 | **Graceful App Close During Recording** | Start recording → close FC26 AI Manager window (`X` or `Alt+F4`). | `before-quit` waits cleanly (bounded timeout) to flush FFmpeg, save manifest & SQLite, and exits with zero orphan `ffmpeg.exe` processes in Task Manager. | [ ] |
-| 22 | **Exclusive Fullscreen Fallback Check** | Switch FC 26 to Exclusive Fullscreen and test Window vs Display capture. | If Windows DWM blocks window capture in Exclusive Fullscreen, selecting Display Fallback records gameplay cleanly with privacy warning shown; Borderless Windowed remains recommended. | [ ] |
+| 1 | **Packaged Startup & FFmpeg Resolution** | Launch installed Windows app → open **Match Capture** → click **Inspect Prerequisites**. | App opens cleanly without backend errors; all prerequisites show `PASS`; FFmpeg resolves to `<installDir>\resources\ffmpeg\ffmpeg.exe`. | [ ] |
+| 2 | **Browser Preview Isolation** | Open web preview (`npm run dev` on `127.0.0.1:3000`) in Chrome/Edge. | Capture controls remain disabled; UI honestly explains native Electron desktop runtime is required. | [ ] |
+| 3 | **FC 26 Window Enumeration & Diagnostics Ready** | With FC 26 running, click **Refresh Sources** and expand **Recording Diagnostics**. | EA SPORTS FC 26 appears tagged `[FC 26 Detected]` with live thumbnail; diagnostics panel displays source ID, resolution, FPS, and transport state. | [ ] |
+| 4 | **Normal First-Half Window Capture (Non-Zero MP4)** | Select FC 26 window → click **Start First-Half Recording** → record 30+ seconds → click **End First Half & Save**. | Preload transport port shows `Ready`; `MediaRecorder` chunks > 0; FFmpeg stdin bytes increase continuously; `segment_001.mp4` is > 0 bytes, FFprobe-valid H.264 (`yuv420p`), playable in VLC/Windows Media Player; match advances to `halftime_ready` with `aiEligible = true`. | [ ] |
+| 5 | **Multi-Segment Rollover (2–5 min)** | Set Segment Length to 2 min → record ~4.5 minutes. | `segment_001.mp4`, `segment_002.mp4`, `segment_003.mp4` created cleanly under `%APPDATA%\FC26 AI Manager\recordings\<matchId>\<sessionId>\`; all FFprobe-verified with SHA-256. | [ ] |
+| 6 | **Background / Minimized Window Recording** | Start recording FC 26 → minimize FC26 AI Manager while playing FC 26 for 2+ minutes. | `powerSaveBlocker` and `backgroundThrottling: false` keep chunk flow alive with zero stall watchdog trigger and smooth video playback. | [ ] |
+| 7 | **Display Fallback Privacy Notice** | Select a `[Display Fallback]` monitor source and record 30 seconds. | Amber Display Fallback Privacy Notice appears; recording succeeds cleanly even if FC 26 is Exclusive Fullscreen. | [ ] |
+| 8 | **Pause & Resume Continuity** | Start recording → **Pause** for 15s → **Resume** for 30s → **End First Half & Save**. | Same `sessionId`; active duration excludes pause; new segment increments cleanly (`segment_002.mp4`); both segments playable. | [ ] |
+| 9 | **Zero-Byte / No-Frames Startup Watchdog Failure** | Trigger an unavailable/black capture source or block stream startup so 0 video bytes reach FFmpeg within 10s. | Startup Watchdog triggers actionable warning/failure; diagnostics panel auto-expands; stopping or failing produces `status = 'failed'`, `aiEligible = false`, **NEVER** advances match to `halftime_ready`, and enables **Retry First-Half Recording**. | [ ] |
+| 10 | **Mid-Session Stall Watchdog & Game Window Close** | Start recording FC 26 → force-close FC 26 (`Alt+F4`) mid-recording. | Renderer `track.onended` (or 18s Stall Watchdog) stops cleanly; completed valid segments are preserved (`completed` or `partial`), 0-valid-segment sessions fail honestly; clear error & diagnostics shown. | [ ] |
+| 11 | **Crash Recovery After Force-Kill** | Record 2.5 minutes (segment 1 finished, segment 2 writing) → terminate Electron via Task Manager → relaunch app. | **Interrupted Recording Sessions Detected** panel appears; **Recover Session** verifies `segment_001.mp4`, repairs/classifies `segment_002.mp4`, and updates SQLite accurately. | [ ] |
+| 12 | **Diagnostics Export & Privacy Hygiene** | Click **Open Diagnostics Folder** and **Export Diagnostics** on a completed or failed session. | Folder opens to `diagnostics.log` + `diagnostics-summary.json`; exported JSON contains timestamps, MediaRecorder/IPC/FFmpeg counters, and sanitized args with **zero raw video bytes** and **zero microphone activation**. | [ ] |
+| 13 | **Optional Loopback Game Audio & Second Half** | Enable Game Audio in Settings, record 30s Second Half, verify in VLC. | AAC game audio in sync, Windows microphone privacy icon remains OFF, separate `second_half` session persisted in **Match History**. | [ ] |
+| 14 | **Clean Retry After Failed Session** | On a match whose first capture attempt ended in `failed`, click **Retry First-Half Recording** with a valid source. | New session starts cleanly for the same match, succeeds with valid MP4, and promotes match to `halftime_ready`. | [ ] |
+
+---
+
+## Section B — Squad Management, Display Names, Tactical Setup & Immutable Snapshots (Phase 2.1)
+
+| # | Test Case | Steps | Expected Result | Pass / Fail |
+|---|---|---|---|---|
+| 15 | **Standardized UTF-8 Player Display Names** | Inspect players with accents/special characters (e.g. `Vinícius Júnior`, `Martin Ødegaard`, `Kylian Mbappé`) in Database Center, Squad Management, Tactical Setup pitch SVG, and Match Prep. | Full readable UTF-8 names render consistently with zero arbitrary truncation; custom `displayNameOverride` takes precedence when edited. | [ ] |
+| 16 | **Automatic Default Club Roster Initialization** | Go to **Clubs → New Career Mode Club**, link a catalog club (e.g. Arsenal or Real Madrid). | Live roster preview shows exact matched player count from `catalog_players.club_id`; choosing **"Import Default Club Roster"** populates Squad Management automatically with positions, roles, ratings, and squad numbers. | [ ] |
+| 17 | **Master Catalog Isolation & Duplicate Safety** | Edit a career player's overall, squad number, status (`Injured`/`Loaned Out`), or transfer out in **Squad Management**; re-run **Import Default Club Roster**. | Master FC26 Database record remains untouched; re-import skips existing players cleanly without creating duplicates. | [ ] |
+| 18 | **Tactical Setup Presets & FC26 Validation** | Open **Tactical Setup** → create/edit a Tactical Preset → assign Starting XI + Bench + Roles + Focuses → click **Save Tactical Setup**. | Duplicate players across slots are blocked; invalid FC26 role/focus combinations are prevented; unavailable (`Injured`/`Suspended`) starter shows warning; preset persists across app restart. | [ ] |
+| 19 | **Global Dirty-State Navigation Guard** | Make unsaved edits in **Tactical Setup** → click another sidebar view or switch active club. | **Unsaved Tactical Changes** modal appears with **Save Changes**, **Discard Changes**, and **Cancel**; all 3 actions behave deterministically. | [ ] |
+| 20 | **Match Preparation & Immutable Pre-Match Snapshot** | Open **Match Preparation** → select a saved Tactical Preset → optionally apply a match-only override → create match → start First-Half Recording. | Club's saved Tactical Preset is NOT mutated by match-only override; pre-match tactical snapshot locks (`isLocked = true`) when recording starts; later edits to Club Tactical Setup do NOT alter the historical match snapshot. | [ ] |
+| 21 | **Backup & Restore v4 Round-Trip** | Export Database Backup in **Settings** → verify JSON format `fc26-ai-manager-backup-v4` includes tactical presets, match snapshots, and recording diagnostics. | Export succeeds cleanly and restores without corrupting foreign keys or catalog tables. | [ ] |

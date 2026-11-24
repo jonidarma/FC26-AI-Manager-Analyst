@@ -18,8 +18,10 @@ import type {
   CaptureManifest,
   CaptureManifestSegment,
   RecoverableSessionSummary,
+  RecordingDiagnosticEvent,
   RecordingHalf,
   RecordingIntegrityStatus,
+  RecordingPipelineDiagnostics,
   RecoveryExecutionResult,
 } from './captureTypes';
 import {
@@ -30,13 +32,18 @@ import {
 } from './ffmpegRecordingService';
 
 const ALLOWED_TRANSITIONS: Record<CaptureManifest['status'], Array<CaptureManifest['status']>> = {
-  recording: ['paused', 'finalizing', 'recovered', 'discarded'],
-  paused: ['recording', 'finalizing', 'recovered', 'discarded'],
-  finalizing: ['completed', 'recovered', 'discarded'],
+  recording: ['paused', 'finalizing', 'recovered', 'failed', 'discarded'],
+  paused: ['recording', 'finalizing', 'recovered', 'failed', 'discarded'],
+  finalizing: ['completed', 'partial', 'recovered', 'failed', 'discarded'],
   completed: ['discarded'],
+  partial: ['discarded'],
   recovered: ['discarded'],
+  failed: ['discarded'],
   discarded: [],
 };
+
+const MAX_DIAGNOSTIC_LOG_BYTES = 512 * 1024; // 512 KB cap per session diagnostics.jsonl
+const MAX_GLOBAL_LOG_BYTES = 2 * 1024 * 1024; // 2 MB cap for global capture-diagnostics.log
 
 function sanitizePathSegment(raw: string, label: string): string {
   const trimmed = raw.trim();
@@ -82,6 +89,153 @@ export class CaptureSessionEngine {
   public getSegmentListPath(matchId: string, sessionId: string): string {
     const sessionDir = this.getSafeSessionDirectory(matchId, sessionId);
     return path.join(sessionDir, '.segments.list');
+  }
+
+  public getSessionDiagnosticsLogPath(matchId: string, sessionId: string): string {
+    const sessionDir = this.getSafeSessionDirectory(matchId, sessionId);
+    return path.join(sessionDir, 'diagnostics.jsonl');
+  }
+
+  public getSessionDiagnosticsSummaryPath(matchId: string, sessionId: string): string {
+    const sessionDir = this.getSafeSessionDirectory(matchId, sessionId);
+    return path.join(sessionDir, 'diagnostics-summary.json');
+  }
+
+  public getGlobalDiagnosticsDir(): string {
+    const dir = path.join(this.rootDir, '_diagnostics');
+    fs.mkdirSync(dir, { recursive: true });
+    return dir;
+  }
+
+  /**
+   * Appends a bounded, sanitized diagnostic event (NEVER raw video bytes) to the session's
+   * diagnostics.jsonl file. Automatically caps file size to prevent runaway disk growth.
+   */
+  public appendDiagnosticEvent(
+    matchId: string,
+    sessionId: string,
+    event: Omit<RecordingDiagnosticEvent, 'timestamp'> & { timestamp?: string }
+  ): string | null {
+    try {
+      const logPath = this.getSessionDiagnosticsLogPath(matchId, sessionId);
+      fs.mkdirSync(path.dirname(logPath), { recursive: true });
+      if (fs.existsSync(logPath)) {
+        const st = fs.statSync(logPath);
+        if (st.size >= MAX_DIAGNOSTIC_LOG_BYTES) {
+          return logPath;
+        }
+      }
+      const entry: RecordingDiagnosticEvent = {
+        timestamp: event.timestamp ?? new Date().toISOString(),
+        level: event.level,
+        stage: event.stage,
+        message: event.message.slice(0, 1200),
+        ...(event.details ? { details: event.details } : {}),
+      };
+      fs.appendFileSync(logPath, `${JSON.stringify(entry)}\n`, 'utf8');
+      return logPath;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Writes a sanitized JSON diagnostic report for a session and appends a compact summary line
+   * to the bounded global capture-diagnostics.log.
+   */
+  public writeSessionDiagnosticsSummary(
+    manifest: CaptureManifest,
+    diagnostics: RecordingPipelineDiagnostics,
+    extra?: { ffmpegArgs?: string[]; ffmpegStderrTail?: string[] }
+  ): string | null {
+    try {
+      const summaryPath = this.getSessionDiagnosticsSummaryPath(manifest.matchId, manifest.sessionId);
+      const logPath = this.getSessionDiagnosticsLogPath(manifest.matchId, manifest.sessionId);
+      let recentEvents: RecordingDiagnosticEvent[] = [];
+      if (fs.existsSync(logPath)) {
+        const rawLines = fs.readFileSync(logPath, 'utf8').split(/\r?\n/).filter(Boolean);
+        recentEvents = rawLines.slice(-150).map((line) => {
+          try {
+            return JSON.parse(line) as RecordingDiagnosticEvent;
+          } catch {
+            return {
+              timestamp: new Date().toISOString(),
+              level: 'info' as const,
+              stage: 'session' as const,
+              message: line.slice(0, 300),
+            };
+          }
+        });
+      }
+
+      const report = {
+        exportedAt: new Date().toISOString(),
+        sessionId: manifest.sessionId,
+        matchId: manifest.matchId,
+        half: manifest.half,
+        status: manifest.status,
+        integrityStatus: manifest.integrityStatus,
+        aiEligible: manifest.aiEligible,
+        failureReason: manifest.failureReason,
+        config: {
+          sourceId: manifest.sourceId,
+          sourceName: manifest.sourceName,
+          sourceType: manifest.sourceType,
+          resolution: manifest.resolution,
+          fps: manifest.fps,
+          bitrateKbps: manifest.bitrateKbps,
+          encoder: manifest.encoder,
+          audioRequested: manifest.audioRequested,
+          audioActive: manifest.audioActive,
+          segmentDurationMinutes: manifest.segmentDurationMinutes,
+          maxRecordingMinutes: manifest.maxRecordingMinutes,
+        },
+        totals: {
+          activeDurationSeconds: manifest.activeDurationSeconds,
+          totalBytes: manifest.totalBytes,
+          segmentCount: manifest.segments.length,
+          validSegmentCount: manifest.segments.filter(
+            (s) => (s.status === 'finalized' || s.status === 'recovered') && s.sizeBytes > 0 && s.durationSeconds > 0
+          ).length,
+        },
+        diagnostics,
+        ffmpegArgs: extra?.ffmpegArgs ?? [],
+        ffmpegStderrTail: extra?.ffmpegStderrTail ?? [],
+        segments: manifest.segments.map((s) => ({
+          index: s.index,
+          fileName: s.fileName,
+          status: s.status,
+          integrityStatus: s.integrityStatus,
+          durationSeconds: s.durationSeconds,
+          sizeBytes: s.sizeBytes,
+          resolution: s.resolution,
+          fps: s.fps,
+          codec: s.codec,
+          hasAudio: s.hasAudio,
+          checksum: s.checksum,
+        })),
+        recoveryLog: manifest.recoveryLog.slice(-50),
+        events: recentEvents,
+      };
+
+      const tmpPath = `${summaryPath}.${crypto.randomBytes(4).toString('hex')}.tmp`;
+      fs.writeFileSync(tmpPath, JSON.stringify(report, null, 2), 'utf8');
+      fs.renameSync(tmpPath, summaryPath);
+
+      // Append one-line entry to bounded global capture-diagnostics.log
+      const globalLogPath = path.join(this.getGlobalDiagnosticsDir(), 'capture-diagnostics.log');
+      if (fs.existsSync(globalLogPath) && fs.statSync(globalLogPath).size >= MAX_GLOBAL_LOG_BYTES) {
+        const rotated = `${globalLogPath}.prev`;
+        if (fs.existsSync(rotated)) fs.unlinkSync(rotated);
+        fs.renameSync(globalLogPath, rotated);
+      }
+      const line = `${new Date().toISOString()} session=${manifest.sessionId} match=${manifest.matchId} status=${manifest.status} integrity=${manifest.integrityStatus} segments=${manifest.segments.length} bytes=${manifest.totalBytes} chunksMain=${diagnostics.chunksReceivedMain} stdinBytes=${diagnostics.ffmpegStdinBytesWritten} reason=${JSON.stringify(manifest.failureReason ?? '')}\n`;
+      fs.appendFileSync(globalLogPath, line, 'utf8');
+
+      return summaryPath;
+    } catch {
+      return null;
+    }
   }
 
   public resolveSafeMediaPath(filePath: string, requireMp4 = true): string {
@@ -141,8 +295,9 @@ export class CaptureSessionEngine {
     fs.mkdirSync(sessionDir, { recursive: true });
 
     const now = new Date().toISOString();
+    const diagLogPath = this.getSessionDiagnosticsLogPath(safeMatchId, sessionId);
     const manifest: CaptureManifest = {
-      manifestVersion: 2,
+      manifestVersion: 3,
       sessionId,
       matchId: safeMatchId,
       half: input.half,
@@ -160,6 +315,9 @@ export class CaptureSessionEngine {
       outputDirectory: sessionDir,
       status: 'recording',
       integrityStatus: 'pending',
+      aiEligible: false,
+      failureReason: null,
+      diagnosticsPath: diagLogPath,
       activeDurationSeconds: 0,
       totalBytes: 0,
       nextSegmentIndex: 1,
@@ -247,8 +405,12 @@ export class CaptureSessionEngine {
 
     const maxSegIndex = segments.reduce((max, s) => Math.max(max, s.index), 0);
 
+    const validSegCount = segments.filter(
+      (s) => (s.status === 'finalized' || s.status === 'recovered') && s.sizeBytes > 0 && s.durationSeconds > 0
+    ).length;
+
     return {
-      manifestVersion: raw.manifestVersion ?? 2,
+      manifestVersion: raw.manifestVersion ?? 3,
       sessionId,
       matchId,
       half: raw.half ?? 'first_half',
@@ -266,6 +428,13 @@ export class CaptureSessionEngine {
       outputDirectory,
       status: raw.status ?? 'recording',
       integrityStatus: raw.integrityStatus ?? 'pending',
+      aiEligible:
+        typeof raw.aiEligible === 'boolean'
+          ? raw.aiEligible
+          : validSegCount > 0 &&
+            (raw.status === 'completed' || raw.status === 'partial' || raw.status === 'recovered'),
+      failureReason: raw.failureReason ?? null,
+      diagnosticsPath: raw.diagnosticsPath ?? null,
       activeDurationSeconds: Number(raw.activeDurationSeconds ?? 0),
       totalBytes: Number(raw.totalBytes ?? segments.reduce((sum, s) => sum + s.sizeBytes, 0)),
       nextSegmentIndex: raw.nextSegmentIndex ?? maxSegIndex + 1,
@@ -287,9 +456,13 @@ export class CaptureSessionEngine {
         | 'totalBytes'
         | 'nextSegmentIndex'
         | 'integrityStatus'
+        | 'aiEligible'
+        | 'failureReason'
+        | 'diagnosticsPath'
         | 'endedAt'
         | 'encoder'
         | 'audioActive'
+        | 'recoveryLog'
       >
     >,
     matchId?: string
@@ -353,19 +526,67 @@ export class CaptureSessionEngine {
     return current;
   }
 
-  public finalizeSessionManifest(
+  public failSessionManifest(
     sessionId: string,
+    failureReason: string,
     options?: {
       activeDurationSeconds?: number;
-      integrityStatus?: RecordingIntegrityStatus;
       matchId?: string;
     }
   ): CaptureManifest | null {
     const current = this.loadSessionManifest(sessionId, options?.matchId);
     if (!current) return null;
 
-    // Idempotent if already completed
-    if (current.status === 'completed') {
+    if (current.status === 'failed' || current.status === 'discarded') {
+      return current;
+    }
+
+    const now = new Date().toISOString();
+    const totalBytes = current.segments
+      .filter((s) => (s.status === 'finalized' || s.status === 'recovered') && s.sizeBytes > 0)
+      .reduce((sum, s) => sum + s.sizeBytes, 0);
+
+    return this.updateSessionStatus(
+      sessionId,
+      'failed',
+      {
+        activeDurationSeconds: options?.activeDurationSeconds ?? current.activeDurationSeconds,
+        totalBytes,
+        integrityStatus: 'corrupted',
+        aiEligible: false,
+        failureReason: failureReason.trim() || 'Recording failed with zero valid segments.',
+        endedAt: now,
+        recoveryLog: [...current.recoveryLog, `${now}: FAILED — ${failureReason.trim()}`],
+      },
+      current.matchId
+    );
+  }
+
+  /**
+   * Finalizes a recording session strictly according to FFprobe-verified segment evidence:
+   * - ZERO valid verified segments (sizeBytes > 0 and durationSeconds > 0) => status: 'failed', integrityStatus: 'corrupted', aiEligible: false (NEVER 'completed')
+   * - Some valid segments + corrupted segments or pipeline error => status: 'partial', integrityStatus: 'partial', aiEligible: true
+   * - >= 1 valid segments and zero corrupted segments => status: 'completed', integrityStatus: 'verified', aiEligible: true
+   */
+  public finalizeSessionManifest(
+    sessionId: string,
+    options?: {
+      activeDurationSeconds?: number;
+      integrityStatus?: RecordingIntegrityStatus;
+      failureReason?: string | null;
+      hadErrors?: boolean;
+      matchId?: string;
+    }
+  ): CaptureManifest | null {
+    const current = this.loadSessionManifest(sessionId, options?.matchId);
+    if (!current) return null;
+
+    // Idempotent if already in a terminal finalized state
+    if (
+      current.status === 'completed' ||
+      current.status === 'partial' ||
+      current.status === 'failed'
+    ) {
       return current;
     }
 
@@ -373,31 +594,70 @@ export class CaptureSessionEngine {
       this.updateSessionStatus(sessionId, 'finalizing', undefined, current.matchId);
     }
 
-    const validSegCount = current.segments.filter(
-      (s) => s.status === 'finalized' || s.status === 'recovered'
+    const validSegments = current.segments.filter(
+      (s) =>
+        (s.status === 'finalized' || s.status === 'recovered') &&
+        s.integrityStatus === 'verified' &&
+        s.sizeBytes > 0 &&
+        s.durationSeconds > 0
+    );
+    const corruptedSegCount = current.segments.filter(
+      (s) => s.status === 'corrupted' || s.integrityStatus === 'corrupted'
     ).length;
-    const corruptedSegCount = current.segments.filter((s) => s.status === 'corrupted').length;
 
-    const computedIntegrity: RecordingIntegrityStatus =
-      options?.integrityStatus ??
-      (validSegCount === 0
-        ? 'corrupted'
-        : corruptedSegCount > 0
-          ? 'partial'
-          : 'verified');
-
+    const totalValidBytes = validSegments.reduce((sum, s) => sum + s.sizeBytes, 0);
+    const verifiedDuration = Math.round(
+      validSegments.reduce((sum, s) => sum + s.durationSeconds, 0)
+    );
     const totalDuration =
-      options?.activeDurationSeconds ??
-      Math.round(current.segments.reduce((sum, s) => sum + s.durationSeconds, 0));
+      validSegments.length > 0
+        ? Math.max(verifiedDuration, Math.round(options?.activeDurationSeconds ?? 0))
+        : 0;
+
+    const now = new Date().toISOString();
+
+    // Critical Phase 2.1 rule: Zero valid verified segments can NEVER be marked 'completed'
+    if (validSegments.length === 0) {
+      const reason =
+        options?.failureReason?.trim() ||
+        'Recording produced zero valid video segments (0 verified MP4 bytes).';
+      return this.updateSessionStatus(
+        sessionId,
+        'failed',
+        {
+          activeDurationSeconds: 0,
+          totalBytes: 0,
+          integrityStatus: 'corrupted',
+          aiEligible: false,
+          failureReason: reason,
+          endedAt: now,
+          recoveryLog: [...current.recoveryLog, `${now}: Finalization FAILED — ${reason}`],
+        },
+        current.matchId
+      );
+    }
+
+    const isPartial =
+      corruptedSegCount > 0 ||
+      Boolean(options?.hadErrors) ||
+      options?.integrityStatus === 'partial';
+
+    const finalStatus: CaptureManifest['status'] = isPartial ? 'partial' : 'completed';
+    const computedIntegrity: RecordingIntegrityStatus = isPartial ? 'partial' : 'verified';
 
     return this.updateSessionStatus(
       sessionId,
-      'completed',
+      finalStatus,
       {
         activeDurationSeconds: totalDuration,
-        totalBytes: current.segments.reduce((sum, s) => sum + s.sizeBytes, 0),
+        totalBytes: totalValidBytes,
         integrityStatus: computedIntegrity,
-        endedAt: new Date().toISOString(),
+        aiEligible: true,
+        failureReason: isPartial ? (options?.failureReason ?? null) : null,
+        endedAt: now,
+        recoveryLog: isPartial && options?.failureReason
+          ? [...current.recoveryLog, `${now}: Finalized PARTIAL — ${options.failureReason}`]
+          : current.recoveryLog,
       },
       current.matchId
     );
@@ -734,10 +994,18 @@ export class CaptureSessionEngine {
           ? 'partial'
           : 'corrupted';
 
+    const hasRecoveredVideo = recoveredSegments.length > 0;
+    const finalStatus: CaptureManifest['status'] = hasRecoveredVideo ? 'recovered' : 'failed';
+    const failureReason = hasRecoveredVideo
+      ? null
+      : 'Crash recovery found zero decodable video segments.';
+
     const finalManifest: CaptureManifest = {
       ...manifest,
-      status: 'recovered',
+      status: finalStatus,
       integrityStatus,
+      aiEligible: hasRecoveredVideo,
+      failureReason,
       activeDurationSeconds: totalDurationSeconds,
       totalBytes,
       nextSegmentIndex:
@@ -754,7 +1022,7 @@ export class CaptureSessionEngine {
       sessionId: finalManifest.sessionId,
       matchId: finalManifest.matchId,
       half: finalManifest.half,
-      status: 'recovered',
+      status: finalStatus === 'recovered' ? 'recovered' : 'failed',
       integrityStatus,
       classification,
       recoveredSegments,

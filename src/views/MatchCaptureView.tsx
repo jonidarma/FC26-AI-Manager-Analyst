@@ -1,8 +1,10 @@
 import {
+  Activity,
   AlertTriangle,
   CheckCircle2,
   ChevronDown,
   ChevronUp,
+  Download,
   Film,
   FolderOpen,
   HardDrive,
@@ -68,6 +70,7 @@ export function MatchCaptureView() {
   const [diskInfo, setDiskInfo] = useState<DiskSpaceInfo | null>(null);
   const [busyAction, setBusyAction] = useState<string | null>(null);
   const [showDiagnostics, setShowDiagnostics] = useState(false);
+  const [showPipelineDiagnostics, setShowPipelineDiagnostics] = useState(false);
   const [inspectedRecoveryId, setInspectedRecoveryId] = useState<string | null>(null);
   const [lastRecoveryResult, setLastRecoveryResult] = useState<RecoveryExecutionResult | null>(null);
 
@@ -84,6 +87,24 @@ export function MatchCaptureView() {
   const isRecordingImplemented = capabilities?.localFfmpegRecording === true;
   const captureCfg = settings?.capture;
   const diag = capabilities?.captureDiagnostics;
+  const pipelineDiag = recordingTelemetry.diagnostics;
+
+  // Auto-expand live Recording Diagnostics Panel whenever a warning, stall, or failure occurs
+  useEffect(() => {
+    if (
+      recordingTelemetry.uiStatus === 'failed' ||
+      Boolean(recordingTelemetry.lastError) ||
+      pipelineDiag?.startupWatchdogState === 'triggered' ||
+      pipelineDiag?.stallWatchdogState === 'triggered'
+    ) {
+      setShowPipelineDiagnostics(true);
+    }
+  }, [
+    recordingTelemetry.uiStatus,
+    recordingTelemetry.lastError,
+    pipelineDiag?.startupWatchdogState,
+    pipelineDiag?.stallWatchdogState,
+  ]);
 
   const isSessionActive =
     recordingTelemetry.uiStatus === 'initializing' ||
@@ -103,10 +124,23 @@ export function MatchCaptureView() {
       matchSessions.some(
         (s) =>
           s.half === 'first_half' &&
-          (s.status === 'completed' || s.status === 'recovered') &&
-          s.segments.some((seg) => seg.status === 'finalized' || seg.status === 'recovered')
+          (s.status === 'completed' || s.status === 'recovered' || s.status === 'partial') &&
+          s.aiEligible !== false &&
+          s.segments.some(
+            (seg) =>
+              (seg.status === 'finalized' || seg.status === 'recovered') &&
+              seg.sizeBytes > 0 &&
+              seg.durationSeconds > 0
+          )
       ),
     [matchSessions]
+  );
+
+  const hasFailedFirstHalf = useMemo(
+    () =>
+      !hasValidFirstHalf &&
+      matchSessions.some((s) => s.half === 'first_half' && s.status === 'failed'),
+    [hasValidFirstHalf, matchSessions]
   );
 
   // Estimate file size for a 15-minute real-time half based on configured bitrate
@@ -252,11 +286,27 @@ export function MatchCaptureView() {
       const manifest = await recordingController.stopRecording();
       await refreshAll();
       if (manifest) {
-        const validCount = manifest.segments.filter((s) => s.finalized).length;
-        notify(
-          'success',
-          `Recording finalized (${validCount} verified MP4 segment${validCount === 1 ? '' : 's'} saved locally).`
-        );
+        const validCount = manifest.segments.filter(
+          (s) => s.finalized && s.sizeBytes > 0 && s.durationSeconds > 0
+        ).length;
+        if (manifest.status === 'failed' || validCount === 0) {
+          setShowPipelineDiagnostics(true);
+          notify(
+            'error',
+            manifest.failureReason ||
+              'Recording failed: 0 playable MP4 segments were produced. Inspect Recording Diagnostics.'
+          );
+        } else if (manifest.status === 'partial') {
+          notify(
+            'info',
+            `Recording saved as Partial (${validCount} verified MP4 segment${validCount === 1 ? '' : 's'} preserved).`
+          );
+        } else {
+          notify(
+            'success',
+            `Recording finalized (${validCount} verified MP4 segment${validCount === 1 ? '' : 's'} saved locally).`
+          );
+        }
       } else {
         notify('info', 'Recording stopped.');
       }
@@ -264,6 +314,31 @@ export function MatchCaptureView() {
       notify('error', err instanceof Error ? err.message : 'Failed to finalize recording');
     } finally {
       setBusyAction(null);
+    }
+  }
+
+  async function handleOpenDiagnosticsFolder() {
+    try {
+      const res = await desktopBridge.openDiagnosticsFolder();
+      if (!res.opened) {
+        notify('error', 'Diagnostics folder is unavailable or could not be opened.');
+      }
+    } catch (err) {
+      notify('error', err instanceof Error ? err.message : 'Failed to open diagnostics folder');
+    }
+  }
+
+  async function handleExportDiagnostics(sessionId?: string | null) {
+    try {
+      const res = await desktopBridge.exportSessionDiagnostics({
+        sessionId: sessionId ?? undefined,
+        matchId: selectedMatch?.id ?? undefined,
+      });
+      if (res.exported) {
+        notify('success', `Exported sanitized diagnostics bundle to ${res.path}`);
+      }
+    } catch (err) {
+      notify('error', err instanceof Error ? err.message : 'Failed to export diagnostics');
     }
   }
 
@@ -852,7 +927,9 @@ export function MatchCaptureView() {
                       className="inline-flex items-center gap-2 px-4 py-2 rounded-md bg-emerald-600 hover:bg-emerald-500 disabled:bg-[#1E242E] disabled:text-[#687283] text-white text-[13px] font-medium transition-colors"
                     >
                       <Play className="w-3.5 h-3.5" />
-                      Start First-Half Recording
+                      {hasFailedFirstHalf
+                        ? 'Retry First-Half Recording'
+                        : 'Start First-Half Recording'}
                     </button>
 
                     <button
@@ -966,6 +1043,128 @@ export function MatchCaptureView() {
                 </div>
               )}
             </div>
+
+            {/* Phase 2.1 Collapsible Real-Time Recording Pipeline Diagnostics Panel */}
+            <div className="pt-3 border-t border-white/[0.08] space-y-3">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <button
+                  type="button"
+                  onClick={() => setShowPipelineDiagnostics((v) => !v)}
+                  className="inline-flex items-center gap-2 text-[12px] font-semibold text-[#D7DDE7] hover:text-white"
+                >
+                  <Activity className="w-3.5 h-3.5 text-emerald-400" />
+                  Recording Pipeline Diagnostics
+                  {showPipelineDiagnostics ? (
+                    <ChevronUp className="w-3.5 h-3.5" />
+                  ) : (
+                    <ChevronDown className="w-3.5 h-3.5" />
+                  )}
+                </button>
+                {isNativeElectron && (
+                  <div className="flex items-center gap-2 text-[11px]">
+                    <button
+                      type="button"
+                      onClick={() => void handleOpenDiagnosticsFolder()}
+                      className="inline-flex items-center gap-1 px-2.5 py-1 rounded border border-white/[0.12] hover:border-white/[0.24] text-[#C5CCD7]"
+                    >
+                      <FolderOpen className="w-3 h-3" />
+                      Open Diagnostics Folder
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => void handleExportDiagnostics(recordingTelemetry.sessionId)}
+                      className="inline-flex items-center gap-1 px-2.5 py-1 rounded border border-white/[0.12] hover:border-emerald-500/50 text-[#C5CCD7]"
+                    >
+                      <Download className="w-3 h-3" />
+                      Export Diagnostics
+                    </button>
+                  </div>
+                )}
+              </div>
+
+              {showPipelineDiagnostics && (
+                <div className="rounded-md border border-white/[0.08] bg-[#0C0F14] p-3.5 space-y-3 text-[11px] font-mono">
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
+                    <div>
+                      <div className="text-[#7D8798]">MediaStream / Video Track</div>
+                      <div className="text-white mt-0.5">
+                        {pipelineDiag?.renderer.mediaStreamActive ? 'ACTIVE' : 'INACTIVE'} ·{' '}
+                        {pipelineDiag?.renderer.videoTrackState ?? 'none'}
+                      </div>
+                    </div>
+                    <div>
+                      <div className="text-[#7D8798]">MediaRecorder / MIME</div>
+                      <div className="text-white mt-0.5 truncate" title={pipelineDiag?.renderer.negotiatedMimeType ?? ''}>
+                        {pipelineDiag?.renderer.mediaRecorderState ?? 'inactive'} ·{' '}
+                        {pipelineDiag?.renderer.negotiatedMimeType || '—'}
+                      </div>
+                    </div>
+                    <div>
+                      <div className="text-[#7D8798]">MessagePort Transport</div>
+                      <div className="text-white mt-0.5">
+                        {pipelineDiag?.transportPortAttached ? 'ATTACHED' : 'DETACHED'} ·{' '}
+                        {pipelineDiag?.transportPortReadyAck ? 'ACK OK' : 'NO ACK'}
+                      </div>
+                    </div>
+                    <div>
+                      <div className="text-[#7D8798]">Watchdogs (Start / Stall)</div>
+                      <div className="text-white mt-0.5">
+                        {pipelineDiag?.startupWatchdogState ?? 'idle'} /{' '}
+                        {pipelineDiag?.stallWatchdogState ?? 'idle'}
+                      </div>
+                    </div>
+
+                    <div>
+                      <div className="text-[#7D8798]">Renderer Chunks Gen / Sent</div>
+                      <div className="text-white mt-0.5 tabular-nums">
+                        {pipelineDiag?.renderer.chunksGenerated ?? 0} /{' '}
+                        {pipelineDiag?.renderer.chunksTransmitted ?? 0} (fail{' '}
+                        {pipelineDiag?.renderer.chunksFailedTransport ?? 0})
+                      </div>
+                    </div>
+                    <div>
+                      <div className="text-[#7D8798]">Main Chunks / Bytes Recv</div>
+                      <div className="text-white mt-0.5 tabular-nums">
+                        {pipelineDiag?.chunksReceivedMain ?? 0} ·{' '}
+                        {formatBytes(pipelineDiag?.bytesReceivedMain ?? 0)}
+                      </div>
+                    </div>
+                    <div>
+                      <div className="text-[#7D8798]">FFmpeg PID / Stdin Bytes</div>
+                      <div className="text-white mt-0.5 tabular-nums">
+                        PID {pipelineDiag?.ffmpegPid ?? '—'} ·{' '}
+                        {formatBytes(pipelineDiag?.ffmpegStdinBytesWritten ?? 0)}
+                      </div>
+                    </div>
+                    <div>
+                      <div className="text-[#7D8798]">Disk File / Queue / Drops</div>
+                      <div className="text-white mt-0.5 tabular-nums">
+                        {formatBytes(pipelineDiag?.currentOutputFileBytes ?? 0)} · Q{' '}
+                        {pipelineDiag?.queueSizeChunks ?? 0} · drop {pipelineDiag?.droppedChunks ?? 0}
+                      </div>
+                    </div>
+                  </div>
+
+                  {pipelineDiag?.lastChunkReceivedAt && (
+                    <div className="text-[#8A94A6]">
+                      Last Chunk Received in Main: {pipelineDiag.lastChunkReceivedAt} ·
+                      Backpressure Events: {pipelineDiag.backpressureEvents} · FFmpeg Exit:{' '}
+                      {pipelineDiag.ffmpegExitCode ?? 'running/none'}
+                    </div>
+                  )}
+
+                  {(pipelineDiag?.lastFfmpegError ||
+                    pipelineDiag?.lastPipelineError ||
+                    pipelineDiag?.renderer.lastRendererError) && (
+                    <div className="border border-red-500/30 bg-red-500/[0.08] rounded p-2 text-red-200 whitespace-pre-wrap break-all">
+                      {pipelineDiag.lastFfmpegError ||
+                        pipelineDiag.lastPipelineError ||
+                        pipelineDiag.renderer.lastRendererError}
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
           </section>
 
           {/* Persisted Recorded Sessions & Post-Finalization Summary for Bound Match */}
@@ -995,29 +1194,64 @@ export function MatchCaptureView() {
                     >
                       <div className="flex flex-wrap items-start justify-between gap-3">
                         <div>
-                          <div className="font-semibold text-white text-[13px]">
-                            {sess.half === 'first_half' ? 'First Half' : 'Second Half'} ·{' '}
-                            <span className="capitalize">{sess.status}</span>
+                          <div className="font-semibold text-white text-[13px] flex items-center gap-2">
+                            <span>
+                              {sess.half === 'first_half' ? 'First Half' : 'Second Half'} ·{' '}
+                              <span
+                                className={`capitalize ${
+                                  sess.status === 'failed'
+                                    ? 'text-red-400'
+                                    : sess.status === 'partial'
+                                      ? 'text-amber-300'
+                                      : 'text-emerald-400'
+                                }`}
+                              >
+                                {sess.status}
+                              </span>
+                            </span>
+                            {sess.status === 'failed' && (
+                              <span className="text-[11px] font-mono text-red-300">
+                                NOT AI-ELIGIBLE
+                              </span>
+                            )}
                           </div>
                           <div className="mt-0.5 font-mono tabular-nums text-[#8A94A6]">
-                            {formatDuration(sess.durationSeconds)} · {finalizedSegs.length} segment
-                            {finalizedSegs.length === 1 ? '' : 's'} · {formatBytes(sess.totalBytes)}{' '}
-                            · {sess.resolution} @ {sess.fps} FPS · Integrity:{' '}
+                            {formatDuration(sess.durationSeconds)} · {finalizedSegs.length} valid
+                            segment{finalizedSegs.length === 1 ? '' : 's'} ·{' '}
+                            {formatBytes(sess.totalBytes)} · {sess.resolution} @ {sess.fps} FPS ·
+                            Integrity:{' '}
                             <span
                               className={
                                 sess.integrityStatus === 'verified'
                                   ? 'text-emerald-400'
                                   : sess.integrityStatus === 'partial'
                                     ? 'text-amber-300'
-                                    : 'text-[#C5CCD7]'
+                                    : sess.integrityStatus === 'corrupted'
+                                      ? 'text-red-400'
+                                      : 'text-[#C5CCD7]'
                               }
                             >
                               {sess.integrityStatus ?? 'pending'}
                             </span>
                           </div>
+                          {sess.failureReason && (
+                            <div className="mt-1.5 text-[11px] text-red-300">
+                              Failure Reason: {sess.failureReason}
+                            </div>
+                          )}
                         </div>
 
                         <div className="flex flex-wrap items-center gap-2">
+                          {isNativeElectron && (
+                            <button
+                              type="button"
+                              onClick={() => void handleExportDiagnostics(sess.id)}
+                              className="inline-flex items-center gap-1 px-2.5 py-1 rounded border border-white/[0.12] hover:border-emerald-500/50 text-[#D7DDE7]"
+                            >
+                              <Download className="w-3.5 h-3.5" />
+                              Diagnostics
+                            </button>
+                          )}
                           {isNativeElectron && sess.outputDirectory && (
                             <button
                               type="button"
@@ -1037,7 +1271,9 @@ export function MatchCaptureView() {
                                   sessionId: sess.id,
                                   matchId: sess.matchId,
                                   isFinalized:
-                                    sess.status === 'completed' || sess.status === 'recovered',
+                                    sess.status === 'completed' ||
+                                    sess.status === 'recovered' ||
+                                    sess.status === 'partial',
                                   step: 1,
                                 })
                               }
@@ -1090,13 +1326,23 @@ export function MatchCaptureView() {
                         </div>
                       )}
 
-                      {(sess.status === 'completed' || sess.status === 'recovered') && (
+                      {sess.status === 'failed' ? (
+                        <div className="text-[11px] text-red-200/90 pt-1 border-t border-white/[0.06]">
+                          No verified non-empty MP4 segments were saved. This session will NOT
+                          advance the match to Half-Time Ready. Use &ldquo;Retry First-Half
+                          Recording&rdquo; above or export diagnostics to inspect the failure.
+                        </div>
+                      ) : (sess.status === 'completed' ||
+                          sess.status === 'recovered' ||
+                          sess.status === 'partial') &&
+                        sess.aiEligible !== false &&
+                        finalizedSegs.some((s) => s.sizeBytes > 0 && s.durationSeconds > 0) ? (
                         <div className="text-[11px] text-[#8A94A6] pt-1 border-t border-white/[0.06]">
                           Verified local segments are stored for Phase 3 Half-Time AI Analysis
-                          (Gemini video upload & tactical briefing will activate in Phase 3 — zero
-                          frames have been uploaded).
+                          (Gemini video upload &amp; tactical briefing will activate in Phase 3 —
+                          zero frames have been uploaded).
                         </div>
-                      )}
+                      ) : null}
                     </div>
                   );
                 })}

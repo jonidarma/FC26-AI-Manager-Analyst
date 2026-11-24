@@ -1,4 +1,9 @@
 import { getFormationPositions } from '../../data/tacticalCatalog';
+import {
+  hasDistinctFullName,
+  resolvePlayerDisplayName,
+  resolvePlayerFullName,
+} from '../../utils/playerDisplayName';
 import type {
   CatalogFormationSlot,
   PitchNodePosition,
@@ -252,7 +257,10 @@ export function TacticalPitchSVG({
             const assignment = assignments.find((a) => a.slotIndex === node.slotIndex);
             const assignedPlayer =
               assignment?.playerId ? playerById.get(assignment.playerId) : undefined;
-            const displayName = assignedPlayer?.name ?? assignment?.playerName ?? null;
+            const displayName = assignedPlayer
+              ? resolvePlayerDisplayName(assignedPlayer)
+              : assignment?.playerName?.trim() || null;
+            const fullName = assignedPlayer ? resolvePlayerFullName(assignedPlayer) : displayName;
             const roleLabel = assignment?.role || node.defaultRole;
             const focusLabel = assignment?.focus || node.defaultFocus;
             const isVerifiedPlayer = Boolean(displayName);
@@ -267,6 +275,12 @@ export function TacticalPitchSVG({
               (focusLabel === 'Attack' || focusLabel === 'Roaming');
 
             const isSelected = selectedSlotOrder === node.slotIndex;
+            const labelFontSize =
+              displayName && displayName.length > 16
+                ? '1.85'
+                : displayName && displayName.length > 12
+                  ? '2.05'
+                  : '2.3';
 
             return (
               <g
@@ -274,6 +288,14 @@ export function TacticalPitchSVG({
                 onClick={onSelectSlot ? () => onSelectSlot(node.slotIndex) : undefined}
                 className={onSelectSlot ? 'cursor-pointer' : undefined}
               >
+                {displayName && fullName && (
+                  <title>
+                    {hasDistinctFullName(displayName, fullName)
+                      ? `${displayName} (${fullName}) · ${node.positionCode}${roleLabel ? ` · ${roleLabel}` : ''}`
+                      : `${displayName} · ${node.positionCode}${roleLabel ? ` · ${roleLabel}` : ''}`}
+                  </title>
+                )}
+
                 {hasForwardRun && (
                   <line
                     x1={cx}
@@ -325,14 +347,10 @@ export function TacticalPitchSVG({
                   y={cy + 6.9}
                   textAnchor="middle"
                   fill={isVerifiedPlayer ? '#F1F5F9' : '#94A3B8'}
-                  fontSize="2.3"
+                  fontSize={labelFontSize}
                   fontWeight={isVerifiedPlayer ? '600' : '400'}
                 >
-                  {displayName
-                    ? displayName.length > 13
-                      ? `${displayName.slice(0, 12)}…`
-                      : displayName
-                    : 'Unassigned'}
+                  {displayName ?? 'Unassigned'}
                 </text>
 
                 {!compact && roleLabel && (

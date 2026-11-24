@@ -1,4 +1,4 @@
-import React, { createContext, useCallback, useContext, useEffect, useState } from 'react';
+import React, { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react';
 import { desktopBridge, type SystemStatusResponse } from '../services/desktopBridge';
 import {
   INITIAL_RECORDING_TELEMETRY,
@@ -22,6 +22,7 @@ import type {
   RecordingTelemetry,
   TacticalCatalogItem,
   TacticalMemoryEntry,
+  TacticalPreset,
 } from '../types/domain';
 
 interface ToastMessage {
@@ -30,9 +31,29 @@ interface ToastMessage {
   text: string;
 }
 
+export interface DirtyStateGuard {
+  isDirty: boolean;
+  label: string;
+  onSave: () => Promise<boolean>;
+  onDiscard: () => void;
+}
+
+export interface PendingNavigationPrompt {
+  guardLabel: string;
+  targetDescription: string;
+  saving: boolean;
+  onConfirmSave: () => Promise<void>;
+  onConfirmDiscard: () => void;
+  onCancel: () => void;
+}
+
 interface AppContextValue {
   activeSection: NavigationSection;
   setActiveSection: (section: NavigationSection) => void;
+  requestNavigation: (section: NavigationSection) => void;
+  guardedActivateClub: (clubId: string) => void;
+  registerDirtyGuard: (guard: DirtyStateGuard | null) => void;
+  pendingNavigation: PendingNavigationPrompt | null;
   selectedMatchId: string | null;
   setSelectedMatchId: (id: string | null) => void;
   capabilities: DesktopBridgeCapabilities | null;
@@ -41,6 +62,7 @@ interface AppContextValue {
   clubs: ClubWithProfile[];
   activeClub: ClubWithProfile | null;
   players: Player[];
+  tacticalPresets: TacticalPreset[];
   opponents: Opponent[];
   matches: MatchRecord[];
   recordingSessions: MatchSessionWithSegments[];
@@ -68,16 +90,34 @@ interface AppContextValue {
   dismissToast: (id: string) => void;
 }
 
+const SECTION_LABELS: Record<NavigationSection, string> = {
+  dashboard: 'Dashboard',
+  clubs: 'Career Mode Clubs',
+  'squad-management': 'Squad Management',
+  'tactical-setup': 'Tactical Setup',
+  'match-prep': 'Match Preparation',
+  'match-capture': 'Match Capture',
+  'halftime-briefing': 'Half-Time Briefing',
+  'tactical-board': 'Tactical Board',
+  'database-center': 'FC26 Database Center',
+  opposition: 'Opposition Analysis',
+  'match-reports': 'Match Reports',
+  'match-history': 'Match History',
+  'tactical-memory': 'Tactical Memory',
+  settings: 'Settings',
+};
+
 const AppContext = createContext<AppContextValue | null>(null);
 
 export function AppProvider({ children }: { children: React.ReactNode }) {
-  const [activeSection, setActiveSection] = useState<NavigationSection>('dashboard');
+  const [activeSection, setActiveSectionState] = useState<NavigationSection>('dashboard');
   const [selectedMatchId, setSelectedMatchId] = useState<string | null>(null);
   const [capabilities, setCapabilities] = useState<DesktopBridgeCapabilities | null>(null);
   const [systemStatus, setSystemStatus] = useState<SystemStatusResponse | null>(null);
   const [dashboard, setDashboard] = useState<DashboardSummary | null>(null);
   const [clubs, setClubs] = useState<ClubWithProfile[]>([]);
   const [players, setPlayers] = useState<Player[]>([]);
+  const [tacticalPresets, setTacticalPresets] = useState<TacticalPreset[]>([]);
   const [opponents, setOpponents] = useState<Opponent[]>([]);
   const [matches, setMatches] = useState<MatchRecord[]>([]);
   const [recordingSessions, setRecordingSessions] = useState<MatchSessionWithSegments[]>([]);
@@ -97,6 +137,13 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   const [loading, setLoading] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
   const [toasts, setToasts] = useState<ToastMessage[]>([]);
+
+  const dirtyGuardRef = useRef<DirtyStateGuard | null>(null);
+  const [pendingNavigation, setPendingNavigation] = useState<PendingNavigationPrompt | null>(null);
+
+  const registerDirtyGuard = useCallback((guard: DirtyStateGuard | null) => {
+    dirtyGuardRef.current = guard;
+  }, []);
 
   const dismissToast = useCallback((id: string) => {
     setToasts((prev) => prev.filter((t) => t.id !== id));
@@ -169,6 +216,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       if (resolvedActiveClub) {
         const [
           clubPlayers,
+          clubPresets,
           clubMatches,
           clubMemory,
           clubPostReports,
@@ -176,6 +224,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
           clubSessions,
         ] = await Promise.all([
           desktopBridge.listPlayers(resolvedActiveClub.id),
+          desktopBridge.listTacticalPresets(resolvedActiveClub.id),
           desktopBridge.listMatches(resolvedActiveClub.id),
           desktopBridge.listTacticalMemory(resolvedActiveClub.id),
           desktopBridge.listPostMatchReports(resolvedActiveClub.id),
@@ -183,6 +232,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
           desktopBridge.listRecordingSessions({ clubId: resolvedActiveClub.id }),
         ]);
         setPlayers(clubPlayers);
+        setTacticalPresets(clubPresets);
         setMatches(clubMatches);
         setTacticalMemory(clubMemory);
         setPostMatchReports(clubPostReports);
@@ -194,6 +244,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         });
       } else {
         setPlayers([]);
+        setTacticalPresets([]);
         setMatches([]);
         setTacticalMemory([]);
         setPostMatchReports([]);
@@ -208,6 +259,80 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     }
   }, []);
 
+  const executeWithDirtyGuard = useCallback(
+    (targetDescription: string, proceed: () => void | Promise<void>) => {
+      const guard = dirtyGuardRef.current;
+      if (!guard || !guard.isDirty) {
+        void proceed();
+        return;
+      }
+
+      setPendingNavigation({
+        guardLabel: guard.label,
+        targetDescription,
+        saving: false,
+        onConfirmSave: async () => {
+          setPendingNavigation((prev) => (prev ? { ...prev, saving: true } : null));
+          const savedOk = await guard.onSave();
+          if (savedOk) {
+            setPendingNavigation(null);
+            await proceed();
+          } else {
+            setPendingNavigation((prev) => (prev ? { ...prev, saving: false } : null));
+          }
+        },
+        onConfirmDiscard: () => {
+          guard.onDiscard();
+          setPendingNavigation(null);
+          void proceed();
+        },
+        onCancel: () => {
+          setPendingNavigation(null);
+        },
+      });
+    },
+    []
+  );
+
+  const requestNavigation = useCallback(
+    (nextSection: NavigationSection) => {
+      if (nextSection === activeSection) return;
+      executeWithDirtyGuard(SECTION_LABELS[nextSection] ?? nextSection, () => {
+        setActiveSectionState(nextSection);
+      });
+    },
+    [activeSection, executeWithDirtyGuard]
+  );
+
+  const setActiveSection = useCallback(
+    (nextSection: NavigationSection) => {
+      requestNavigation(nextSection);
+    },
+    [requestNavigation]
+  );
+
+  const activeClub = clubs.find((c) => c.profile.isActive) ?? clubs[0] ?? null;
+
+  const guardedActivateClub = useCallback(
+    (clubId: string) => {
+      if (!clubId || clubId === activeClub?.id) return;
+      const targetClub = clubs.find((c) => c.id === clubId);
+      executeWithDirtyGuard(
+        targetClub ? `Switch Club to ${targetClub.name}` : 'Switch Career Club',
+        async () => {
+          try {
+            await desktopBridge.activateClub(clubId);
+            await refreshAll();
+            notify('info', 'Switched active Career Mode club.');
+          } catch (err) {
+            notify('error', err instanceof Error ? err.message : 'Failed to switch club');
+          }
+        }
+      );
+    },
+    [activeClub?.id, clubs, executeWithDirtyGuard, notify, refreshAll]
+  );
+
   useEffect(() => {
     void refreshAll();
   }, [refreshAll]);
@@ -220,10 +345,10 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     return unsubscribe;
   }, []);
 
-  // Warn before accidental reload/close while a recording session is active
+  // Warn before accidental reload/close while recording or editing unsaved tactical setup
   useEffect(() => {
     const handleBeforeUnload = (e: BeforeUnloadEvent) => {
-      if (recordingController.isRecordingOrBusy()) {
+      if (recordingController.isRecordingOrBusy() || dirtyGuardRef.current?.isDirty) {
         e.preventDefault();
         e.returnValue = '';
       }
@@ -231,8 +356,6 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     window.addEventListener('beforeunload', handleBeforeUnload);
     return () => window.removeEventListener('beforeunload', handleBeforeUnload);
   }, []);
-
-  const activeClub = clubs.find((c) => c.profile.isActive) ?? clubs[0] ?? null;
 
   const refreshRecordingForActiveClub = useCallback(async () => {
     await refreshRecordingData(activeClub?.id ?? null);
@@ -243,6 +366,10 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       value={{
         activeSection,
         setActiveSection,
+        requestNavigation,
+        guardedActivateClub,
+        registerDirtyGuard,
+        pendingNavigation,
         selectedMatchId,
         setSelectedMatchId,
         capabilities,
@@ -251,6 +378,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         clubs,
         activeClub,
         players,
+        tacticalPresets,
         opponents,
         matches,
         recordingSessions,

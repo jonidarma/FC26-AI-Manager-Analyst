@@ -4,6 +4,7 @@ export interface Migration {
   version: number;
   name: string;
   sql: string;
+  disableForeignKeys?: boolean;
   afterSql?: (db: Database.Database) => void;
 }
 
@@ -633,6 +634,279 @@ export const MIGRATIONS: Migration[] = [
       addColumnIfMissing(db, 'recording_segments', 'ended_at', 'TEXT');
     },
   },
+  {
+    version: 4,
+    name: 'phase_2_1_capture_squad_tactics_v4',
+    disableForeignKeys: true,
+    sql: `
+      CREATE TABLE IF NOT EXISTS recording_diagnostics (
+        id TEXT PRIMARY KEY,
+        session_id TEXT NOT NULL UNIQUE,
+        match_id TEXT NOT NULL,
+        failure_reason TEXT,
+        payload_json TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        FOREIGN KEY (session_id) REFERENCES match_sessions(id) ON DELETE CASCADE,
+        FOREIGN KEY (match_id) REFERENCES matches(id) ON DELETE CASCADE
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_recording_diagnostics_match
+      ON recording_diagnostics(match_id);
+
+      CREATE TABLE IF NOT EXISTS tactical_presets (
+        id TEXT PRIMARY KEY,
+        club_id TEXT NOT NULL,
+        name TEXT NOT NULL,
+        formation_id TEXT,
+        formation_name TEXT NOT NULL,
+        build_up_style TEXT NOT NULL DEFAULT 'Balanced',
+        defensive_approach TEXT NOT NULL DEFAULT 'Balanced',
+        defensive_line_height INTEGER NOT NULL DEFAULT 50 CHECK (defensive_line_height >= 1 AND defensive_line_height <= 100),
+        is_default INTEGER NOT NULL DEFAULT 0 CHECK (is_default IN (0, 1)),
+        bench_json TEXT NOT NULL DEFAULT '[]',
+        notes TEXT NOT NULL DEFAULT '',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        FOREIGN KEY (club_id) REFERENCES clubs(id) ON DELETE CASCADE,
+        FOREIGN KEY (formation_id) REFERENCES catalog_formations(id) ON DELETE SET NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_tactical_presets_club
+      ON tactical_presets(club_id);
+
+      CREATE TABLE IF NOT EXISTS tactical_preset_assignments (
+        id TEXT PRIMARY KEY,
+        preset_id TEXT NOT NULL,
+        slot_order INTEGER NOT NULL CHECK (slot_order >= 0 AND slot_order <= 10),
+        position_code TEXT NOT NULL,
+        player_id TEXT,
+        role TEXT NOT NULL DEFAULT '',
+        focus TEXT NOT NULL DEFAULT '',
+        FOREIGN KEY (preset_id) REFERENCES tactical_presets(id) ON DELETE CASCADE,
+        FOREIGN KEY (player_id) REFERENCES players(id) ON DELETE SET NULL,
+        UNIQUE(preset_id, slot_order)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_tactical_preset_assignments_preset
+      ON tactical_preset_assignments(preset_id, slot_order);
+
+      CREATE TABLE IF NOT EXISTS match_tactical_snapshots (
+        id TEXT PRIMARY KEY,
+        match_id TEXT NOT NULL,
+        source_preset_id TEXT,
+        source_preset_name TEXT,
+        snapshot_type TEXT NOT NULL DEFAULT 'pre_match' CHECK (snapshot_type IN ('pre_match', 'in_match_adjustment')),
+        is_locked INTEGER NOT NULL DEFAULT 0 CHECK (is_locked IN (0, 1)),
+        formation_id TEXT,
+        formation_name TEXT NOT NULL,
+        build_up_style TEXT NOT NULL DEFAULT 'Balanced',
+        defensive_approach TEXT NOT NULL DEFAULT 'Balanced',
+        defensive_line_height INTEGER NOT NULL DEFAULT 50 CHECK (defensive_line_height >= 1 AND defensive_line_height <= 100),
+        assignments_json TEXT NOT NULL DEFAULT '[]',
+        bench_json TEXT NOT NULL DEFAULT '[]',
+        notes TEXT NOT NULL DEFAULT '',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        FOREIGN KEY (match_id) REFERENCES matches(id) ON DELETE CASCADE,
+        FOREIGN KEY (source_preset_id) REFERENCES tactical_presets(id) ON DELETE SET NULL,
+        FOREIGN KEY (formation_id) REFERENCES catalog_formations(id) ON DELETE SET NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_match_tactical_snapshots_match
+      ON match_tactical_snapshots(match_id, snapshot_type);
+    `,
+    afterSql: (db: Database.Database) => {
+      // 1. Non-destructively rebuild match_sessions to allow 'failed' and 'partial' statuses and add ai_eligible/failure_reason/diagnostics_path
+      db.exec(`
+        CREATE TABLE match_sessions_v4 (
+          id TEXT PRIMARY KEY,
+          match_id TEXT NOT NULL,
+          half TEXT NOT NULL CHECK (half IN ('first_half', 'second_half')),
+          status TEXT NOT NULL DEFAULT 'idle' CHECK (status IN ('idle', 'recording', 'paused', 'finalizing', 'completed', 'partial', 'recovered', 'failed', 'discarded')),
+          capture_source_id TEXT,
+          capture_source_name TEXT,
+          resolution TEXT NOT NULL DEFAULT '1920x1080',
+          fps INTEGER NOT NULL DEFAULT 15,
+          duration_seconds INTEGER NOT NULL DEFAULT 0,
+          total_bytes INTEGER NOT NULL DEFAULT 0,
+          encoder TEXT,
+          audio_enabled INTEGER NOT NULL DEFAULT 0,
+          output_directory TEXT,
+          integrity_status TEXT NOT NULL DEFAULT 'pending',
+          ai_eligible INTEGER NOT NULL DEFAULT 0 CHECK (ai_eligible IN (0, 1)),
+          failure_reason TEXT,
+          diagnostics_path TEXT,
+          recovery_notes TEXT,
+          started_at TEXT,
+          ended_at TEXT,
+          created_at TEXT NOT NULL,
+          updated_at TEXT,
+          FOREIGN KEY (match_id) REFERENCES matches(id) ON DELETE CASCADE
+        );
+
+        INSERT INTO match_sessions_v4 (
+          id, match_id, half, status, capture_source_id, capture_source_name,
+          resolution, fps, duration_seconds, total_bytes, encoder, audio_enabled,
+          output_directory, integrity_status, ai_eligible, failure_reason, diagnostics_path,
+          recovery_notes, started_at, ended_at, created_at, updated_at
+        )
+        SELECT
+          id,
+          match_id,
+          half,
+          CASE
+            WHEN status = 'completed' AND (total_bytes <= 0 OR integrity_status = 'corrupted') THEN 'failed'
+            ELSE status
+          END,
+          capture_source_id,
+          capture_source_name,
+          resolution,
+          fps,
+          duration_seconds,
+          total_bytes,
+          encoder,
+          COALESCE(audio_enabled, 0),
+          output_directory,
+          COALESCE(integrity_status, 'pending'),
+          CASE
+            WHEN status IN ('completed', 'recovered') AND total_bytes > 0 AND COALESCE(integrity_status, '') != 'corrupted' THEN 1
+            ELSE 0
+          END,
+          CASE
+            WHEN status = 'completed' AND (total_bytes <= 0 OR integrity_status = 'corrupted') THEN 'Legacy zero-byte or corrupted recording reclassified as failed by Phase 2.1 migration.'
+            ELSE NULL
+          END,
+          NULL,
+          recovery_notes,
+          started_at,
+          ended_at,
+          created_at,
+          updated_at
+        FROM match_sessions;
+
+        DROP TABLE match_sessions;
+        ALTER TABLE match_sessions_v4 RENAME TO match_sessions;
+        CREATE INDEX IF NOT EXISTS idx_match_sessions_match ON match_sessions(match_id);
+      `);
+
+      // 2. Non-destructively extend players for standardized display names and full career squad lifecycle
+      addColumnIfMissing(db, 'players', 'display_name', "TEXT NOT NULL DEFAULT ''");
+      addColumnIfMissing(db, 'players', 'display_name_override', 'TEXT');
+      addColumnIfMissing(db, 'players', 'short_name', 'TEXT');
+      addColumnIfMissing(db, 'players', 'full_name', "TEXT NOT NULL DEFAULT ''");
+      addColumnIfMissing(db, 'players', 'squad_number', 'INTEGER');
+      addColumnIfMissing(db, 'players', 'squad_status', "TEXT NOT NULL DEFAULT 'active'");
+      addColumnIfMissing(db, 'players', 'availability', "TEXT NOT NULL DEFAULT 'available'");
+      addColumnIfMissing(db, 'players', 'injury_status', 'TEXT');
+      addColumnIfMissing(db, 'players', 'suspension_status', 'TEXT');
+      addColumnIfMissing(db, 'players', 'membership_start_date', 'TEXT');
+      addColumnIfMissing(db, 'players', 'membership_end_date', 'TEXT');
+      addColumnIfMissing(db, 'players', 'secondary_positions_json', "TEXT NOT NULL DEFAULT '[]'");
+      addColumnIfMissing(db, 'players', 'notes', "TEXT NOT NULL DEFAULT ''");
+
+      // 3. Extend catalog_players with optional display_name_override (never mutates imported data)
+      addColumnIfMissing(db, 'catalog_players', 'display_name_override', 'TEXT');
+
+      // 4. Backfill existing Career Mode players with canonical display_name, short_name, full_name
+      db.exec(`
+        UPDATE players
+        SET
+          full_name = CASE WHEN TRIM(COALESCE(full_name, '')) = '' THEN name ELSE full_name END,
+          short_name = COALESCE(
+            NULLIF(TRIM(short_name), ''),
+            (SELECT NULLIF(TRIM(cp.short_name), '') FROM catalog_players cp WHERE cp.id = players.catalog_player_id)
+          )
+      `);
+
+      db.exec(`
+        UPDATE players
+        SET display_name = COALESCE(
+          NULLIF(TRIM(display_name_override), ''),
+          NULLIF(TRIM(display_name), ''),
+          NULLIF(TRIM(short_name), ''),
+          NULLIF(TRIM(full_name), ''),
+          name
+        )
+      `);
+
+      // 5. Backfill immutable pre_match snapshots for any pre-existing matches that have tactical_configurations
+      const existingPreMatch = db
+        .prepare(
+          `SELECT tc.id, tc.match_id, tc.formation, tc.build_up_style, tc.defensive_approach,
+                  tc.defensive_line_height, tc.player_assignments_json, tc.created_at,
+                  m.status as match_status, m.bench_json
+           FROM tactical_configurations tc
+           JOIN matches m ON m.id = tc.match_id
+           WHERE tc.phase = 'pre_match'
+             AND NOT EXISTS (
+               SELECT 1 FROM match_tactical_snapshots mts
+               WHERE mts.match_id = tc.match_id AND mts.snapshot_type = 'pre_match'
+             )`
+        )
+        .all() as Array<{
+        id: string;
+        match_id: string;
+        formation: string;
+        build_up_style: string;
+        defensive_approach: string;
+        defensive_line_height: number;
+        player_assignments_json: string;
+        created_at: string;
+        match_status: string;
+        bench_json: string;
+      }>;
+
+      const insertSnapshot = db.prepare(`
+        INSERT INTO match_tactical_snapshots (
+          id, match_id, source_preset_id, source_preset_name, snapshot_type, is_locked,
+          formation_id, formation_name, build_up_style, defensive_approach, defensive_line_height,
+          assignments_json, bench_json, notes, created_at, updated_at
+        ) VALUES (?, ?, NULL, NULL, 'pre_match', ?, NULL, ?, ?, ?, ?, ?, ?, '', ?, ?)
+      `);
+
+      for (const row of existingPreMatch) {
+        const isLocked = row.match_status !== 'scheduled' ? 1 : 0;
+        let normalizedAssignments: Array<Record<string, unknown>> = [];
+        try {
+          const parsed = JSON.parse(row.player_assignments_json) as Array<Record<string, unknown>>;
+          if (Array.isArray(parsed)) {
+            normalizedAssignments = parsed.map((a, idx) => ({
+              slotOrder: typeof a.slotIndex === 'number' ? a.slotIndex : idx,
+              positionCode: String(a.positionCode ?? ''),
+              playerId: typeof a.playerId === 'string' ? a.playerId : null,
+              playerDisplayName: typeof a.playerName === 'string' ? a.playerName : null,
+              playerFullName: typeof a.playerName === 'string' ? a.playerName : null,
+              role: String(a.role ?? ''),
+              focus: String(a.focus ?? ''),
+            }));
+          }
+        } catch {
+          normalizedAssignments = [];
+        }
+
+        insertSnapshot.run(
+          `snap_${row.id}`,
+          row.match_id,
+          isLocked,
+          row.formation,
+          row.build_up_style,
+          row.defensive_approach,
+          row.defensive_line_height,
+          JSON.stringify(normalizedAssignments),
+          '[]',
+          row.created_at,
+          row.created_at
+        );
+      }
+
+      // 6. Add performance indexes for Phase 2.1 queries
+      db.exec(`
+        CREATE INDEX IF NOT EXISTS idx_players_club_status ON players(club_id, squad_status);
+        CREATE INDEX IF NOT EXISTS idx_players_catalog_link ON players(club_id, catalog_player_id);
+      `);
+    },
+  },
 ];
 
 export function runMigrations(db: Database.Database): void {
@@ -661,7 +935,23 @@ export function runMigrations(db: Database.Database): void {
           'INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)'
         ).run(migration.version, migration.name, new Date().toISOString());
       });
-      apply();
+
+      if (migration.disableForeignKeys) {
+        db.pragma('foreign_keys = OFF');
+        try {
+          apply();
+        } finally {
+          db.pragma('foreign_keys = ON');
+        }
+        const fkViolations = db.pragma('foreign_key_check') as unknown[];
+        if (fkViolations.length > 0) {
+          console.warn(
+            `[db-migration] Foreign key check reported ${fkViolations.length} issue(s) after v${migration.version}.`
+          );
+        }
+      } else {
+        apply();
+      }
     }
   }
 }

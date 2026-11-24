@@ -1,11 +1,14 @@
 import { Download, Plus, Trash2, Upload } from 'lucide-react';
-import React, { useRef, useState } from 'react';
+import React, { useMemo, useRef, useState } from 'react';
+import { SortableTh } from '../components/common/SortableTh';
 import { useApp } from '../context/AppContext';
 import { ACTIVE_GEMINI_MODELS } from '../data/tacticalCatalog';
+import { useTableSort } from '../hooks/useTableSort';
 import { desktopBridge } from '../services/desktopBridge';
-import type { TacticalCatalogItem } from '../types/domain';
+import type { ApiUsageLog, TacticalCatalogItem } from '../types/domain';
 
 type SettingsTab = 'capture' | 'ai' | 'catalog' | 'database';
+type UsageLogSortKey = 'timestamp' | 'model' | 'stage' | 'tokens' | 'status';
 
 const CATALOG_CATEGORY_LABELS: Record<TacticalCatalogItem['category'], string> = {
   formation: 'Formations',
@@ -18,6 +21,25 @@ const CATALOG_CATEGORY_LABELS: Record<TacticalCatalogItem['category'], string> =
 export function SettingsView() {
   const { settings, systemStatus, tacticalCatalog, usageLogs, refreshAll, notify } = useApp();
   const [tab, setTab] = useState<SettingsTab>('capture');
+
+  const usageAccessors = useMemo<
+    Record<UsageLogSortKey, (l: ApiUsageLog) => string | number | null>
+  >(
+    () => ({
+      timestamp: (l) => l.createdAt,
+      model: (l) => l.modelId,
+      stage: (l) => l.stage,
+      tokens: (l) => (l.inputTokens ?? 0) + (l.outputTokens ?? 0),
+      status: (l) => l.status,
+    }),
+    []
+  );
+  const {
+    sortedRows: sortedUsageLogs,
+    sortKey: usageSortKey,
+    sortDir: usageSortDir,
+    toggleSort: toggleUsageSort,
+  } = useTableSort(usageLogs, usageAccessors, { key: 'timestamp', dir: 'desc' });
 
   // Local editable state for capture & AI settings
   const [captureDraft, setCaptureDraft] = useState(settings?.capture ?? null);
@@ -472,15 +494,54 @@ export function SettingsView() {
                 <table className="w-full text-left text-[12px]">
                   <thead>
                     <tr className="border-b border-white/[0.08] text-[#7D8798]">
-                      <th className="py-2 pr-3 font-medium">Timestamp</th>
-                      <th className="py-2 pr-3 font-medium">Model</th>
-                      <th className="py-2 pr-3 font-medium">Stage</th>
-                      <th className="py-2 pr-3 font-medium text-right">Tokens (In/Out)</th>
-                      <th className="py-2 font-medium text-right">Status</th>
+                      <SortableTh
+                        label="Timestamp"
+                        columnKey="timestamp"
+                        activeKey={usageSortKey}
+                        direction={usageSortDir}
+                        onSort={toggleUsageSort}
+                        defaultDir="desc"
+                        className="py-2 pr-3 font-medium"
+                      />
+                      <SortableTh
+                        label="Model"
+                        columnKey="model"
+                        activeKey={usageSortKey}
+                        direction={usageSortDir}
+                        onSort={toggleUsageSort}
+                        className="py-2 pr-3 font-medium"
+                      />
+                      <SortableTh
+                        label="Stage"
+                        columnKey="stage"
+                        activeKey={usageSortKey}
+                        direction={usageSortDir}
+                        onSort={toggleUsageSort}
+                        className="py-2 pr-3 font-medium"
+                      />
+                      <SortableTh
+                        label="Tokens (In/Out)"
+                        columnKey="tokens"
+                        activeKey={usageSortKey}
+                        direction={usageSortDir}
+                        onSort={toggleUsageSort}
+                        defaultDir="desc"
+                        align="right"
+                        className="py-2 pr-3 font-medium"
+                      />
+                      <SortableTh
+                        label="Status"
+                        columnKey="status"
+                        activeKey={usageSortKey}
+                        direction={usageSortDir}
+                        onSort={toggleUsageSort}
+                        align="right"
+                        className="py-2 font-medium"
+                      />
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-white/[0.06]">
-                    {usageLogs.map((l) => (
+                    {sortedUsageLogs.map((l) => (
                       <tr key={l.id}>
                         <td className="py-2 pr-3 font-mono tabular-nums text-[#9AA4B4]">
                           {l.createdAt.slice(0, 19).replace('T', ' ')}

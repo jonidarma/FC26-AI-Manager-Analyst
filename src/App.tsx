@@ -1,4 +1,4 @@
-import { X } from 'lucide-react';
+import { AlertTriangle, X } from 'lucide-react';
 import { Sidebar } from './components/layout/Sidebar';
 import { TopBar } from './components/layout/TopBar';
 import { AppProvider, useApp } from './context/AppContext';
@@ -12,11 +12,21 @@ import { MatchPrepView } from './views/MatchPrepView';
 import { MatchReportsView } from './views/MatchReportsView';
 import { OppositionView } from './views/OppositionView';
 import { SettingsView } from './views/SettingsView';
+import { SquadManagementView } from './views/SquadManagementView';
 import { TacticalBoardView } from './views/TacticalBoardView';
 import { TacticalMemoryView } from './views/TacticalMemoryView';
+import { TacticalSetupView } from './views/TacticalSetupView';
 
 function WorkspaceContent() {
-  const { activeSection, loading, error, refreshAll, toasts, dismissToast } = useApp();
+  const {
+    activeSection,
+    loading,
+    error,
+    refreshAll,
+    toasts,
+    dismissToast,
+    pendingNavigation,
+  } = useApp();
 
   function renderSection() {
     switch (activeSection) {
@@ -24,6 +34,10 @@ function WorkspaceContent() {
         return <DashboardView />;
       case 'clubs':
         return <ClubsView />;
+      case 'squad-management':
+        return <SquadManagementView />;
+      case 'tactical-setup':
+        return <TacticalSetupView />;
       case 'match-prep':
         return <MatchPrepView />;
       case 'match-capture':
@@ -86,6 +100,57 @@ function WorkspaceContent() {
           )}
         </main>
       </div>
+
+      {/* Global Dirty-State Unsaved Changes Navigation Guard Modal (Save / Discard / Cancel) */}
+      {pendingNavigation && (
+        <div className="fixed inset-0 z-50 bg-black/75 flex items-center justify-center p-4">
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="unsaved-changes-title"
+            className="w-full max-w-md border border-amber-500/35 bg-[#12151B] rounded-lg p-6 space-y-4 shadow-2xl"
+          >
+            <div className="flex items-start gap-3">
+              <AlertTriangle className="w-5 h-5 text-amber-400 shrink-0 mt-0.5" />
+              <div>
+                <h2 id="unsaved-changes-title" className="text-[16px] font-semibold text-white">
+                  Unsaved Changes in {pendingNavigation.guardLabel}
+                </h2>
+                <p className="mt-1 text-[13px] text-[#9AA4B4]">
+                  You have unsaved tactical edits. Choose whether to save or discard them before
+                  navigating to <span className="text-white">{pendingNavigation.targetDescription}</span>.
+                </p>
+              </div>
+            </div>
+            <div className="flex flex-wrap items-center justify-end gap-2 pt-2 border-t border-white/[0.08]">
+              <button
+                type="button"
+                disabled={pendingNavigation.saving}
+                onClick={pendingNavigation.onCancel}
+                className="px-3.5 py-2 rounded-md border border-white/[0.12] text-[13px] text-[#C5CCD7] hover:text-white"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                disabled={pendingNavigation.saving}
+                onClick={pendingNavigation.onConfirmDiscard}
+                className="px-3.5 py-2 rounded-md border border-red-500/35 hover:bg-red-500/10 text-[13px] text-red-300 font-medium"
+              >
+                Discard
+              </button>
+              <button
+                type="button"
+                disabled={pendingNavigation.saving}
+                onClick={() => void pendingNavigation.onConfirmSave()}
+                className="px-4 py-2 rounded-md bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white text-[13px] font-medium"
+              >
+                {pendingNavigation.saving ? 'Saving...' : 'Save & Continue'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Unobtrusive In-App Notification Stack */}
       {toasts.length > 0 && (

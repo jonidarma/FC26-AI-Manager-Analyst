@@ -5,6 +5,8 @@ import type { NavigationSection } from '../../types/domain';
 const SECTION_LABELS: Record<NavigationSection, string> = {
   dashboard: 'Dashboard',
   clubs: 'Career Mode Clubs',
+  'squad-management': 'Squad Management',
+  'tactical-setup': 'Tactical Setup',
   'match-prep': 'Match Preparation',
   'match-capture': 'Match Capture',
   'halftime-briefing': 'Half-Time Briefing',

@@ -1,8 +1,13 @@
 import { Plus, Trash2 } from 'lucide-react';
 import React, { useMemo, useState } from 'react';
+import { SortableTh } from '../components/common/SortableTh';
 import { useApp } from '../context/AppContext';
+import { useTableSort } from '../hooks/useTableSort';
 import { desktopBridge } from '../services/desktopBridge';
-import type { ConfidenceLevel, TacticalMemoryEntry } from '../types/domain';
+import type { ConfidenceLevel, DashboardSummary, TacticalMemoryEntry } from '../types/domain';
+
+type FormationLedgerSortKey = 'formation' | 'matches' | 'record';
+type FormationBreakdownRow = DashboardSummary['formationBreakdown'][number];
 
 const CATEGORY_LABELS: Record<TacticalMemoryEntry['category'], string> = {
   recurring_weakness: 'Recurring Weakness',
@@ -31,6 +36,24 @@ export function TacticalMemoryView() {
     }
     return counts;
   }, [feedbackRecords]);
+
+  const formations = dashboard?.formationBreakdown ?? [];
+  const formationAccessors = useMemo<
+    Record<FormationLedgerSortKey, (f: FormationBreakdownRow) => string | number | null>
+  >(
+    () => ({
+      formation: (f) => f.formation,
+      matches: (f) => f.matches,
+      record: (f) => f.wins * 10000 + f.draws * 100 - f.losses,
+    }),
+    []
+  );
+  const {
+    sortedRows: sortedFormations,
+    sortKey: formationSortKey,
+    sortDir: formationSortDir,
+    toggleSort: toggleFormationSort,
+  } = useTableSort(formations, formationAccessors, { key: 'matches', dir: 'desc' });
 
   if (!activeClub) {
     return (
@@ -75,7 +98,6 @@ export function TacticalMemoryView() {
     }
   }
 
-  const formations = dashboard?.formationBreakdown ?? [];
 
   return (
     <div className="space-y-7">
@@ -186,13 +208,38 @@ export function TacticalMemoryView() {
             <table className="w-full text-left text-[13px]">
               <thead>
                 <tr className="border-b border-white/[0.08] text-[12px] text-[#7D8798]">
-                  <th className="py-2 font-medium">Formation</th>
-                  <th className="py-2 text-right font-medium">Matches</th>
-                  <th className="py-2 text-right font-medium">W–D–L</th>
+                  <SortableTh
+                    label="Formation"
+                    columnKey="formation"
+                    activeKey={formationSortKey}
+                    direction={formationSortDir}
+                    onSort={toggleFormationSort}
+                    className="py-2 font-medium"
+                  />
+                  <SortableTh
+                    label="Matches"
+                    columnKey="matches"
+                    activeKey={formationSortKey}
+                    direction={formationSortDir}
+                    onSort={toggleFormationSort}
+                    defaultDir="desc"
+                    align="right"
+                    className="py-2 font-medium"
+                  />
+                  <SortableTh
+                    label="W–D–L"
+                    columnKey="record"
+                    activeKey={formationSortKey}
+                    direction={formationSortDir}
+                    onSort={toggleFormationSort}
+                    defaultDir="desc"
+                    align="right"
+                    className="py-2 font-medium"
+                  />
                 </tr>
               </thead>
               <tbody className="divide-y divide-white/[0.06]">
-                {formations.map((f) => (
+                {sortedFormations.map((f) => (
                   <tr key={f.formation}>
                     <td className="py-2.5 text-white font-medium">{f.formation}</td>
                     <td className="py-2.5 text-right font-mono tabular-nums text-[#C5CCD7]">

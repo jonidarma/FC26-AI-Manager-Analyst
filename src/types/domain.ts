@@ -1,6 +1,8 @@
 export type NavigationSection =
   | 'dashboard'
   | 'clubs'
+  | 'squad-management'
+  | 'tactical-setup'
   | 'match-prep'
   | 'match-capture'
   | 'halftime-briefing'
@@ -63,12 +65,39 @@ export interface ClubWithProfile extends Club {
   matchCount: number;
 }
 
+export type SquadStatus =
+  | 'active'
+  | 'loaned_in'
+  | 'loaned_out'
+  | 'transferred_out'
+  | 'youth_academy'
+  | 'released';
+
+export type PlayerAvailability =
+  | 'available'
+  | 'injured'
+  | 'suspended'
+  | 'doubtful'
+  | 'unavailable';
+
 export interface Player {
   id: string;
   clubId: string;
   catalogPlayerId: string | null;
   name: string;
+  displayName: string;
+  displayNameOverride: string | null;
+  shortName: string | null;
+  fullName: string;
   position: string;
+  secondaryPositions: string[];
+  squadNumber: number | null;
+  squadStatus: SquadStatus;
+  availability: PlayerAvailability;
+  injuryStatus: string | null;
+  suspensionStatus: string | null;
+  membershipStartDate: string | null;
+  membershipEndDate: string | null;
   overallRating: number | null;
   potentialRating: number | null;
   age: number | null;
@@ -81,6 +110,101 @@ export interface Player {
   strengths: string;
   weaknesses: string;
   preferredInstructions: string;
+  notes: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface DefaultRosterPreview {
+  status: 'linked_with_players' | 'linked_no_players' | 'unlinked_club';
+  catalogClubId: string | null;
+  catalogClubName: string | null;
+  totalMatchedPlayers: number;
+  alreadyInSquadCount: number;
+  newToImportCount: number;
+  samplePlayers: Array<{
+    id: string;
+    displayName: string;
+    fullName: string;
+    primaryPosition: string;
+    overallRating: number | null;
+    age: number | null;
+  }>;
+  message: string;
+}
+
+export interface DefaultRosterImportResult {
+  clubId: string;
+  catalogClubId: string | null;
+  matchedCount: number;
+  importedCount: number;
+  skippedDuplicatesCount: number;
+  status: DefaultRosterPreview['status'];
+  message: string;
+}
+
+export interface TacticalPresetAssignment {
+  id?: string;
+  slotOrder: number;
+  positionCode: string;
+  playerId: string | null;
+  playerDisplayName?: string | null;
+  role: string;
+  focus: string;
+}
+
+export interface TacticalPreset {
+  id: string;
+  clubId: string;
+  name: string;
+  formationId: string | null;
+  formationName: string;
+  buildUpStyle: string;
+  defensiveApproach: string;
+  defensiveLineHeight: number;
+  isDefault: boolean;
+  benchPlayerIds: string[];
+  notes: string;
+  assignments: TacticalPresetAssignment[];
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface MatchTacticalSnapshotAssignment {
+  slotOrder: number;
+  positionCode: string;
+  playerId: string | null;
+  playerDisplayName: string | null;
+  playerFullName: string | null;
+  role: string;
+  focus: string;
+  squadStatusAtSnapshot?: string | null;
+  availabilityAtSnapshot?: string | null;
+}
+
+export interface MatchTacticalSnapshotBenchEntry {
+  playerId: string;
+  displayName: string;
+  fullName: string;
+  position: string;
+  overallRating: number | null;
+}
+
+export interface MatchTacticalSnapshot {
+  id: string;
+  matchId: string;
+  sourcePresetId: string | null;
+  sourcePresetName: string | null;
+  snapshotType: 'pre_match' | 'in_match_adjustment';
+  isLocked: boolean;
+  formationId: string | null;
+  formationName: string;
+  buildUpStyle: string;
+  defensiveApproach: string;
+  defensiveLineHeight: number;
+  assignments: MatchTacticalSnapshotAssignment[];
+  benchPlayers: MatchTacticalSnapshotBenchEntry[];
+  notes: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -146,6 +270,7 @@ export interface MatchRecord {
   createdAt: string;
   updatedAt: string;
   tacticalConfiguration?: TacticalConfiguration | null;
+  tacticalSnapshot?: MatchTacticalSnapshot | null;
   hasHalftimeReport?: boolean;
   hasPostMatchReport?: boolean;
 }
@@ -161,7 +286,16 @@ export interface MatchSession {
   id: string;
   matchId: string;
   half: 'first_half' | 'second_half';
-  status: 'idle' | 'recording' | 'paused' | 'finalizing' | 'completed' | 'recovered' | 'discarded';
+  status:
+    | 'idle'
+    | 'recording'
+    | 'paused'
+    | 'finalizing'
+    | 'completed'
+    | 'partial'
+    | 'recovered'
+    | 'failed'
+    | 'discarded';
   captureSourceId: string | null;
   captureSourceName: string | null;
   resolution: string;
@@ -172,6 +306,9 @@ export interface MatchSession {
   audioEnabled?: boolean;
   outputDirectory?: string | null;
   integrityStatus?: RecordingIntegrityStatus;
+  aiEligible?: boolean;
+  failureReason?: string | null;
+  diagnosticsPath?: string | null;
   recoveryNotes?: string | null;
   startedAt: string | null;
   endedAt: string | null;
@@ -488,11 +625,75 @@ export type RecordingUiStatus =
   | 'paused'
   | 'finalizing'
   | 'completed'
+  | 'partial'
   | 'interrupted'
   | 'recoverable'
   | 'recovered'
   | 'failed'
   | 'discarded';
+
+export interface RecordingChunkSendResult {
+  ok: boolean;
+  buffered: boolean;
+  bytes: number;
+  error?: string;
+}
+
+export interface RendererCaptureDiagnostics {
+  mediaStreamActive: boolean;
+  videoTrackState: 'none' | 'live' | 'ended';
+  videoTrackLabel: string | null;
+  audioTrackState: 'none' | 'live' | 'ended';
+  mediaRecorderState: 'none' | 'inactive' | 'recording' | 'paused';
+  negotiatedMimeType: string | null;
+  transportPortReady: boolean;
+  chunksGenerated: number;
+  bytesGenerated: number;
+  chunksTransmitted: number;
+  bytesTransmitted: number;
+  chunksFailedTransport: number;
+  lastChunkGeneratedAt: string | null;
+  lastRendererError: string | null;
+}
+
+export interface RecordingPipelineDiagnostics {
+  sessionId: string | null;
+  matchId: string | null;
+  transportPortAttached: boolean;
+  transportPortReadyAck: boolean;
+  chunksReceivedMain: number;
+  bytesReceivedMain: number;
+  ffmpegPid: number | null;
+  ffmpegState: 'idle' | 'starting' | 'running' | 'paused' | 'finalizing' | 'stopped' | 'error';
+  ffmpegStdinBytesWritten: number;
+  ffmpegExitCode: number | null;
+  ffmpegExitSignal: string | null;
+  queueSizeChunks: number;
+  queueSizeBytes: number;
+  backpressureEvents: number;
+  droppedChunks: number;
+  currentOutputFileBytes: number;
+  completedSegmentsCount: number;
+  lastChunkReceivedAt: string | null;
+  startupWatchdogState: 'idle' | 'armed' | 'satisfied' | 'triggered';
+  stallWatchdogState: 'idle' | 'monitoring' | 'paused' | 'triggered';
+  startupTimeoutSeconds: number;
+  stallTimeoutSeconds: number;
+  lastFfmpegError: string | null;
+  lastPipelineError: string | null;
+  diagnosticsLogPath: string | null;
+  renderer: RendererCaptureDiagnostics;
+}
+
+export interface RecordingDiagnosticsRecord {
+  id: string;
+  sessionId: string;
+  matchId: string;
+  failureReason: string | null;
+  payload: RecordingPipelineDiagnostics;
+  createdAt: string;
+  updatedAt: string;
+}
 
 export interface CaptureManifestSegment {
   index: number;
@@ -529,8 +730,19 @@ export interface CaptureManifest {
   segmentDurationMinutes: number;
   maxRecordingMinutes: number;
   outputDirectory: string;
-  status: 'recording' | 'paused' | 'finalizing' | 'completed' | 'recovered' | 'discarded';
+  status:
+    | 'recording'
+    | 'paused'
+    | 'finalizing'
+    | 'completed'
+    | 'partial'
+    | 'recovered'
+    | 'failed'
+    | 'discarded';
   integrityStatus: RecordingIntegrityStatus;
+  aiEligible: boolean;
+  failureReason: string | null;
+  diagnosticsPath: string | null;
   activeDurationSeconds: number;
   totalBytes: number;
   nextSegmentIndex: number;
@@ -570,10 +782,13 @@ export interface RecordingTelemetry {
   backpressureActive: boolean;
   outputDirectory: string | null;
   integrityStatus: RecordingIntegrityStatus;
+  aiEligible: boolean;
+  failureReason: string | null;
   maxRecordingWarning: boolean;
   lastWarning: string | null;
   lastError: string | null;
   segments: CaptureManifestSegment[];
+  diagnostics: RecordingPipelineDiagnostics;
 }
 
 export interface RecoverableSessionSummary {
@@ -599,7 +814,7 @@ export interface RecoveryExecutionResult {
   sessionId: string;
   matchId: string;
   half: 'first_half' | 'second_half';
-  status: 'recovered' | 'discarded';
+  status: 'recovered' | 'failed' | 'discarded';
   integrityStatus: RecordingIntegrityStatus;
   classification: 'recovered' | 'partially_recovered' | 'corrupted';
   recoveredSegments: CaptureManifestSegment[];
@@ -719,6 +934,7 @@ export interface CatalogPlayer {
   externalSourceId: string;
   fullName: string;
   shortName: string;
+  displayNameOverride?: string | null;
   clubId: string | null;
   clubName: string | null;
   leagueId: string | null;

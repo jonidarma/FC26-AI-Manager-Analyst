@@ -21,6 +21,8 @@ import type {
   ConfidenceLevel,
   DashboardSummary,
   DatasetCompleteness,
+  DefaultRosterImportResult,
+  DefaultRosterPreview,
   DesktopBridgeCapabilities,
   DiskSpaceInfo,
   FeedbackChoice,
@@ -30,19 +32,27 @@ import type {
   MatchRecord,
   MatchSessionWithSegments,
   MatchStatus,
+  MatchTacticalSnapshot,
   MatchVenue,
   Opponent,
   PaginatedResult,
   Player,
+  PlayerAvailability,
   PlayerRoleAssignment,
   PostMatchReportRecord,
   RecommendationFeedbackRecord,
   RecoverableSessionSummary,
+  RecordingChunkSendResult,
+  RecordingDiagnosticsRecord,
   RecordingTelemetry,
   RecoveryExecutionResult,
+  RendererCaptureDiagnostics,
   RoleFocusValidationResult,
+  SquadStatus,
   TacticalCatalogItem,
   TacticalMemoryEntry,
+  TacticalPreset,
+  TacticalPresetAssignment,
 } from '../types/domain';
 
 interface ElectronBackendConnection {
@@ -108,6 +118,14 @@ interface ElectronPreloadApi {
     manifest?: CaptureManifest | null;
     telemetry?: RecordingTelemetry;
   }>;
+  reportRendererDiagnostics: (payload: {
+    sessionId: string;
+    renderer: Partial<RendererCaptureDiagnostics>;
+  }) => Promise<{ updated: boolean }>;
+  reportWatchdogFailure: (payload: {
+    sessionId: string;
+    reason: string;
+  }) => Promise<{ failed: boolean }>;
   discardRecordingSession: (payload: {
     sessionId: string;
     matchId?: string;
@@ -118,16 +136,29 @@ interface ElectronPreloadApi {
   recoverSession: (sessionId: string) => Promise<RecoveryExecutionResult>;
   openRecordingSegment: (filePath: string) => Promise<{ opened: boolean; path: string }>;
   openSessionFolder: (folderPath: string) => Promise<{ opened: boolean; path: string }>;
+  openDiagnosticsFolder: () => Promise<{ opened: boolean; path: string }>;
+  exportSessionDiagnostics: (payload?: {
+    sessionId?: string;
+    matchId?: string;
+  }) => Promise<{ exported: boolean; path: string }>;
   minimizeWindow: () => Promise<void>;
-  sendRecordingChunk: (sessionId: string, chunk: ArrayBuffer) => boolean;
+  isTransportPortReady: (sessionId: string) => boolean;
+  sendRecordingChunk: (sessionId: string, chunk: ArrayBuffer | Uint8Array) => RecordingChunkSendResult;
   endRecordingTransport: (sessionId: string) => void;
   onTransportControl: (
-    cb: (msg: {
-      type: 'backpressure';
-      active: boolean;
-      queuedBytes: number;
-      queuedChunks: number;
-    }) => void
+    cb: (
+      msg:
+        | {
+            type: 'backpressure';
+            active: boolean;
+            queuedBytes: number;
+            queuedChunks: number;
+          }
+        | {
+            type: 'port-ready';
+            sessionId: string;
+          }
+    ) => void
   ) => () => void;
   onRecordingTelemetry: (cb: (telemetry: RecordingTelemetry) => void) => () => void;
 }
@@ -380,11 +411,41 @@ class DesktopBridgeService {
     return window.fc26Desktop.getRecordingStatus();
   }
 
-  public sendRecordingChunk(sessionId: string, chunk: ArrayBuffer): boolean {
+  public isTransportPortReady(sessionId: string): boolean {
+    if (this.isElectron() && window.fc26Desktop) {
+      return window.fc26Desktop.isTransportPortReady(sessionId);
+    }
+    return false;
+  }
+
+  public sendRecordingChunk(
+    sessionId: string,
+    chunk: ArrayBuffer | Uint8Array
+  ): RecordingChunkSendResult {
     if (this.isElectron() && window.fc26Desktop) {
       return window.fc26Desktop.sendRecordingChunk(sessionId, chunk);
     }
-    return false;
+    return { ok: false, buffered: false, bytes: 0, error: 'Desktop transport unavailable.' };
+  }
+
+  public async reportRendererDiagnostics(payload: {
+    sessionId: string;
+    renderer: Partial<RendererCaptureDiagnostics>;
+  }): Promise<{ updated: boolean }> {
+    if (this.isElectron() && window.fc26Desktop) {
+      return window.fc26Desktop.reportRendererDiagnostics(payload);
+    }
+    return { updated: false };
+  }
+
+  public async reportWatchdogFailure(payload: {
+    sessionId: string;
+    reason: string;
+  }): Promise<{ failed: boolean }> {
+    if (this.isElectron() && window.fc26Desktop) {
+      return window.fc26Desktop.reportWatchdogFailure(payload);
+    }
+    return { failed: false };
   }
 
   public endRecordingTransport(sessionId: string): void {
@@ -394,12 +455,19 @@ class DesktopBridgeService {
   }
 
   public onTransportControl(
-    cb: (msg: {
-      type: 'backpressure';
-      active: boolean;
-      queuedBytes: number;
-      queuedChunks: number;
-    }) => void
+    cb: (
+      msg:
+        | {
+            type: 'backpressure';
+            active: boolean;
+            queuedBytes: number;
+            queuedChunks: number;
+          }
+        | {
+            type: 'port-ready';
+            sessionId: string;
+          }
+    ) => void
   ): () => void {
     if (this.isElectron() && window.fc26Desktop) {
       return window.fc26Desktop.onTransportControl(cb);
@@ -412,6 +480,23 @@ class DesktopBridgeService {
       return window.fc26Desktop.onRecordingTelemetry(cb);
     }
     return () => undefined;
+  }
+
+  public async openDiagnosticsFolder(): Promise<{ opened: boolean; path: string }> {
+    if (!this.isElectron() || !window.fc26Desktop) {
+      throw new Error('Opening local diagnostics folder requires the Windows Electron desktop application.');
+    }
+    return window.fc26Desktop.openDiagnosticsFolder();
+  }
+
+  public async exportSessionDiagnostics(payload?: {
+    sessionId?: string;
+    matchId?: string;
+  }): Promise<{ exported: boolean; path: string }> {
+    if (!this.isElectron() || !window.fc26Desktop) {
+      throw new Error('Exporting local capture diagnostics requires the Windows Electron desktop application.');
+    }
+    return window.fc26Desktop.exportSessionDiagnostics(payload);
   }
 
   public async getDiskSpace(targetDir: string): Promise<DiskSpaceInfo> {
@@ -489,11 +574,34 @@ class DesktopBridgeService {
     preferredAttackingStyle: string;
     preferredDefensiveStyle: string;
     setActive?: boolean;
-  }): Promise<ClubWithProfile> {
-    return this.apiFetch<ClubWithProfile>('/api/clubs', {
-      method: 'POST',
-      body: JSON.stringify(payload),
-    });
+    rosterInitMode?: 'default_roster' | 'empty';
+  }): Promise<ClubWithProfile & { defaultRosterImport?: DefaultRosterImportResult | null }> {
+    return this.apiFetch<ClubWithProfile & { defaultRosterImport?: DefaultRosterImportResult | null }>(
+      '/api/clubs',
+      {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      }
+    );
+  }
+
+  public previewDefaultRosterByCatalogClub(catalogClubId: string): Promise<DefaultRosterPreview> {
+    return this.apiFetch<DefaultRosterPreview>(
+      `/api/catalog/clubs/${encodeURIComponent(catalogClubId)}/default-roster-preview`
+    );
+  }
+
+  public previewClubDefaultRoster(clubId: string): Promise<DefaultRosterPreview> {
+    return this.apiFetch<DefaultRosterPreview>(
+      `/api/clubs/${encodeURIComponent(clubId)}/default-roster/preview`
+    );
+  }
+
+  public importClubDefaultRoster(clubId: string): Promise<DefaultRosterImportResult> {
+    return this.apiFetch<DefaultRosterImportResult>(
+      `/api/clubs/${encodeURIComponent(clubId)}/default-roster/import`,
+      { method: 'POST' }
+    );
   }
 
   public updateClub(
@@ -534,7 +642,18 @@ class DesktopBridgeService {
     clubId: string;
     catalogPlayerId?: string | null;
     name: string;
+    displayNameOverride?: string | null;
+    shortName?: string | null;
+    fullName?: string | null;
     position: string;
+    secondaryPositions?: string[];
+    squadNumber?: number | null;
+    squadStatus?: SquadStatus;
+    availability?: PlayerAvailability;
+    injuryStatus?: string | null;
+    suspensionStatus?: string | null;
+    membershipStartDate?: string | null;
+    membershipEndDate?: string | null;
     overallRating: number | null;
     potentialRating?: number | null;
     age?: number | null;
@@ -547,6 +666,7 @@ class DesktopBridgeService {
     strengths: string;
     weaknesses: string;
     preferredInstructions: string;
+    notes?: string;
   }): Promise<Player> {
     return this.apiFetch<Player>('/api/players', {
       method: 'POST',
@@ -559,6 +679,11 @@ class DesktopBridgeService {
     payload: {
       catalogPlayerId: string;
       position?: string;
+      displayNameOverride?: string | null;
+      squadNumber?: number | null;
+      squadStatus?: SquadStatus;
+      availability?: PlayerAvailability;
+      membershipStartDate?: string | null;
       overallRating?: number | null;
       potentialRating?: number | null;
       age?: number | null;
@@ -568,6 +693,7 @@ class DesktopBridgeService {
       strengths?: string;
       weaknesses?: string;
       preferredInstructions?: string;
+      notes?: string;
     }
   ): Promise<Player> {
     return this.apiFetch<Player>(`/api/clubs/${clubId}/players/from-catalog`, {
@@ -588,6 +714,77 @@ class DesktopBridgeService {
 
   public deletePlayer(playerId: string): Promise<{ deleted: boolean }> {
     return this.apiFetch<{ deleted: boolean }>(`/api/players/${playerId}`, { method: 'DELETE' });
+  }
+
+  // Phase 2.1 — Club Tactical Presets
+  public listTacticalPresets(clubId: string): Promise<TacticalPreset[]> {
+    return this.apiFetch<TacticalPreset[]>(`/api/clubs/${encodeURIComponent(clubId)}/tactical-presets`);
+  }
+
+  public createTacticalPreset(
+    clubId: string,
+    payload: {
+      name: string;
+      formationId?: string | null;
+      formationName: string;
+      buildUpStyle: string;
+      defensiveApproach: string;
+      defensiveLineHeight: number;
+      isDefault?: boolean;
+      benchPlayerIds?: string[];
+      notes?: string;
+      assignments: TacticalPresetAssignment[];
+    }
+  ): Promise<TacticalPreset> {
+    return this.apiFetch<TacticalPreset>(`/api/clubs/${encodeURIComponent(clubId)}/tactical-presets`, {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  }
+
+  public updateTacticalPreset(
+    presetId: string,
+    payload: Partial<{
+      name: string;
+      formationId: string | null;
+      formationName: string;
+      buildUpStyle: string;
+      defensiveApproach: string;
+      defensiveLineHeight: number;
+      isDefault: boolean;
+      benchPlayerIds: string[];
+      notes: string;
+      assignments: TacticalPresetAssignment[];
+    }>
+  ): Promise<TacticalPreset> {
+    return this.apiFetch<TacticalPreset>(`/api/tactical-presets/${encodeURIComponent(presetId)}`, {
+      method: 'PUT',
+      body: JSON.stringify(payload),
+    });
+  }
+
+  public duplicateTacticalPreset(presetId: string, newName?: string): Promise<TacticalPreset> {
+    return this.apiFetch<TacticalPreset>(
+      `/api/tactical-presets/${encodeURIComponent(presetId)}/duplicate`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ name: newName }),
+      }
+    );
+  }
+
+  public setDefaultTacticalPreset(presetId: string): Promise<TacticalPreset> {
+    return this.apiFetch<TacticalPreset>(
+      `/api/tactical-presets/${encodeURIComponent(presetId)}/set-default`,
+      { method: 'POST' }
+    );
+  }
+
+  public deleteTacticalPreset(presetId: string): Promise<{ deleted: boolean }> {
+    return this.apiFetch<{ deleted: boolean }>(
+      `/api/tactical-presets/${encodeURIComponent(presetId)}`,
+      { method: 'DELETE' }
+    );
   }
 
   public listOpponents(): Promise<Opponent[]> {
@@ -639,12 +836,14 @@ class DesktopBridgeService {
     competition: string;
     venue: MatchVenue;
     matchDate: string;
+    sourcePresetId?: string | null;
     startingFormation: string;
     startingXiIds: string[];
     benchIds: string[];
     objective: string;
     preMatchNotes: string;
     tacticalSetup: {
+      formationId?: string | null;
       buildUpStyle: string;
       defensiveApproach: string;
       defensiveLineHeight: number;
@@ -655,6 +854,57 @@ class DesktopBridgeService {
       method: 'POST',
       body: JSON.stringify(payload),
     });
+  }
+
+  public listMatchTacticalSnapshots(matchId: string): Promise<MatchTacticalSnapshot[]> {
+    return this.apiFetch<MatchTacticalSnapshot[]>(
+      `/api/matches/${encodeURIComponent(matchId)}/tactical-snapshots`
+    );
+  }
+
+  public updateMatchPreMatchSnapshot(
+    matchId: string,
+    payload: {
+      sourcePresetId?: string | null;
+      formationId?: string | null;
+      formationName: string;
+      buildUpStyle: string;
+      defensiveApproach: string;
+      defensiveLineHeight: number;
+      playerAssignments: PlayerRoleAssignment[];
+      benchIds?: string[];
+      notes?: string;
+    }
+  ): Promise<MatchTacticalSnapshot> {
+    return this.apiFetch<MatchTacticalSnapshot>(
+      `/api/matches/${encodeURIComponent(matchId)}/tactical-snapshot`,
+      {
+        method: 'PUT',
+        body: JSON.stringify(payload),
+      }
+    );
+  }
+
+  public createInMatchTacticalAdjustment(
+    matchId: string,
+    payload: {
+      formationId?: string | null;
+      formationName: string;
+      buildUpStyle: string;
+      defensiveApproach: string;
+      defensiveLineHeight: number;
+      playerAssignments: PlayerRoleAssignment[];
+      benchIds?: string[];
+      notes?: string;
+    }
+  ): Promise<MatchTacticalSnapshot> {
+    return this.apiFetch<MatchTacticalSnapshot>(
+      `/api/matches/${encodeURIComponent(matchId)}/tactical-adjustments`,
+      {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      }
+    );
   }
 
   public updateMatch(
@@ -853,6 +1103,8 @@ class DesktopBridgeService {
     leagueId?: string;
     nationId?: string;
     teamCategory?: 'mens' | 'womens' | '';
+    sortBy?: 'name' | 'code' | 'category' | 'league' | 'nation' | 'players';
+    sortDir?: 'asc' | 'desc';
     page?: number;
     pageSize?: number;
   }): Promise<PaginatedResult<CatalogClub>> {
@@ -861,6 +1113,8 @@ class DesktopBridgeService {
     if (params?.leagueId) qs.set('leagueId', params.leagueId);
     if (params?.nationId) qs.set('nationId', params.nationId);
     if (params?.teamCategory) qs.set('teamCategory', params.teamCategory);
+    if (params?.sortBy) qs.set('sortBy', params.sortBy);
+    if (params?.sortDir) qs.set('sortDir', params.sortDir);
     if (params?.page) qs.set('page', String(params.page));
     if (params?.pageSize) qs.set('pageSize', String(params.pageSize));
     const suffix = qs.toString() ? `?${qs.toString()}` : '';
@@ -880,7 +1134,16 @@ class DesktopBridgeService {
     minAge?: number;
     maxAge?: number;
     preferredFoot?: 'Right' | 'Left' | 'Both' | '';
-    sortBy?: 'overall' | 'potential' | 'growth' | 'age' | 'name' | 'pace' | 'market_value';
+    sortBy?:
+      | 'overall'
+      | 'potential'
+      | 'growth'
+      | 'age'
+      | 'name'
+      | 'pace'
+      | 'market_value'
+      | 'position'
+      | 'club';
     sortDir?: 'asc' | 'desc';
     page?: number;
     pageSize?: number;
@@ -1031,6 +1294,18 @@ class DesktopBridgeService {
     return this.apiFetch<MatchSessionWithSegments>(
       `/api/recording-sessions/${encodeURIComponent(sessionId)}`
     );
+  }
+
+  public async getRecordingSessionDiagnostics(
+    sessionId: string
+  ): Promise<RecordingDiagnosticsRecord | null> {
+    const res = await this.authorizedFetch(
+      `/api/recording-sessions/${encodeURIComponent(sessionId)}/diagnostics`,
+      { method: 'GET' }
+    );
+    if (res.status === 404) return null;
+    if (!res.ok) throw new Error('Failed to load recording diagnostics');
+    return (await res.json()) as RecordingDiagnosticsRecord;
   }
 }
 

@@ -1,26 +1,28 @@
 import {
+  ArrowRight,
   Check,
-  Database,
   Link2,
   Pencil,
   Plus,
   Search,
+  Target,
   Trash2,
-  UserPlus,
-  X,
+  Users,
 } from 'lucide-react';
 import React, { useEffect, useMemo, useState } from 'react';
+import { SortableTh } from '../components/common/SortableTh';
 import { useApp } from '../context/AppContext';
-import { PLAYER_POSITIONS } from '../data/tacticalCatalog';
+import { useTableSort } from '../hooks/useTableSort';
 import { desktopBridge } from '../services/desktopBridge';
 import type {
   CatalogClub,
   CatalogFormation,
-  CatalogPlayer,
-  CatalogRole,
   ClubWithProfile,
-  Player,
+  DefaultRosterPreview,
 } from '../types/domain';
+import { hasDistinctFullName } from '../utils/playerDisplayName';
+
+type SavedClubSortKey = 'club' | 'seasonManager' | 'formations' | 'squad' | 'matches';
 
 const EMPTY_CLUB_FORM = {
   name: '',
@@ -34,33 +36,27 @@ const EMPTY_CLUB_FORM = {
   alternativeFormation: '4-2-3-1 Wide',
   preferredAttackingStyle: 'Balanced',
   preferredDefensiveStyle: 'Balanced',
-};
-
-const EMPTY_PLAYER_FORM = {
-  name: '',
-  position: 'CM',
-  overallRating: '',
-  potentialRating: '',
-  age: '',
-  preferredFoot: 'Right' as 'Right' | 'Left' | 'Both',
-  playerRole: '',
-  playerFocus: '',
-  contractExpiry: '',
-  strengths: '',
-  weaknesses: '',
-  preferredInstructions: '',
+  rosterInitMode: 'default_roster' as 'default_roster' | 'empty',
 };
 
 export function ClubsView() {
-  const { clubs, activeClub, players, tacticalCatalog, refreshAll, notify, setActiveSection } =
-    useApp();
+  const {
+    clubs,
+    activeClub,
+    players,
+    tacticalPresets,
+    tacticalCatalog,
+    refreshAll,
+    notify,
+    requestNavigation,
+    guardedActivateClub,
+  } = useApp();
+
   const [clubForm, setClubForm] = useState(EMPTY_CLUB_FORM);
   const [editingClubId, setEditingClubId] = useState<string | null>(null);
   const [showClubForm, setShowClubForm] = useState<boolean>(clubs.length === 0);
 
-  // Catalog reference data for formations & cascading roles/focuses
   const [catalogFormations, setCatalogFormations] = useState<CatalogFormation[]>([]);
-  const [catalogRoles, setCatalogRoles] = useState<CatalogRole[]>([]);
 
   // Master Club Picker state
   const [clubSearchQuery, setClubSearchQuery] = useState('');
@@ -68,34 +64,20 @@ export function ClubsView() {
   const [clubSearchResults, setClubSearchResults] = useState<CatalogClub[]>([]);
   const [clubSearching, setClubSearching] = useState(false);
 
-  // Squad manual add/edit form
-  const [playerForm, setPlayerForm] = useState(EMPTY_PLAYER_FORM);
-  const [editingPlayerId, setEditingPlayerId] = useState<string | null>(null);
-  const [editingPlayerCatalogId, setEditingPlayerCatalogId] = useState<string | null>(null);
-  const [showPlayerForm, setShowPlayerForm] = useState<boolean>(false);
-
-  // Import from FC26 Player Database panel
-  const [showCatalogImportPanel, setShowCatalogImportPanel] = useState(false);
-  const [catalogPlayerQuery, setCatalogPlayerQuery] = useState('');
-  const [catalogPlayerPos, setCatalogPlayerPos] = useState('');
-  const [catalogPlayerResults, setCatalogPlayerResults] = useState<CatalogPlayer[]>([]);
-  const [catalogPlayerTotal, setCatalogPlayerTotal] = useState(0);
-  const [catalogPlayerLoading, setCatalogPlayerLoading] = useState(false);
-  const [importingCatalogPlayerId, setImportingCatalogPlayerId] = useState<string | null>(null);
+  // Automatic Default Roster Preview (for newly selected catalog club)
+  const [rosterPreview, setRosterPreview] = useState<DefaultRosterPreview | null>(null);
+  const [rosterPreviewLoading, setRosterPreviewLoading] = useState(false);
 
   const [submitting, setSubmitting] = useState(false);
 
   useEffect(() => {
     let active = true;
-    Promise.all([desktopBridge.listCatalogFormations(), desktopBridge.listCatalogRoles()])
-      .then(([fList, rList]) => {
-        if (!active) return;
-        setCatalogFormations(fList);
-        setCatalogRoles(rList);
+    desktopBridge
+      .listCatalogFormations()
+      .then((fList) => {
+        if (active) setCatalogFormations(fList);
       })
-      .catch(() => {
-        // Fallback silently to operational tacticalCatalog
-      });
+      .catch(() => {});
     return () => {
       active = false;
     };
@@ -115,8 +97,7 @@ export function ClubsView() {
           pageSize: 12,
         })
         .then((res) => {
-          if (!active) return;
-          setClubSearchResults(res.items);
+          if (active) setClubSearchResults(res.items);
         })
         .catch(() => {
           if (active) setClubSearchResults([]);
@@ -131,46 +112,32 @@ export function ClubsView() {
     };
   }, [showClubForm, clubSearchQuery, clubSearchCategory]);
 
-  // Live search for FC26 Player Database Import panel
+  // Fetch default roster preview whenever a catalog club is linked during club creation
   useEffect(() => {
-    if (!showCatalogImportPanel) return;
+    if (!showClubForm || editingClubId || !clubForm.catalogClubId) {
+      setRosterPreview(null);
+      return;
+    }
     let active = true;
-    setCatalogPlayerLoading(true);
-    const timer = window.setTimeout(() => {
-      desktopBridge
-        .searchCatalogPlayers({
-          q: catalogPlayerQuery.trim() || undefined,
-          positions: catalogPlayerPos ? [catalogPlayerPos] : undefined,
-          sortBy: 'overall',
-          sortDir: 'desc',
-          page: 1,
-          pageSize: 15,
-        })
-        .then((res) => {
-          if (!active) return;
-          setCatalogPlayerResults(res.items);
-          setCatalogPlayerTotal(res.total);
-        })
-        .catch(() => {
-          if (active) {
-            setCatalogPlayerResults([]);
-            setCatalogPlayerTotal(0);
-          }
-        })
-        .finally(() => {
-          if (active) setCatalogPlayerLoading(false);
-        });
-    }, 180);
+    setRosterPreviewLoading(true);
+    desktopBridge
+      .previewDefaultRosterByCatalogClub(clubForm.catalogClubId)
+      .then((preview) => {
+        if (active) setRosterPreview(preview);
+      })
+      .catch(() => {
+        if (active) setRosterPreview(null);
+      })
+      .finally(() => {
+        if (active) setRosterPreviewLoading(false);
+      });
     return () => {
       active = false;
-      window.clearTimeout(timer);
     };
-  }, [showCatalogImportPanel, catalogPlayerQuery, catalogPlayerPos]);
+  }, [showClubForm, editingClubId, clubForm.catalogClubId]);
 
   const formations = useMemo(() => {
-    if (catalogFormations.length > 0) {
-      return catalogFormations.map((f) => f.name);
-    }
+    if (catalogFormations.length > 0) return catalogFormations.map((f) => f.name);
     return tacticalCatalog.filter((c) => c.category === 'formation').map((c) => c.name);
   }, [catalogFormations, tacticalCatalog]);
 
@@ -183,24 +150,6 @@ export function ClubsView() {
     [tacticalCatalog]
   );
 
-  const validRolesForPlayerPosition = useMemo(() => {
-    if (catalogRoles.length > 0) {
-      return catalogRoles.filter((r) => r.eligiblePositions.includes(playerForm.position));
-    }
-    return [];
-  }, [catalogRoles, playerForm.position]);
-
-  const fallbackRoleNames = useMemo(
-    () => tacticalCatalog.filter((c) => c.category === 'player_role').map((c) => c.name),
-    [tacticalCatalog]
-  );
-
-  const validFocusesForPlayerRole = useMemo(() => {
-    if (!playerForm.playerRole || catalogRoles.length === 0) return [];
-    const roleObj = catalogRoles.find((r) => r.name === playerForm.playerRole);
-    return roleObj?.compatibleFocusesByPosition[playerForm.position] ?? [];
-  }, [catalogRoles, playerForm.playerRole, playerForm.position]);
-
   function handleSelectCatalogClub(club: CatalogClub) {
     setClubForm((prev) => ({
       ...prev,
@@ -208,6 +157,7 @@ export function ClubsView() {
       league: club.leagueName ?? prev.league,
       nation: club.nationName ?? prev.nation,
       catalogClubId: club.id,
+      rosterInitMode: 'default_roster',
     }));
   }
 
@@ -225,6 +175,7 @@ export function ClubsView() {
       alternativeFormation: club.profile.alternativeFormation,
       preferredAttackingStyle: club.profile.preferredAttackingStyle,
       preferredDefensiveStyle: club.profile.preferredDefensiveStyle,
+      rosterInitMode: 'empty',
     });
     setShowClubForm(true);
   }
@@ -241,27 +192,29 @@ export function ClubsView() {
         await desktopBridge.updateClub(editingClubId, clubForm);
         notify('success', `Updated ${clubForm.name}.`);
       } else {
-        await desktopBridge.createClub({ ...clubForm, setActive: true });
-        notify('success', `Created Career Mode club ${clubForm.name}.`);
+        const created = await desktopBridge.createClub({
+          ...clubForm,
+          setActive: true,
+        });
+        const imported = created.defaultRosterImport?.importedCount ?? 0;
+        if (imported > 0) {
+          notify(
+            'success',
+            `Created ${clubForm.name} and imported ${imported} default FC26 squad player(s).`
+          );
+        } else {
+          notify('success', `Created Career Mode club ${clubForm.name}.`);
+        }
       }
       setClubForm(EMPTY_CLUB_FORM);
       setEditingClubId(null);
+      setRosterPreview(null);
       setShowClubForm(false);
       await refreshAll();
     } catch (err) {
       notify('error', err instanceof Error ? err.message : 'Failed to save club');
     } finally {
       setSubmitting(false);
-    }
-  }
-
-  async function handleActivateClub(clubId: string) {
-    try {
-      await desktopBridge.activateClub(clubId);
-      await refreshAll();
-      notify('info', 'Active Career Mode club updated.');
-    } catch (err) {
-      notify('error', err instanceof Error ? err.message : 'Failed to switch club');
     }
   }
 
@@ -275,167 +228,25 @@ export function ClubsView() {
     }
   }
 
-  function startEditPlayer(player: Player) {
-    setEditingPlayerId(player.id);
-    setEditingPlayerCatalogId(player.catalogPlayerId ?? null);
-    setPlayerForm({
-      name: player.name,
-      position: player.position,
-      overallRating: player.overallRating !== null ? String(player.overallRating) : '',
-      potentialRating: player.potentialRating !== null ? String(player.potentialRating) : '',
-      age: player.age !== null ? String(player.age) : '',
-      preferredFoot: player.preferredFoot,
-      playerRole: player.playerRole,
-      playerFocus: player.playerFocus || '',
-      contractExpiry: player.contractExpiry ?? '',
-      strengths: player.strengths,
-      weaknesses: player.weaknesses,
-      preferredInstructions: player.preferredInstructions,
-    });
-    setShowCatalogImportPanel(false);
-    setShowPlayerForm(true);
-  }
-
-  function handlePlayerPositionChange(nextPos: string) {
-    const allowedRoles = catalogRoles.filter((r) => r.eligiblePositions.includes(nextPos));
-    const keepsRole = allowedRoles.some((r) => r.name === playerForm.playerRole);
-    const nextRole = keepsRole ? playerForm.playerRole : '';
-    const nextFocuses = nextRole
-      ? (allowedRoles.find((r) => r.name === nextRole)?.compatibleFocusesByPosition[nextPos] ?? [])
-      : [];
-    const nextFocus = nextFocuses.includes(playerForm.playerFocus)
-      ? playerForm.playerFocus
-      : (nextFocuses[0] ?? '');
-    setPlayerForm({
-      ...playerForm,
-      position: nextPos,
-      playerRole: nextRole,
-      playerFocus: nextFocus,
-    });
-  }
-
-  function handlePlayerRoleChange(nextRole: string) {
-    const roleObj = catalogRoles.find((r) => r.name === nextRole);
-    const nextFocuses = roleObj?.compatibleFocusesByPosition[playerForm.position] ?? [];
-    const nextFocus = nextFocuses.includes(playerForm.playerFocus)
-      ? playerForm.playerFocus
-      : (nextFocuses[0] ?? '');
-    setPlayerForm({
-      ...playerForm,
-      playerRole: nextRole,
-      playerFocus: nextFocus,
-    });
-  }
-
-  async function handleSavePlayer(e: React.FormEvent) {
-    e.preventDefault();
-    if (!activeClub) return;
-    if (!playerForm.name.trim()) {
-      notify('error', 'Player name is required.');
-      return;
-    }
-
-    const parsedOvr =
-      playerForm.overallRating.trim() === '' ? null : Number(playerForm.overallRating);
-    if (parsedOvr !== null && (Number.isNaN(parsedOvr) || parsedOvr < 1 || parsedOvr > 99)) {
-      notify('error', 'Overall rating must be between 1 and 99.');
-      return;
-    }
-
-    const parsedPot =
-      playerForm.potentialRating.trim() === '' ? null : Number(playerForm.potentialRating);
-    if (parsedPot !== null && (Number.isNaN(parsedPot) || parsedPot < 1 || parsedPot > 99)) {
-      notify('error', 'Potential rating must be between 1 and 99.');
-      return;
-    }
-
-    const parsedAge = playerForm.age.trim() === '' ? null : Number(playerForm.age);
-    if (parsedAge !== null && (Number.isNaN(parsedAge) || parsedAge < 14 || parsedAge > 55)) {
-      notify('error', 'Age must be between 14 and 55.');
-      return;
-    }
-
-    setSubmitting(true);
-    try {
-      if (editingPlayerId) {
-        await desktopBridge.updatePlayer(editingPlayerId, {
-          name: playerForm.name,
-          position: playerForm.position,
-          overallRating: parsedOvr,
-          potentialRating: parsedPot,
-          age: parsedAge,
-          preferredFoot: playerForm.preferredFoot,
-          playerRole: playerForm.playerRole,
-          playerFocus: playerForm.playerFocus,
-          contractExpiry: playerForm.contractExpiry.trim() || null,
-          strengths: playerForm.strengths,
-          weaknesses: playerForm.weaknesses,
-          preferredInstructions: playerForm.preferredInstructions,
-        });
-        notify('success', `Updated Career Mode player ${playerForm.name}.`);
-      } else {
-        await desktopBridge.createPlayer({
-          clubId: activeClub.id,
-          name: playerForm.name,
-          position: playerForm.position,
-          overallRating: parsedOvr,
-          potentialRating: parsedPot,
-          age: parsedAge,
-          preferredFoot: playerForm.preferredFoot,
-          playerRole: playerForm.playerRole,
-          playerFocus: playerForm.playerFocus,
-          contractExpiry: playerForm.contractExpiry.trim() || null,
-          strengths: playerForm.strengths,
-          weaknesses: playerForm.weaknesses,
-          preferredInstructions: playerForm.preferredInstructions,
-        });
-        notify('success', `Added ${playerForm.name} to ${activeClub.name}.`);
-      }
-      setPlayerForm(EMPTY_PLAYER_FORM);
-      setEditingPlayerId(null);
-      setEditingPlayerCatalogId(null);
-      setShowPlayerForm(false);
-      await refreshAll();
-    } catch (err) {
-      notify('error', err instanceof Error ? err.message : 'Failed to save player');
-    } finally {
-      setSubmitting(false);
-    }
-  }
-
-  async function handleImportCatalogPlayer(cp: CatalogPlayer) {
-    if (!activeClub) return;
-    setImportingCatalogPlayerId(cp.id);
-    try {
-      await desktopBridge.importPlayerFromCatalog(activeClub.id, {
-        catalogPlayerId: cp.id,
-      });
-      await refreshAll();
-      notify(
-        'success',
-        `Imported ${cp.fullName} (${cp.primaryPosition}) into ${activeClub.name} Career Mode squad.`
-      );
-    } catch (err) {
-      notify('error', err instanceof Error ? err.message : 'Failed to import player from catalog');
-    } finally {
-      setImportingCatalogPlayerId(null);
-    }
-  }
-
-  async function handleDeletePlayer(player: Player) {
-    try {
-      await desktopBridge.deletePlayer(player.id);
-      await refreshAll();
-      notify('info', `Removed ${player.name} from squad.`);
-    } catch (err) {
-      notify('error', err instanceof Error ? err.message : 'Failed to remove player');
-    }
-  }
-
-  const importedCatalogIds = useMemo(
-    () => new Set(players.map((p) => p.catalogPlayerId).filter((id): id is string => Boolean(id))),
-    [players]
+  const savedClubAccessors = useMemo<
+    Record<SavedClubSortKey, (club: ClubWithProfile) => string | number | null>
+  >(
+    () => ({
+      club: (c) => c.name,
+      seasonManager: (c) => `${c.profile.season} ${c.profile.managerName || ''}`.trim(),
+      formations: (c) => c.profile.primaryFormation,
+      squad: (c) => c.playerCount,
+      matches: (c) => c.matchCount,
+    }),
+    []
   );
+
+  const {
+    sortedRows: sortedClubs,
+    sortKey: clubsSortKey,
+    sortDir: clubsSortDir,
+    toggleSort: toggleClubsSort,
+  } = useTableSort(clubs, savedClubAccessors);
 
   return (
     <div className="space-y-8">
@@ -443,8 +254,8 @@ export function ClubsView() {
         <div>
           <h1 className="text-[24px] font-bold text-white tracking-tight">Career Mode Clubs</h1>
           <p className="mt-1 text-[14px] text-[#9AA4B4]">
-            Manage persistent club profiles linked to the FC26 Master Database, managerial
-            philosophy, and editable Career Mode squad rosters.
+            Create and manage Career Mode club profiles linked to the FC26 Master Database with
+            automatic default roster initialization.
           </p>
         </div>
         <button
@@ -452,6 +263,7 @@ export function ClubsView() {
           onClick={() => {
             setEditingClubId(null);
             setClubForm(EMPTY_CLUB_FORM);
+            setRosterPreview(null);
             setShowClubForm((prev) => !prev);
           }}
           className="inline-flex items-center gap-1.5 px-4 py-2 rounded-md bg-emerald-600 hover:bg-emerald-500 text-white text-[13px] font-medium transition-colors"
@@ -477,7 +289,10 @@ export function ClubsView() {
                 <span>Linked to FC26 Master Club</span>
                 <button
                   type="button"
-                  onClick={() => setClubForm({ ...clubForm, catalogClubId: null })}
+                  onClick={() => {
+                    setClubForm({ ...clubForm, catalogClubId: null });
+                    setRosterPreview(null);
+                  }}
                   className="text-[#9AA4B4] hover:text-white underline ml-1"
                 >
                   Unlink
@@ -491,11 +306,11 @@ export function ClubsView() {
             <div className="flex flex-wrap items-center justify-between gap-2">
               <div>
                 <div className="text-[12px] font-medium text-[#E5E9F0]">
-                  FC26 Master Club Picker (Optional Auto-Fill)
+                  FC26 Master Club Picker (Stable Catalog Club ID Linking)
                 </div>
                 <div className="text-[11px] text-[#7D8798]">
-                  Men&apos;s and women&apos;s clubs are maintained as separate records. Select a
-                  club to auto-fill Name, League, and Nation, or enter a custom club below.
+                  Select a club from the FC26 catalog to link its stable club ID and preview
+                  automatic default squad initialization, or enter a custom club below.
                 </div>
               </div>
               <div className="flex items-center gap-1 text-[11px]">
@@ -556,12 +371,120 @@ export function ClubsView() {
                 })
               ) : (
                 <div className="text-[12px] text-[#7D8798] py-2 col-span-full">
-                  No matching clubs in the local baseline catalog. You can still enter any custom
-                  club manually below or import additional clubs in FC26 Database Center.
+                  No matching clubs in the local catalog. You can still enter a custom club below.
                 </div>
               )}
             </div>
           </div>
+
+          {/* Automatic Default Roster Initialization Panel (Create mode only) */}
+          {!editingClubId && clubForm.catalogClubId && (
+            <div className="rounded-md border border-emerald-500/30 bg-[#0D1412] p-4 space-y-3 text-[12px]">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="font-semibold text-white">
+                  Default Career Squad Initialization
+                </div>
+                {rosterPreviewLoading && (
+                  <span className="text-[#8A94A6]">Checking FC26 catalog players...</span>
+                )}
+              </div>
+
+              {rosterPreview && (
+                <>
+                  <p
+                    className={
+                      rosterPreview.status === 'linked_with_players'
+                        ? 'text-emerald-200'
+                        : 'text-amber-200'
+                    }
+                  >
+                    {rosterPreview.message}
+                  </p>
+
+                  {rosterPreview.status === 'linked_with_players' && (
+                    <>
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-2.5">
+                        <label
+                          className={`flex items-start gap-2.5 p-3 rounded border cursor-pointer ${
+                            clubForm.rosterInitMode === 'default_roster'
+                              ? 'border-emerald-500 bg-emerald-500/10 text-white'
+                              : 'border-white/[0.1] bg-[#12151B] text-[#B8C0CE]'
+                          }`}
+                        >
+                          <input
+                            type="radio"
+                            name="rosterInitMode"
+                            checked={clubForm.rosterInitMode === 'default_roster'}
+                            onChange={() =>
+                              setClubForm({ ...clubForm, rosterInitMode: 'default_roster' })
+                            }
+                            className="mt-0.5 accent-emerald-500"
+                          />
+                          <div>
+                            <div className="font-medium">
+                              Import Default Club Roster (Recommended ·{' '}
+                              {rosterPreview.totalMatchedPlayers} players)
+                            </div>
+                            <div className="text-[11px] text-[#8A94A6] mt-0.5">
+                              Copies real FC26 players linked to this club ID into your independent
+                              Career Mode squad.
+                            </div>
+                          </div>
+                        </label>
+
+                        <label
+                          className={`flex items-start gap-2.5 p-3 rounded border cursor-pointer ${
+                            clubForm.rosterInitMode === 'empty'
+                              ? 'border-emerald-500 bg-emerald-500/10 text-white'
+                              : 'border-white/[0.1] bg-[#12151B] text-[#B8C0CE]'
+                          }`}
+                        >
+                          <input
+                            type="radio"
+                            name="rosterInitMode"
+                            checked={clubForm.rosterInitMode === 'empty'}
+                            onChange={() => setClubForm({ ...clubForm, rosterInitMode: 'empty' })}
+                            className="mt-0.5 accent-emerald-500"
+                          />
+                          <div>
+                            <div className="font-medium">Start with Empty Squad</div>
+                            <div className="text-[11px] text-[#8A94A6] mt-0.5">
+                              Build your squad manually or import the default roster later from
+                              Squad Management.
+                            </div>
+                          </div>
+                        </label>
+                      </div>
+
+                      {rosterPreview.samplePlayers.length > 0 &&
+                        clubForm.rosterInitMode === 'default_roster' && (
+                          <div className="flex flex-wrap gap-1.5 pt-1">
+                            {rosterPreview.samplePlayers.slice(0, 8).map((sp) => (
+                              <span
+                                key={sp.id}
+                                title={
+                                  hasDistinctFullName(sp.displayName, sp.fullName)
+                                    ? sp.fullName
+                                    : undefined
+                                }
+                                className="px-2 py-0.5 rounded bg-[#12151B] border border-white/[0.08] text-[11px] text-[#D7DDE7] font-mono"
+                              >
+                                {sp.displayName} ({sp.primaryPosition} · {sp.overallRating ?? '—'})
+                              </span>
+                            ))}
+                            {rosterPreview.totalMatchedPlayers > 8 && (
+                              <span className="px-2 py-0.5 text-[11px] text-[#8A94A6]">
+                                +{rosterPreview.totalMatchedPlayers - 8} more
+                              </span>
+                            )}
+                          </div>
+                        )}
+                    </>
+                  )}
+                </>
+              )}
+            </div>
+          )}
 
           <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
             <div>
@@ -640,7 +563,7 @@ export function ClubsView() {
               <select
                 value={clubForm.primaryFormation}
                 onChange={(e) => setClubForm({ ...clubForm, primaryFormation: e.target.value })}
-                className="w-full bg-[#0C0F14] border border-white/[0.12] rounded-md px-3 py-2 text-[13px] text-white focus:outline-none focus:border-emerald-500"
+                className="w-full bg-[#0C0F14] border border-white/[0.12] rounded-md px-3 py-2 text-[13px] text-white"
               >
                 {!formations.includes(clubForm.primaryFormation) && (
                   <option value={clubForm.primaryFormation}>{clubForm.primaryFormation}</option>
@@ -660,7 +583,7 @@ export function ClubsView() {
               <select
                 value={clubForm.alternativeFormation}
                 onChange={(e) => setClubForm({ ...clubForm, alternativeFormation: e.target.value })}
-                className="w-full bg-[#0C0F14] border border-white/[0.12] rounded-md px-3 py-2 text-[13px] text-white focus:outline-none focus:border-emerald-500"
+                className="w-full bg-[#0C0F14] border border-white/[0.12] rounded-md px-3 py-2 text-[13px] text-white"
               >
                 {!formations.includes(clubForm.alternativeFormation) && (
                   <option value={clubForm.alternativeFormation}>
@@ -684,7 +607,7 @@ export function ClubsView() {
                 onChange={(e) =>
                   setClubForm({ ...clubForm, preferredAttackingStyle: e.target.value })
                 }
-                className="w-full bg-[#0C0F14] border border-white/[0.12] rounded-md px-3 py-2 text-[13px] text-white focus:outline-none focus:border-emerald-500"
+                className="w-full bg-[#0C0F14] border border-white/[0.12] rounded-md px-3 py-2 text-[13px] text-white"
               >
                 {buildUpOptions.map((opt) => (
                   <option key={opt} value={opt}>
@@ -703,7 +626,7 @@ export function ClubsView() {
                 onChange={(e) =>
                   setClubForm({ ...clubForm, preferredDefensiveStyle: e.target.value })
                 }
-                className="w-full bg-[#0C0F14] border border-white/[0.12] rounded-md px-3 py-2 text-[13px] text-white focus:outline-none focus:border-emerald-500"
+                className="w-full bg-[#0C0F14] border border-white/[0.12] rounded-md px-3 py-2 text-[13px] text-white"
               >
                 {defensiveOptions.map((opt) => (
                   <option key={opt} value={opt}>
@@ -720,6 +643,7 @@ export function ClubsView() {
               onClick={() => {
                 setShowClubForm(false);
                 setEditingClubId(null);
+                setRosterPreview(null);
               }}
               className="px-4 py-2 rounded-md border border-white/[0.12] text-[13px] text-[#C8CFD9] hover:text-white"
             >
@@ -744,16 +668,55 @@ export function ClubsView() {
             <table className="w-full text-left text-[13px]">
               <thead>
                 <tr className="border-b border-white/[0.08] text-[12px] text-[#7D8798]">
-                  <th className="py-2 pr-4 font-medium">Club</th>
-                  <th className="py-2 pr-4 font-medium">Season & Manager</th>
-                  <th className="py-2 pr-4 font-medium">Formations</th>
-                  <th className="py-2 pr-4 font-medium text-right">Squad</th>
-                  <th className="py-2 pr-4 font-medium text-right">Matches</th>
+                  <SortableTh
+                    label="Club"
+                    columnKey="club"
+                    activeKey={clubsSortKey}
+                    direction={clubsSortDir}
+                    onSort={toggleClubsSort}
+                    className="py-2 pr-4 font-medium"
+                  />
+                  <SortableTh
+                    label="Season & Manager"
+                    columnKey="seasonManager"
+                    activeKey={clubsSortKey}
+                    direction={clubsSortDir}
+                    onSort={toggleClubsSort}
+                    className="py-2 pr-4 font-medium"
+                  />
+                  <SortableTh
+                    label="Formations"
+                    columnKey="formations"
+                    activeKey={clubsSortKey}
+                    direction={clubsSortDir}
+                    onSort={toggleClubsSort}
+                    className="py-2 pr-4 font-medium"
+                  />
+                  <SortableTh
+                    label="Squad"
+                    columnKey="squad"
+                    activeKey={clubsSortKey}
+                    direction={clubsSortDir}
+                    onSort={toggleClubsSort}
+                    defaultDir="desc"
+                    align="right"
+                    className="py-2 pr-4 font-medium"
+                  />
+                  <SortableTh
+                    label="Matches"
+                    columnKey="matches"
+                    activeKey={clubsSortKey}
+                    direction={clubsSortDir}
+                    onSort={toggleClubsSort}
+                    defaultDir="desc"
+                    align="right"
+                    className="py-2 pr-4 font-medium"
+                  />
                   <th className="py-2 font-medium text-right">Actions</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-white/[0.06]">
-                {clubs.map((club) => (
+                {sortedClubs.map((club) => (
                   <tr key={club.id} className="hover:bg-white/[0.02]">
                     <td className="py-3 pr-4">
                       <div className="font-medium text-white">
@@ -795,7 +758,7 @@ export function ClubsView() {
                         {!club.profile.isActive && (
                           <button
                             type="button"
-                            onClick={() => void handleActivateClub(club.id)}
+                            onClick={() => guardedActivateClub(club.id)}
                             className="inline-flex items-center gap-1 px-2.5 py-1 rounded border border-white/[0.12] hover:border-emerald-500/60 text-[12px] text-[#D7DDE7]"
                           >
                             <Check className="w-3.5 h-3.5" />
@@ -832,482 +795,52 @@ export function ClubsView() {
         )}
       </section>
 
-      {/* Active Club Optional Squad Roster */}
+      {/* Active Club Operational Hub Links (Clean Separation of Squad & Tactical Setup) */}
       {activeClub && (
-        <section className="border border-white/[0.08] bg-[#12151B] rounded-lg p-5 space-y-5">
-          <div className="flex flex-wrap items-center justify-between gap-4">
+        <section className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <div className="border border-white/[0.08] bg-[#12151B] rounded-lg p-5 flex items-start justify-between gap-4">
             <div>
-              <h2 className="text-[16px] font-semibold text-white">
-                Squad Roster — {activeClub.name}
-              </h2>
-              <p className="text-[12px] text-[#8A94A6] mt-0.5">
-                Import real players from your FC26 Player Database or enter players manually. Career
-                Mode edits (OVR, POT, contract, role) never alter the master reference catalog.
+              <div className="flex items-center gap-2 text-[15px] font-semibold text-white">
+                <Users className="w-4 h-4 text-emerald-400" />
+                Squad Management — {activeClub.name}
+              </div>
+              <p className="mt-1 text-[13px] text-[#9AA4B4]">
+                Currently <span className="font-mono text-white">{players.length}</span> career
+                squad player(s). Manage transfers, loans, injuries, suspensions, default roster
+                imports, and custom display names.
               </p>
             </div>
-            <div className="flex flex-wrap items-center gap-2">
-              <button
-                type="button"
-                onClick={() => {
-                  setShowPlayerForm(false);
-                  setShowCatalogImportPanel((prev) => !prev);
-                }}
-                className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-md border border-emerald-500/40 bg-emerald-600/10 hover:bg-emerald-600/20 text-[13px] text-emerald-300 font-medium transition-colors"
-              >
-                <Database className="w-4 h-4" />
-                {showCatalogImportPanel ? 'Close Catalog Import' : 'Import from FC26 Database'}
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  setEditingPlayerId(null);
-                  setEditingPlayerCatalogId(null);
-                  setPlayerForm(EMPTY_PLAYER_FORM);
-                  setShowCatalogImportPanel(false);
-                  setShowPlayerForm((prev) => !prev);
-                }}
-                className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-md border border-white/[0.14] hover:border-emerald-500/60 text-[13px] text-white font-medium transition-colors"
-              >
-                <UserPlus className="w-4 h-4" />
-                {showPlayerForm ? 'Close Player Form' : 'Add Player Manually'}
-              </button>
-            </div>
+            <button
+              type="button"
+              onClick={() => requestNavigation('squad-management')}
+              className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-md border border-emerald-500/40 bg-emerald-600/12 hover:bg-emerald-600/20 text-[13px] text-emerald-300 font-medium whitespace-nowrap shrink-0"
+            >
+              Open Squad
+              <ArrowRight className="w-3.5 h-3.5" />
+            </button>
           </div>
 
-          {/* Import from FC26 Master Player Database Panel */}
-          {showCatalogImportPanel && (
-            <div className="border border-white/[0.1] bg-[#0C0F14] rounded-lg p-4 space-y-4">
-              <div className="flex flex-wrap items-center justify-between gap-2">
-                <div>
-                  <h3 className="text-[14px] font-semibold text-white">
-                    Import Players from FC26 Reference Catalog
-                  </h3>
-                  <p className="text-[12px] text-[#8A94A6]">
-                    Copies baseline ratings and positions into {activeClub.name}. You can override
-                    Career Mode growth, contract expiry, and preferred FC IQ role afterward.
-                  </p>
-                </div>
-                <button
-                  type="button"
-                  onClick={() => setShowCatalogImportPanel(false)}
-                  aria-label="Close catalog import panel"
-                  className="p-1 text-[#8A94A6] hover:text-white"
-                >
-                  <X className="w-4 h-4" />
-                </button>
+          <div className="border border-white/[0.08] bg-[#12151B] rounded-lg p-5 flex items-start justify-between gap-4">
+            <div>
+              <div className="flex items-center gap-2 text-[15px] font-semibold text-white">
+                <Target className="w-4 h-4 text-emerald-400" />
+                Tactical Setup — {activeClub.name}
               </div>
-
-              <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
-                <div className="md:col-span-3 relative">
-                  <Search className="w-3.5 h-3.5 text-[#7D8798] absolute left-3 top-1/2 -translate-y-1/2" />
-                  <input
-                    type="text"
-                    value={catalogPlayerQuery}
-                    onChange={(e) => setCatalogPlayerQuery(e.target.value)}
-                    placeholder="Search imported FC26 players by name..."
-                    className="w-full bg-[#12151B] border border-white/[0.1] rounded-md pl-8 pr-3 py-2 text-[13px] text-white focus:outline-none focus:border-emerald-500"
-                  />
-                </div>
-                <select
-                  value={catalogPlayerPos}
-                  onChange={(e) => setCatalogPlayerPos(e.target.value)}
-                  className="bg-[#12151B] border border-white/[0.1] rounded-md px-3 py-2 text-[13px] text-white focus:outline-none focus:border-emerald-500"
-                >
-                  <option value="">All Positions</option>
-                  {PLAYER_POSITIONS.map((pos) => (
-                    <option key={pos} value={pos}>
-                      {pos}
-                    </option>
-                  ))}
-                </select>
-              </div>
-
-              {catalogPlayerLoading ? (
-                <div className="text-[13px] text-[#8A94A6] py-4">Searching player database...</div>
-              ) : catalogPlayerTotal === 0 && !catalogPlayerQuery && !catalogPlayerPos ? (
-                <div className="rounded-md border border-white/[0.08] bg-[#12151B] p-4 flex flex-wrap items-center justify-between gap-4">
-                  <div className="text-[13px] text-[#9AA4B4]">
-                    Your FC26 Master Player Catalog currently has{' '}
-                    <span className="font-mono text-white">0</span> records (no players are
-                    pre-fabricated). Import a verified FUTWIZ FC26 CSV/JSON dataset in the Database
-                    Center to enable one-click squad imports.
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() => setActiveSection('database-center')}
-                    className="px-3.5 py-1.5 rounded-md bg-emerald-600 hover:bg-emerald-500 text-white text-[12px] font-medium whitespace-nowrap"
-                  >
-                    Open FC26 Database Center
-                  </button>
-                </div>
-              ) : catalogPlayerResults.length === 0 ? (
-                <div className="text-[13px] text-[#8A94A6] py-4">
-                  No catalog players matched your filter.
-                </div>
-              ) : (
-                <div className="overflow-x-auto max-h-72 overflow-y-auto">
-                  <table className="w-full text-left text-[12px]">
-                    <thead>
-                      <tr className="border-b border-white/[0.08] text-[#7D8798]">
-                        <th className="py-2 pr-3 font-medium">Player</th>
-                        <th className="py-2 pr-3 font-medium">Pos</th>
-                        <th className="py-2 pr-3 font-medium">Catalog Club</th>
-                        <th className="py-2 pr-3 font-medium text-right">OVR</th>
-                        <th className="py-2 pr-3 font-medium text-right">POT</th>
-                        <th className="py-2 pr-3 font-medium text-right">Age</th>
-                        <th className="py-2 font-medium text-right">Action</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-white/[0.06]">
-                      {catalogPlayerResults.map((cp) => {
-                        const alreadyInSquad = importedCatalogIds.has(cp.id);
-                        return (
-                          <tr key={cp.id} className="hover:bg-white/[0.02]">
-                            <td className="py-2 pr-3 font-medium text-white">{cp.fullName}</td>
-                            <td className="py-2 pr-3 font-mono text-[#C5CCD7]">
-                              {cp.primaryPosition}
-                            </td>
-                            <td className="py-2 pr-3 text-[#8A94A6]">{cp.clubName ?? '—'}</td>
-                            <td className="py-2 pr-3 text-right font-mono tabular-nums text-white">
-                              {cp.overallRating ?? '—'}
-                            </td>
-                            <td className="py-2 pr-3 text-right font-mono tabular-nums text-emerald-400">
-                              {cp.potentialRating ?? '—'}
-                            </td>
-                            <td className="py-2 pr-3 text-right font-mono tabular-nums text-[#C5CCD7]">
-                              {cp.age ?? '—'}
-                            </td>
-                            <td className="py-2 text-right">
-                              {alreadyInSquad ? (
-                                <span className="text-[11px] text-emerald-400">In Squad</span>
-                              ) : (
-                                <button
-                                  type="button"
-                                  disabled={importingCatalogPlayerId === cp.id}
-                                  onClick={() => void handleImportCatalogPlayer(cp)}
-                                  className="px-2.5 py-1 rounded bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white text-[11px] font-medium"
-                                >
-                                  {importingCatalogPlayerId === cp.id ? 'Importing...' : 'Import'}
-                                </button>
-                              )}
-                            </td>
-                          </tr>
-                        );
-                      })}
-                    </tbody>
-                  </table>
-                </div>
-              )}
+              <p className="mt-1 text-[13px] text-[#9AA4B4]">
+                Currently <span className="font-mono text-white">{tacticalPresets.length}</span>{' '}
+                saved tactical preset(s). Configure formations, Starting XI, FC IQ roles &amp;
+                focuses, and your default matchday setup.
+              </p>
             </div>
-          )}
-
-          {showPlayerForm && (
-            <form
-              onSubmit={(e) => void handleSavePlayer(e)}
-              className="border-t border-b border-white/[0.08] py-5 space-y-4"
+            <button
+              type="button"
+              onClick={() => requestNavigation('tactical-setup')}
+              className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-md border border-emerald-500/40 bg-emerald-600/12 hover:bg-emerald-600/20 text-[13px] text-emerald-300 font-medium whitespace-nowrap shrink-0"
             >
-              {editingPlayerCatalogId && (
-                <div className="text-[12px] text-emerald-400">
-                  Career Mode Override Mode · Changes apply only to {activeClub.name}; the master
-                  FC26 reference player stays unchanged.
-                </div>
-              )}
-
-              <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
-                <div>
-                  <label className="block text-[12px] text-[#9AA4B4] mb-1.5">Player Name *</label>
-                  <input
-                    type="text"
-                    required
-                    value={playerForm.name}
-                    onChange={(e) => setPlayerForm({ ...playerForm, name: e.target.value })}
-                    placeholder="Player full or short name"
-                    className="w-full bg-[#0C0F14] border border-white/[0.12] rounded-md px-3 py-2 text-[13px] text-white focus:outline-none focus:border-emerald-500"
-                  />
-                </div>
-                <div>
-                  <label className="block text-[12px] text-[#9AA4B4] mb-1.5">Position *</label>
-                  <select
-                    value={playerForm.position}
-                    onChange={(e) => handlePlayerPositionChange(e.target.value)}
-                    className="w-full bg-[#0C0F14] border border-white/[0.12] rounded-md px-3 py-2 text-[13px] text-white focus:outline-none focus:border-emerald-500"
-                  >
-                    {PLAYER_POSITIONS.map((pos) => (
-                      <option key={pos} value={pos}>
-                        {pos}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-                <div>
-                  <label className="block text-[12px] text-[#9AA4B4] mb-1.5">
-                    Overall Rating (OVR)
-                  </label>
-                  <input
-                    type="number"
-                    min={1}
-                    max={99}
-                    value={playerForm.overallRating}
-                    onChange={(e) =>
-                      setPlayerForm({ ...playerForm, overallRating: e.target.value })
-                    }
-                    placeholder="e.g. 82"
-                    className="w-full bg-[#0C0F14] border border-white/[0.12] rounded-md px-3 py-2 text-[13px] text-white font-mono tabular-nums focus:outline-none focus:border-emerald-500"
-                  />
-                </div>
-                <div>
-                  <label className="block text-[12px] text-[#9AA4B4] mb-1.5">
-                    Potential Rating (POT)
-                  </label>
-                  <input
-                    type="number"
-                    min={1}
-                    max={99}
-                    value={playerForm.potentialRating}
-                    onChange={(e) =>
-                      setPlayerForm({ ...playerForm, potentialRating: e.target.value })
-                    }
-                    placeholder="e.g. 88"
-                    className="w-full bg-[#0C0F14] border border-white/[0.12] rounded-md px-3 py-2 text-[13px] text-white font-mono tabular-nums focus:outline-none focus:border-emerald-500"
-                  />
-                </div>
-
-                <div>
-                  <label className="block text-[12px] text-[#9AA4B4] mb-1.5">Age</label>
-                  <input
-                    type="number"
-                    min={14}
-                    max={55}
-                    value={playerForm.age}
-                    onChange={(e) => setPlayerForm({ ...playerForm, age: e.target.value })}
-                    placeholder="e.g. 22"
-                    className="w-full bg-[#0C0F14] border border-white/[0.12] rounded-md px-3 py-2 text-[13px] text-white font-mono tabular-nums focus:outline-none focus:border-emerald-500"
-                  />
-                </div>
-
-                <div>
-                  <label className="block text-[12px] text-[#9AA4B4] mb-1.5">Contract Expiry</label>
-                  <input
-                    type="text"
-                    value={playerForm.contractExpiry}
-                    onChange={(e) =>
-                      setPlayerForm({ ...playerForm, contractExpiry: e.target.value })
-                    }
-                    placeholder="e.g. 2029"
-                    className="w-full bg-[#0C0F14] border border-white/[0.12] rounded-md px-3 py-2 text-[13px] text-white font-mono tabular-nums focus:outline-none focus:border-emerald-500"
-                  />
-                </div>
-
-                <div>
-                  <label className="block text-[12px] text-[#9AA4B4] mb-1.5">Preferred Foot</label>
-                  <select
-                    value={playerForm.preferredFoot}
-                    onChange={(e) =>
-                      setPlayerForm({
-                        ...playerForm,
-                        preferredFoot: e.target.value as 'Right' | 'Left' | 'Both',
-                      })
-                    }
-                    className="w-full bg-[#0C0F14] border border-white/[0.12] rounded-md px-3 py-2 text-[13px] text-white focus:outline-none focus:border-emerald-500"
-                  >
-                    <option value="Right">Right</option>
-                    <option value="Left">Left</option>
-                    <option value="Both">Both</option>
-                  </select>
-                </div>
-
-                <div>
-                  <label className="block text-[12px] text-[#9AA4B4] mb-1.5">
-                    Preferred FC IQ Role ({playerForm.position})
-                  </label>
-                  <select
-                    value={playerForm.playerRole}
-                    onChange={(e) => handlePlayerRoleChange(e.target.value)}
-                    className="w-full bg-[#0C0F14] border border-white/[0.12] rounded-md px-3 py-2 text-[13px] text-white focus:outline-none focus:border-emerald-500"
-                  >
-                    <option value="">Unspecified</option>
-                    {validRolesForPlayerPosition.length > 0
-                      ? validRolesForPlayerPosition.map((r) => (
-                          <option key={r.id} value={r.name}>
-                            {r.name}
-                            {r.isFc26New ? ' (FC 26 New)' : ''}
-                          </option>
-                        ))
-                      : fallbackRoleNames.map((r) => (
-                          <option key={r} value={r}>
-                            {r}
-                          </option>
-                        ))}
-                  </select>
-                </div>
-
-                <div>
-                  <label className="block text-[12px] text-[#9AA4B4] mb-1.5">
-                    Compatible Focus
-                  </label>
-                  <select
-                    value={playerForm.playerFocus}
-                    onChange={(e) => setPlayerForm({ ...playerForm, playerFocus: e.target.value })}
-                    disabled={!playerForm.playerRole || validFocusesForPlayerRole.length === 0}
-                    className="w-full bg-[#0C0F14] border border-white/[0.12] rounded-md px-3 py-2 text-[13px] text-white disabled:opacity-50 focus:outline-none focus:border-emerald-500"
-                  >
-                    <option value="">
-                      {playerForm.playerRole ? 'Select focus' : 'Choose a role first'}
-                    </option>
-                    {validFocusesForPlayerRole.map((f) => (
-                      <option key={f} value={f}>
-                        {f}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-
-                <div>
-                  <label className="block text-[12px] text-[#9AA4B4] mb-1.5">
-                    Playing Strengths
-                  </label>
-                  <input
-                    type="text"
-                    value={playerForm.strengths}
-                    onChange={(e) => setPlayerForm({ ...playerForm, strengths: e.target.value })}
-                    placeholder="e.g. Ball progression, press resistance"
-                    className="w-full bg-[#0C0F14] border border-white/[0.12] rounded-md px-3 py-2 text-[13px] text-white focus:outline-none focus:border-emerald-500"
-                  />
-                </div>
-
-                <div>
-                  <label className="block text-[12px] text-[#9AA4B4] mb-1.5">
-                    Playing Weaknesses
-                  </label>
-                  <input
-                    type="text"
-                    value={playerForm.weaknesses}
-                    onChange={(e) => setPlayerForm({ ...playerForm, weaknesses: e.target.value })}
-                    placeholder="e.g. Recovery pace against counters"
-                    className="w-full bg-[#0C0F14] border border-white/[0.12] rounded-md px-3 py-2 text-[13px] text-white focus:outline-none focus:border-emerald-500"
-                  />
-                </div>
-
-                <div>
-                  <label className="block text-[12px] text-[#9AA4B4] mb-1.5">
-                    Preferred Tactical Instructions
-                  </label>
-                  <input
-                    type="text"
-                    value={playerForm.preferredInstructions}
-                    onChange={(e) =>
-                      setPlayerForm({ ...playerForm, preferredInstructions: e.target.value })
-                    }
-                    placeholder="e.g. Stay back while attacking"
-                    className="w-full bg-[#0C0F14] border border-white/[0.12] rounded-md px-3 py-2 text-[13px] text-white focus:outline-none focus:border-emerald-500"
-                  />
-                </div>
-              </div>
-
-              <div className="flex justify-end gap-3">
-                <button
-                  type="button"
-                  onClick={() => {
-                    setShowPlayerForm(false);
-                    setEditingPlayerId(null);
-                    setEditingPlayerCatalogId(null);
-                  }}
-                  className="px-3.5 py-1.5 rounded-md border border-white/[0.12] text-[13px] text-[#C8CFD9]"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  disabled={submitting}
-                  className="px-4 py-1.5 rounded-md bg-emerald-600 hover:bg-emerald-500 text-white text-[13px] font-medium"
-                >
-                  {editingPlayerId ? 'Update Player' : 'Save Player'}
-                </button>
-              </div>
-            </form>
-          )}
-
-          {players.length > 0 ? (
-            <div className="overflow-x-auto">
-              <table className="w-full text-left text-[13px]">
-                <thead>
-                  <tr className="border-b border-white/[0.08] text-[12px] text-[#7D8798]">
-                    <th className="py-2 pr-3 font-medium">Player</th>
-                    <th className="py-2 pr-3 font-medium">Pos</th>
-                    <th className="py-2 pr-3 font-medium text-right">OVR</th>
-                    <th className="py-2 pr-3 font-medium text-right">POT</th>
-                    <th className="py-2 pr-3 font-medium text-right">Age</th>
-                    <th className="py-2 pr-3 font-medium">Role & Focus</th>
-                    <th className="py-2 pr-3 font-medium">Contract</th>
-                    <th className="py-2 font-medium text-right">Actions</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-white/[0.06]">
-                  {players.map((p) => (
-                    <tr key={p.id} className="hover:bg-white/[0.02]">
-                      <td className="py-2.5 pr-3">
-                        <div className="font-medium text-white">{p.name}</div>
-                        <div className="text-[11px] text-[#7D8798]">
-                          {[
-                            p.preferredFoot,
-                            p.catalogPlayerId ? 'FC26 Catalog Link' : 'Custom Entry',
-                            p.strengths || null,
-                          ]
-                            .filter(Boolean)
-                            .join(' · ')}
-                        </div>
-                      </td>
-                      <td className="py-2.5 pr-3 font-mono text-[#C5CCD7]">{p.position}</td>
-                      <td className="py-2.5 pr-3 text-right font-mono tabular-nums text-white">
-                        {p.overallRating ?? '—'}
-                      </td>
-                      <td className="py-2.5 pr-3 text-right font-mono tabular-nums text-emerald-400">
-                        {p.potentialRating ?? '—'}
-                      </td>
-                      <td className="py-2.5 pr-3 text-right font-mono tabular-nums text-[#C5CCD7]">
-                        {p.age ?? '—'}
-                      </td>
-                      <td className="py-2.5 pr-3 text-[#C5CCD7]">
-                        {p.playerRole
-                          ? p.playerFocus
-                            ? `${p.playerRole} · ${p.playerFocus}`
-                            : p.playerRole
-                          : '—'}
-                      </td>
-                      <td className="py-2.5 pr-3 font-mono tabular-nums text-[12px] text-[#9AA4B4]">
-                        {p.contractExpiry || '—'}
-                      </td>
-                      <td className="py-2.5 text-right">
-                        <div className="inline-flex items-center gap-1">
-                          <button
-                            type="button"
-                            onClick={() => startEditPlayer(p)}
-                            aria-label={`Edit ${p.name}`}
-                            className="p-1.5 rounded hover:bg-white/[0.06] text-[#9AA4B4] hover:text-white"
-                          >
-                            <Pencil className="w-3.5 h-3.5" />
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => void handleDeletePlayer(p)}
-                            aria-label={`Remove ${p.name}`}
-                            className="p-1.5 rounded hover:bg-red-500/10 text-[#9AA4B4] hover:text-red-400"
-                          >
-                            <Trash2 className="w-3.5 h-3.5" />
-                          </button>
-                        </div>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          ) : (
-            <div className="py-6 text-[13px] text-[#8A94A6]">
-              No squad players entered yet. You can prepare and analyze matches without entering a
-              full squad, add key starters manually, or import players from the FC26 Database.
-            </div>
-          )}
+              Open Tactics
+              <ArrowRight className="w-3.5 h-3.5" />
+            </button>
+          </div>
         </section>
       )}
     </div>

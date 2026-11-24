@@ -5,27 +5,42 @@ import type {
   ClubWithProfile,
   ConfidenceLevel,
   DashboardSummary,
+  DefaultRosterImportResult,
+  DefaultRosterPreview,
   FeedbackChoice,
   HalftimeReportData,
   MatchRecord,
   MatchSession,
   MatchSessionWithSegments,
   MatchStatus,
+  MatchTacticalSnapshot,
+  MatchTacticalSnapshotAssignment,
+  MatchTacticalSnapshotBenchEntry,
   MatchVenue,
   Opponent,
   Player,
+  PlayerAvailability,
   PlayerRoleAssignment,
   PostMatchReportRecord,
   RecommendationFeedbackRecord,
+  RecordingDiagnosticsRecord,
   RecordingIntegrityStatus,
+  RecordingPipelineDiagnostics,
   RecordingSegment,
+  SquadStatus,
   StructuredTacticalRecommendation,
   TacticalCatalogItem,
   TacticalConfiguration,
   TacticalMemoryEntry,
+  TacticalPreset,
+  TacticalPresetAssignment,
 } from '../../src/types/domain.ts';
+import {
+  resolvePlayerDisplayName,
+  resolvePlayerFullName,
+} from '../../src/utils/playerDisplayName.ts';
 import { DEFAULT_APP_SETTINGS, getDb } from '../db/database.ts';
-import { getCatalogPlayerById } from './catalogRepository.ts';
+import { getCatalogFormationByIdOrName, getCatalogPlayerById } from './catalogRepository.ts';
 import { validatePlayerRoleFocus } from './tacticalContextService.ts';
 
 function safeJsonParse<T>(raw: string | null | undefined, fallback: T): T {
@@ -146,7 +161,8 @@ export function createClub(input: {
   preferredAttackingStyle: string;
   preferredDefensiveStyle: string;
   setActive?: boolean;
-}): ClubWithProfile {
+  rosterInitMode?: 'default_roster' | 'empty';
+}): ClubWithProfile & { defaultRosterImport?: DefaultRosterImportResult | null } {
   const db = getDb();
   const clubId = crypto.randomUUID();
   const profileId = crypto.randomUUID();
@@ -156,6 +172,8 @@ export function createClub(input: {
     db.prepare('SELECT COUNT(*) as count FROM clubs').get() as { count: number }
   ).count;
   const shouldBeActive = input.setActive ?? existingCount === 0;
+
+  let defaultRosterImport: DefaultRosterImportResult | null = null;
 
   const tx = db.transaction(() => {
     if (shouldBeActive) {
@@ -194,6 +212,10 @@ export function createClub(input: {
       now,
       now
     );
+
+    if (input.rosterInitMode === 'default_roster' && input.catalogClubId) {
+      defaultRosterImport = importDefaultClubRosterInTransaction(db, clubId, input.catalogClubId, now);
+    }
   });
 
   tx();
@@ -202,7 +224,11 @@ export function createClub(input: {
     updateSettings({ activeClubId: clubId });
   }
 
-  return listClubs().find((c) => c.id === clubId)!;
+  const created = listClubs().find((c) => c.id === clubId)!;
+  return {
+    ...created,
+    defaultRosterImport,
+  };
 }
 
 export function updateClub(
@@ -293,40 +319,94 @@ export function deleteClub(clubId: string): boolean {
   return true;
 }
 
-export function listPlayers(clubId: string): Player[] {
-  const db = getDb();
-  const rows = db
-    .prepare('SELECT * FROM players WHERE club_id = ? ORDER BY overall_rating DESC NULLS LAST, name ASC')
-    .all(clubId) as Array<Record<string, unknown>>;
+function mapPlayerRow(r: Record<string, unknown>): Player {
+  const fullName = resolvePlayerFullName({
+    fullName: r.full_name ? String(r.full_name) : null,
+    name: String(r.name),
+  });
+  const shortName = r.short_name ? String(r.short_name) : null;
+  const displayNameOverride = r.display_name_override ? String(r.display_name_override) : null;
+  const displayName = resolvePlayerDisplayName({
+    displayNameOverride,
+    displayName: r.display_name ? String(r.display_name) : null,
+    shortName,
+    fullName,
+    name: String(r.name),
+  });
 
-  return rows.map((r) => ({
+  return {
     id: String(r.id),
     clubId: String(r.club_id),
     catalogPlayerId: r.catalog_player_id ? String(r.catalog_player_id) : null,
     name: String(r.name),
+    displayName,
+    displayNameOverride,
+    shortName,
+    fullName,
     position: String(r.position),
+    secondaryPositions: safeJsonParse<string[]>(
+      r.secondary_positions_json ? String(r.secondary_positions_json) : '[]',
+      []
+    ),
+    squadNumber:
+      r.squad_number === null || r.squad_number === undefined ? null : Number(r.squad_number),
+    squadStatus: (r.squad_status ? String(r.squad_status) : 'active') as SquadStatus,
+    availability: (r.availability ? String(r.availability) : 'available') as PlayerAvailability,
+    injuryStatus: r.injury_status ? String(r.injury_status) : null,
+    suspensionStatus: r.suspension_status ? String(r.suspension_status) : null,
+    membershipStartDate: r.membership_start_date ? String(r.membership_start_date) : null,
+    membershipEndDate: r.membership_end_date ? String(r.membership_end_date) : null,
     overallRating: r.overall_rating === null ? null : Number(r.overall_rating),
-    potentialRating: r.potential_rating === null || r.potential_rating === undefined ? null : Number(r.potential_rating),
+    potentialRating:
+      r.potential_rating === null || r.potential_rating === undefined
+        ? null
+        : Number(r.potential_rating),
     age: r.age === null || r.age === undefined ? null : Number(r.age),
     preferredFoot: String(r.preferred_foot) as Player['preferredFoot'],
     playerRole: String(r.player_role),
     playerFocus: String(r.player_focus ?? ''),
     contractExpiry: r.contract_expiry ? String(r.contract_expiry) : null,
-    marketValueEur: r.market_value_eur === null || r.market_value_eur === undefined ? null : Number(r.market_value_eur),
+    marketValueEur:
+      r.market_value_eur === null || r.market_value_eur === undefined
+        ? null
+        : Number(r.market_value_eur),
     wageEur: r.wage_eur === null || r.wage_eur === undefined ? null : Number(r.wage_eur),
     strengths: String(r.strengths),
     weaknesses: String(r.weaknesses),
     preferredInstructions: String(r.preferred_instructions),
+    notes: String(r.notes ?? ''),
     createdAt: String(r.created_at),
     updatedAt: String(r.updated_at),
-  }));
+  };
+}
+
+export function listPlayers(clubId: string): Player[] {
+  const db = getDb();
+  const rows = db
+    .prepare(
+      'SELECT * FROM players WHERE club_id = ? ORDER BY overall_rating DESC NULLS LAST, display_name ASC, name ASC'
+    )
+    .all(clubId) as Array<Record<string, unknown>>;
+
+  return rows.map(mapPlayerRow);
 }
 
 export function createPlayer(input: {
   clubId: string;
   catalogPlayerId?: string | null;
   name: string;
+  displayNameOverride?: string | null;
+  shortName?: string | null;
+  fullName?: string | null;
   position: string;
+  secondaryPositions?: string[];
+  squadNumber?: number | null;
+  squadStatus?: SquadStatus;
+  availability?: PlayerAvailability;
+  injuryStatus?: string | null;
+  suspensionStatus?: string | null;
+  membershipStartDate?: string | null;
+  membershipEndDate?: string | null;
   overallRating: number | null;
   potentialRating?: number | null;
   age?: number | null;
@@ -339,23 +419,49 @@ export function createPlayer(input: {
   strengths: string;
   weaknesses: string;
   preferredInstructions: string;
+  notes?: string;
 }): Player {
   const db = getDb();
   const id = crypto.randomUUID();
   const now = new Date().toISOString();
 
+  const cleanFullName = (input.fullName?.trim() || input.name.trim());
+  const cleanShortName = input.shortName?.trim() || null;
+  const cleanOverride = input.displayNameOverride?.trim() || null;
+  const resolvedDisplayName = resolvePlayerDisplayName({
+    displayNameOverride: cleanOverride,
+    shortName: cleanShortName,
+    fullName: cleanFullName,
+    name: input.name.trim(),
+  });
+
   db.prepare(`
     INSERT INTO players (
-      id, club_id, catalog_player_id, name, position, overall_rating, potential_rating, age,
+      id, club_id, catalog_player_id, name, display_name, display_name_override,
+      short_name, full_name, position, secondary_positions_json, squad_number,
+      squad_status, availability, injury_status, suspension_status,
+      membership_start_date, membership_end_date, overall_rating, potential_rating, age,
       preferred_foot, player_role, player_focus, contract_expiry, market_value_eur, wage_eur,
-      strengths, weaknesses, preferred_instructions, created_at, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      strengths, weaknesses, preferred_instructions, notes, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     id,
     input.clubId,
     input.catalogPlayerId ?? null,
-    input.name.trim(),
+    cleanFullName,
+    resolvedDisplayName,
+    cleanOverride,
+    cleanShortName,
+    cleanFullName,
     input.position.trim().toUpperCase(),
+    JSON.stringify(input.secondaryPositions ?? []),
+    input.squadNumber ?? null,
+    input.squadStatus ?? 'active',
+    input.availability ?? 'available',
+    input.injuryStatus?.trim() || null,
+    input.suspensionStatus?.trim() || null,
+    input.membershipStartDate ?? now.slice(0, 10),
+    input.membershipEndDate ?? null,
     input.overallRating,
     input.potentialRating ?? null,
     input.age ?? null,
@@ -368,6 +474,7 @@ export function createPlayer(input: {
     input.strengths.trim(),
     input.weaknesses.trim(),
     input.preferredInstructions.trim(),
+    (input.notes ?? '').trim(),
     now,
     now
   );
@@ -380,6 +487,11 @@ export function importPlayerFromCatalog(
   catalogPlayerId: string,
   overrides: Partial<{
     position: string;
+    displayNameOverride: string | null;
+    squadNumber: number | null;
+    squadStatus: SquadStatus;
+    availability: PlayerAvailability;
+    membershipStartDate: string | null;
     overallRating: number | null;
     potentialRating: number | null;
     age: number | null;
@@ -389,6 +501,7 @@ export function importPlayerFromCatalog(
     strengths: string;
     weaknesses: string;
     preferredInstructions: string;
+    notes: string;
   }> = {}
 ): Player | null {
   const master = getCatalogPlayerById(catalogPlayerId);
@@ -398,7 +511,15 @@ export function importPlayerFromCatalog(
     clubId,
     catalogPlayerId: master.id,
     name: master.fullName,
+    fullName: master.fullName,
+    shortName: master.shortName || null,
+    displayNameOverride: overrides.displayNameOverride ?? master.displayNameOverride ?? null,
     position: overrides.position ?? master.primaryPosition,
+    secondaryPositions: master.secondaryPositions,
+    squadNumber: overrides.squadNumber ?? null,
+    squadStatus: overrides.squadStatus ?? 'active',
+    availability: overrides.availability ?? 'available',
+    membershipStartDate: overrides.membershipStartDate ?? new Date().toISOString().slice(0, 10),
     overallRating:
       overrides.overallRating !== undefined ? overrides.overallRating : master.overallRating,
     potentialRating:
@@ -414,14 +535,316 @@ export function importPlayerFromCatalog(
     strengths: overrides.strengths ?? '',
     weaknesses: overrides.weaknesses ?? '',
     preferredInstructions: overrides.preferredInstructions ?? '',
+    notes: overrides.notes ?? '',
   });
+}
+
+export function previewDefaultClubRosterByCatalogClubId(
+  catalogClubId: string,
+  existingCareerClubId?: string
+): DefaultRosterPreview {
+  const db = getDb();
+  const catalogClub = db
+    .prepare('SELECT id, name FROM catalog_clubs WHERE id = ?')
+    .get(catalogClubId) as { id: string; name: string } | undefined;
+
+  if (!catalogClub) {
+    return {
+      status: 'unlinked_club',
+      catalogClubId: null,
+      catalogClubName: null,
+      totalMatchedPlayers: 0,
+      alreadyInSquadCount: 0,
+      newToImportCount: 0,
+      samplePlayers: [],
+      message: 'Selected club is not linked to a verified FC26 master catalog club ID.',
+    };
+  }
+
+  // Strictly match by stable foreign key catalog_players.club_id = catalog_clubs.id (never fuzzy name match)
+  const matchedPlayers = db
+    .prepare(
+      `SELECT id, full_name, short_name, display_name_override, primary_position, overall_rating, age
+       FROM catalog_players
+       WHERE club_id = ?
+       ORDER BY overall_rating DESC NULLS LAST, full_name ASC`
+    )
+    .all(catalogClub.id) as Array<{
+    id: string;
+    full_name: string;
+    short_name: string;
+    display_name_override: string | null;
+    primary_position: string;
+    overall_rating: number | null;
+    age: number | null;
+  }>;
+
+  if (matchedPlayers.length === 0) {
+    return {
+      status: 'linked_no_players',
+      catalogClubId: catalogClub.id,
+      catalogClubName: catalogClub.name,
+      totalMatchedPlayers: 0,
+      alreadyInSquadCount: 0,
+      newToImportCount: 0,
+      samplePlayers: [],
+      message: `Club "${catalogClub.name}" is linked in the FC26 catalog, but no imported catalog players are mapped to this club ID yet. Import a players dataset in FC26 Database Center or add players manually.`,
+    };
+  }
+
+  let existingCatalogIds = new Set<string>();
+  if (existingCareerClubId) {
+    const existingRows = db
+      .prepare(
+        'SELECT catalog_player_id FROM players WHERE club_id = ? AND catalog_player_id IS NOT NULL'
+      )
+      .all(existingCareerClubId) as Array<{ catalog_player_id: string }>;
+    existingCatalogIds = new Set(existingRows.map((r) => r.catalog_player_id));
+  }
+
+  const alreadyInSquadCount = matchedPlayers.filter((p) => existingCatalogIds.has(p.id)).length;
+  const newToImportCount = matchedPlayers.length - alreadyInSquadCount;
+
+  return {
+    status: 'linked_with_players',
+    catalogClubId: catalogClub.id,
+    catalogClubName: catalogClub.name,
+    totalMatchedPlayers: matchedPlayers.length,
+    alreadyInSquadCount,
+    newToImportCount,
+    samplePlayers: matchedPlayers.slice(0, 12).map((p) => ({
+      id: p.id,
+      displayName: resolvePlayerDisplayName({
+        displayNameOverride: p.display_name_override,
+        shortName: p.short_name,
+        fullName: p.full_name,
+      }),
+      fullName: p.full_name,
+      primaryPosition: p.primary_position,
+      overallRating: p.overall_rating,
+      age: p.age,
+    })),
+    message:
+      newToImportCount > 0
+        ? `Found ${matchedPlayers.length} FC26 catalog player(s) mapped to ${catalogClub.name} (${newToImportCount} new to import, ${alreadyInSquadCount} already in squad).`
+        : `All ${matchedPlayers.length} default FC26 catalog player(s) for ${catalogClub.name} are already present in this career squad.`,
+  };
+}
+
+export function previewDefaultClubRoster(clubId: string): DefaultRosterPreview {
+  const db = getDb();
+  const club = db
+    .prepare('SELECT id, name, catalog_club_id FROM clubs WHERE id = ?')
+    .get(clubId) as { id: string; name: string; catalog_club_id: string | null } | undefined;
+
+  if (!club) {
+    throw new Error(`Club "${clubId}" not found.`);
+  }
+  if (!club.catalog_club_id) {
+    return {
+      status: 'unlinked_club',
+      catalogClubId: null,
+      catalogClubName: null,
+      totalMatchedPlayers: 0,
+      alreadyInSquadCount: 0,
+      newToImportCount: 0,
+      samplePlayers: [],
+      message: `Club "${club.name}" is a custom club not linked to an FC26 master catalog club ID. Link it in Career Mode Clubs or add players manually in Squad Management.`,
+    };
+  }
+
+  return previewDefaultClubRosterByCatalogClubId(club.catalog_club_id, clubId);
+}
+
+function importDefaultClubRosterInTransaction(
+  db: ReturnType<typeof getDb>,
+  clubId: string,
+  catalogClubId: string,
+  now: string
+): DefaultRosterImportResult {
+  const catalogClub = db
+    .prepare('SELECT id, name FROM catalog_clubs WHERE id = ?')
+    .get(catalogClubId) as { id: string; name: string } | undefined;
+
+  if (!catalogClub) {
+    return {
+      clubId,
+      catalogClubId: null,
+      matchedCount: 0,
+      importedCount: 0,
+      skippedDuplicatesCount: 0,
+      status: 'unlinked_club',
+      message: 'Club is not linked to a valid FC26 catalog club ID.',
+    };
+  }
+
+  const catalogPlayers = db
+    .prepare(
+      `SELECT * FROM catalog_players
+       WHERE club_id = ?
+       ORDER BY overall_rating DESC NULLS LAST, full_name ASC`
+    )
+    .all(catalogClubId) as Array<Record<string, unknown>>;
+
+  if (catalogPlayers.length === 0) {
+    return {
+      clubId,
+      catalogClubId,
+      matchedCount: 0,
+      importedCount: 0,
+      skippedDuplicatesCount: 0,
+      status: 'linked_no_players',
+      message: `No catalog players are linked to "${catalogClub.name}" in the current FC26 database.`,
+    };
+  }
+
+  const existingCatalogIds = new Set(
+    (
+      db
+        .prepare(
+          'SELECT catalog_player_id FROM players WHERE club_id = ? AND catalog_player_id IS NOT NULL'
+        )
+        .all(clubId) as Array<{ catalog_player_id: string }>
+    ).map((r) => r.catalog_player_id)
+  );
+
+  // Load secondary positions for matched players
+  const posRows = db
+    .prepare(
+      `SELECT cpp.player_id, cpp.position_code
+       FROM catalog_player_positions cpp
+       JOIN catalog_players cp ON cp.id = cpp.player_id
+       WHERE cp.club_id = ? AND cpp.is_primary = 0`
+    )
+    .all(catalogClubId) as Array<{ player_id: string; position_code: string }>;
+  const secPosByPlayer = new Map<string, string[]>();
+  for (const row of posRows) {
+    const arr = secPosByPlayer.get(row.player_id) ?? [];
+    arr.push(row.position_code);
+    secPosByPlayer.set(row.player_id, arr);
+  }
+
+  const insertStmt = db.prepare(`
+    INSERT INTO players (
+      id, club_id, catalog_player_id, name, display_name, display_name_override,
+      short_name, full_name, position, secondary_positions_json, squad_number,
+      squad_status, availability, injury_status, suspension_status,
+      membership_start_date, membership_end_date, overall_rating, potential_rating, age,
+      preferred_foot, player_role, player_focus, contract_expiry, market_value_eur, wage_eur,
+      strengths, weaknesses, preferred_instructions, notes, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 'active', 'available', NULL, NULL, ?, NULL, ?, ?, ?, ?, '', '', ?, ?, ?, '', '', '', '', ?, ?)
+  `);
+
+  const today = now.slice(0, 10);
+  let importedCount = 0;
+  let skippedDuplicatesCount = 0;
+
+  for (const cp of catalogPlayers) {
+    const cpId = String(cp.id);
+    if (existingCatalogIds.has(cpId)) {
+      skippedDuplicatesCount += 1;
+      continue;
+    }
+
+    const fullName = String(cp.full_name);
+    const shortName = cp.short_name ? String(cp.short_name) : null;
+    const override = cp.display_name_override ? String(cp.display_name_override) : null;
+    const displayName = resolvePlayerDisplayName({
+      displayNameOverride: override,
+      shortName,
+      fullName,
+    });
+    const prefFoot =
+      cp.preferred_foot === 'Left' || cp.preferred_foot === 'Both' ? String(cp.preferred_foot) : 'Right';
+
+    insertStmt.run(
+      crypto.randomUUID(),
+      clubId,
+      cpId,
+      fullName,
+      displayName,
+      override,
+      shortName,
+      fullName,
+      String(cp.primary_position),
+      JSON.stringify(secPosByPlayer.get(cpId) ?? []),
+      today,
+      cp.overall_rating === null || cp.overall_rating === undefined ? null : Number(cp.overall_rating),
+      cp.potential_rating === null || cp.potential_rating === undefined
+        ? null
+        : Number(cp.potential_rating),
+      cp.age === null || cp.age === undefined ? null : Number(cp.age),
+      prefFoot,
+      cp.contract_expiry ? String(cp.contract_expiry) : null,
+      cp.market_value_eur === null || cp.market_value_eur === undefined
+        ? null
+        : Number(cp.market_value_eur),
+      cp.wage_eur === null || cp.wage_eur === undefined ? null : Number(cp.wage_eur),
+      now,
+      now
+    );
+
+    importedCount += 1;
+  }
+
+  return {
+    clubId,
+    catalogClubId,
+    matchedCount: catalogPlayers.length,
+    importedCount,
+    skippedDuplicatesCount,
+    status: 'linked_with_players',
+    message:
+      importedCount > 0
+        ? `Imported ${importedCount} player(s) from ${catalogClub.name} default roster (${skippedDuplicatesCount} existing squad player(s) preserved).`
+        : `No new players imported; all ${skippedDuplicatesCount} default players for ${catalogClub.name} are already in this career squad.`,
+  };
+}
+
+export function importDefaultClubRoster(clubId: string): DefaultRosterImportResult {
+  const db = getDb();
+  const club = db
+    .prepare('SELECT id, name, catalog_club_id FROM clubs WHERE id = ?')
+    .get(clubId) as { id: string; name: string; catalog_club_id: string | null } | undefined;
+
+  if (!club) {
+    throw new Error(`Club "${clubId}" not found.`);
+  }
+  if (!club.catalog_club_id) {
+    return {
+      clubId,
+      catalogClubId: null,
+      matchedCount: 0,
+      importedCount: 0,
+      skippedDuplicatesCount: 0,
+      status: 'unlinked_club',
+      message: `Club "${club.name}" is not linked to an FC26 catalog club ID.`,
+    };
+  }
+
+  const now = new Date().toISOString();
+  const tx = db.transaction(() =>
+    importDefaultClubRosterInTransaction(db, clubId, club.catalog_club_id!, now)
+  );
+  return tx();
 }
 
 export function updatePlayer(
   playerId: string,
   input: Partial<{
     name: string;
+    displayNameOverride: string | null;
+    shortName: string | null;
+    fullName: string | null;
     position: string;
+    secondaryPositions: string[];
+    squadNumber: number | null;
+    squadStatus: SquadStatus;
+    availability: PlayerAvailability;
+    injuryStatus: string | null;
+    suspensionStatus: string | null;
+    membershipStartDate: string | null;
+    membershipEndDate: string | null;
     overallRating: number | null;
     potentialRating: number | null;
     age: number | null;
@@ -434,6 +857,7 @@ export function updatePlayer(
     strengths: string;
     weaknesses: string;
     preferredInstructions: string;
+    notes: string;
   }>
 ): Player | null {
   const db = getDb();
@@ -442,17 +866,79 @@ export function updatePlayer(
     | undefined;
   if (!row) return null;
 
+  const nextName = input.name?.trim() ?? String(row.name);
+  const nextFullName =
+    input.fullName !== undefined
+      ? input.fullName?.trim() || nextName
+      : String(row.full_name || nextName);
+  const nextShortName =
+    input.shortName !== undefined
+      ? input.shortName?.trim() || null
+      : row.short_name
+        ? String(row.short_name)
+        : null;
+  const nextOverride =
+    input.displayNameOverride !== undefined
+      ? input.displayNameOverride?.trim() || null
+      : row.display_name_override
+        ? String(row.display_name_override)
+        : null;
+  const nextDisplayName = resolvePlayerDisplayName({
+    displayNameOverride: nextOverride,
+    shortName: nextShortName,
+    fullName: nextFullName,
+    name: nextName,
+  });
+
   const now = new Date().toISOString();
   db.prepare(`
     UPDATE players
-    SET name = ?, position = ?, overall_rating = ?, potential_rating = ?, age = ?,
+    SET name = ?, display_name = ?, display_name_override = ?, short_name = ?, full_name = ?,
+        position = ?, secondary_positions_json = ?, squad_number = ?, squad_status = ?,
+        availability = ?, injury_status = ?, suspension_status = ?,
+        membership_start_date = ?, membership_end_date = ?,
+        overall_rating = ?, potential_rating = ?, age = ?,
         preferred_foot = ?, player_role = ?, player_focus = ?, contract_expiry = ?,
         market_value_eur = ?, wage_eur = ?, strengths = ?, weaknesses = ?,
-        preferred_instructions = ?, updated_at = ?
+        preferred_instructions = ?, notes = ?, updated_at = ?
     WHERE id = ?
   `).run(
-    input.name?.trim() ?? String(row.name),
+    nextName,
+    nextDisplayName,
+    nextOverride,
+    nextShortName,
+    nextFullName,
     input.position?.trim().toUpperCase() ?? String(row.position),
+    input.secondaryPositions !== undefined
+      ? JSON.stringify(input.secondaryPositions)
+      : String(row.secondary_positions_json ?? '[]'),
+    input.squadNumber !== undefined
+      ? input.squadNumber
+      : row.squad_number === null || row.squad_number === undefined
+        ? null
+        : Number(row.squad_number),
+    input.squadStatus ?? String(row.squad_status ?? 'active'),
+    input.availability ?? String(row.availability ?? 'available'),
+    input.injuryStatus !== undefined
+      ? input.injuryStatus?.trim() || null
+      : row.injury_status
+        ? String(row.injury_status)
+        : null,
+    input.suspensionStatus !== undefined
+      ? input.suspensionStatus?.trim() || null
+      : row.suspension_status
+        ? String(row.suspension_status)
+        : null,
+    input.membershipStartDate !== undefined
+      ? input.membershipStartDate
+      : row.membership_start_date
+        ? String(row.membership_start_date)
+        : null,
+    input.membershipEndDate !== undefined
+      ? input.membershipEndDate
+      : row.membership_end_date
+        ? String(row.membership_end_date)
+        : null,
     input.overallRating !== undefined
       ? input.overallRating
       : row.overall_rating === null
@@ -489,6 +975,7 @@ export function updatePlayer(
     input.strengths?.trim() ?? String(row.strengths),
     input.weaknesses?.trim() ?? String(row.weaknesses),
     input.preferredInstructions?.trim() ?? String(row.preferred_instructions),
+    input.notes !== undefined ? input.notes.trim() : String(row.notes ?? ''),
     now,
     playerId
   );
@@ -499,6 +986,354 @@ export function updatePlayer(
 export function deletePlayer(playerId: string): boolean {
   const db = getDb();
   return db.prepare('DELETE FROM players WHERE id = ?').run(playerId).changes > 0;
+}
+
+// ============================================================
+// Phase 2.1 — Club Tactical Presets
+// ============================================================
+
+function mapTacticalPreset(
+  presetRow: Record<string, unknown>,
+  assignmentRows: Array<Record<string, unknown>>
+): TacticalPreset {
+  return {
+    id: String(presetRow.id),
+    clubId: String(presetRow.club_id),
+    name: String(presetRow.name),
+    formationId: presetRow.formation_id ? String(presetRow.formation_id) : null,
+    formationName: String(presetRow.formation_name),
+    buildUpStyle: String(presetRow.build_up_style),
+    defensiveApproach: String(presetRow.defensive_approach),
+    defensiveLineHeight: Number(presetRow.defensive_line_height),
+    isDefault: Boolean(presetRow.is_default),
+    benchPlayerIds: safeJsonParse<string[]>(String(presetRow.bench_json ?? '[]'), []),
+    notes: String(presetRow.notes ?? ''),
+    assignments: assignmentRows.map((a) => ({
+      id: String(a.id),
+      slotOrder: Number(a.slot_order),
+      positionCode: String(a.position_code),
+      playerId: a.player_id ? String(a.player_id) : null,
+      playerDisplayName: a.player_display_name
+        ? String(a.player_display_name)
+        : a.player_name
+          ? String(a.player_name)
+          : null,
+      role: String(a.role ?? ''),
+      focus: String(a.focus ?? ''),
+    })),
+    createdAt: String(presetRow.created_at),
+    updatedAt: String(presetRow.updated_at),
+  };
+}
+
+function validateTacticalAssignments(
+  clubId: string,
+  assignments: Array<{
+    slotOrder: number;
+    positionCode: string;
+    playerId: string | null;
+    role: string;
+    focus: string;
+  }>,
+  db: ReturnType<typeof getDb>
+): void {
+  const seenPlayers = new Set<string>();
+  const clubPlayerIds = new Set(
+    (
+      db.prepare('SELECT id FROM players WHERE club_id = ?').all(clubId) as Array<{ id: string }>
+    ).map((r) => r.id)
+  );
+
+  for (const a of assignments) {
+    if (a.playerId) {
+      if (!clubPlayerIds.has(a.playerId)) {
+        throw new Error(
+          `Slot #${a.slotOrder + 1} (${a.positionCode}): Assigned player does not belong to this club's career squad.`
+        );
+      }
+      if (seenPlayers.has(a.playerId)) {
+        throw new Error(
+          `Slot #${a.slotOrder + 1} (${a.positionCode}): Duplicate player assignment detected in Starting XI.`
+        );
+      }
+      seenPlayers.add(a.playerId);
+    }
+
+    if (a.role.trim() || a.focus.trim()) {
+      const check = validatePlayerRoleFocus(a.positionCode, a.role, a.focus, db);
+      if (!check.valid) {
+        throw new Error(`Slot #${a.slotOrder + 1} (${a.positionCode}): ${check.reason}`);
+      }
+    }
+  }
+}
+
+export function listTacticalPresets(clubId: string): TacticalPreset[] {
+  const db = getDb();
+  const presets = db
+    .prepare(
+      'SELECT * FROM tactical_presets WHERE club_id = ? ORDER BY is_default DESC, updated_at DESC, name ASC'
+    )
+    .all(clubId) as Array<Record<string, unknown>>;
+
+  if (presets.length === 0) return [];
+
+  const presetIds = presets.map((p) => String(p.id));
+  const placeholders = presetIds.map(() => '?').join(', ');
+  const assignmentRows = db
+    .prepare(
+      `SELECT tpa.*, p.display_name as player_display_name, p.name as player_name
+       FROM tactical_preset_assignments tpa
+       LEFT JOIN players p ON p.id = tpa.player_id
+       WHERE tpa.preset_id IN (${placeholders})
+       ORDER BY tpa.slot_order ASC`
+    )
+    .all(...presetIds) as Array<Record<string, unknown>>;
+
+  const byPreset = new Map<string, Array<Record<string, unknown>>>();
+  for (const row of assignmentRows) {
+    const pid = String(row.preset_id);
+    const list = byPreset.get(pid) ?? [];
+    list.push(row);
+    byPreset.set(pid, list);
+  }
+
+  return presets.map((p) => mapTacticalPreset(p, byPreset.get(String(p.id)) ?? []));
+}
+
+export function getTacticalPresetById(presetId: string): TacticalPreset | null {
+  const db = getDb();
+  const row = db.prepare('SELECT * FROM tactical_presets WHERE id = ?').get(presetId) as
+    | Record<string, unknown>
+    | undefined;
+  if (!row) return null;
+
+  const assignments = db
+    .prepare(
+      `SELECT tpa.*, p.display_name as player_display_name, p.name as player_name
+       FROM tactical_preset_assignments tpa
+       LEFT JOIN players p ON p.id = tpa.player_id
+       WHERE tpa.preset_id = ?
+       ORDER BY tpa.slot_order ASC`
+    )
+    .all(presetId) as Array<Record<string, unknown>>;
+
+  return mapTacticalPreset(row, assignments);
+}
+
+export function createTacticalPreset(
+  clubId: string,
+  input: {
+    name: string;
+    formationId?: string | null;
+    formationName: string;
+    buildUpStyle: string;
+    defensiveApproach: string;
+    defensiveLineHeight: number;
+    isDefault?: boolean;
+    benchPlayerIds?: string[];
+    notes?: string;
+    assignments: TacticalPresetAssignment[];
+  }
+): TacticalPreset {
+  const db = getDb();
+  const presetId = crypto.randomUUID();
+  const now = new Date().toISOString();
+
+  validateTacticalAssignments(clubId, input.assignments, db);
+
+  const resolvedFormation =
+    input.formationId
+      ? getCatalogFormationByIdOrName(input.formationId, db)
+      : getCatalogFormationByIdOrName(input.formationName, db);
+
+  const existingCount = (
+    db.prepare('SELECT COUNT(*) as c FROM tactical_presets WHERE club_id = ?').get(clubId) as {
+      c: number;
+    }
+  ).c;
+  const shouldBeDefault = input.isDefault ?? existingCount === 0;
+
+  const tx = db.transaction(() => {
+    if (shouldBeDefault) {
+      db.prepare('UPDATE tactical_presets SET is_default = 0 WHERE club_id = ?').run(clubId);
+    }
+
+    db.prepare(`
+      INSERT INTO tactical_presets (
+        id, club_id, name, formation_id, formation_name, build_up_style,
+        defensive_approach, defensive_line_height, is_default, bench_json,
+        notes, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      presetId,
+      clubId,
+      input.name.trim(),
+      resolvedFormation?.id ?? null,
+      input.formationName.trim(),
+      input.buildUpStyle.trim(),
+      input.defensiveApproach.trim(),
+      Math.max(1, Math.min(100, Math.round(input.defensiveLineHeight))),
+      shouldBeDefault ? 1 : 0,
+      JSON.stringify(input.benchPlayerIds ?? []),
+      (input.notes ?? '').trim(),
+      now,
+      now
+    );
+
+    const insertSlot = db.prepare(`
+      INSERT INTO tactical_preset_assignments (
+        id, preset_id, slot_order, position_code, player_id, role, focus
+      ) VALUES (?, ?, ?, ?, ?, ?, ?)
+    `);
+    for (const a of input.assignments) {
+      insertSlot.run(
+        crypto.randomUUID(),
+        presetId,
+        a.slotOrder,
+        a.positionCode.trim().toUpperCase(),
+        a.playerId ?? null,
+        a.role.trim(),
+        a.focus.trim()
+      );
+    }
+  });
+
+  tx();
+  return getTacticalPresetById(presetId)!;
+}
+
+export function updateTacticalPreset(
+  presetId: string,
+  input: Partial<{
+    name: string;
+    formationId: string | null;
+    formationName: string;
+    buildUpStyle: string;
+    defensiveApproach: string;
+    defensiveLineHeight: number;
+    isDefault: boolean;
+    benchPlayerIds: string[];
+    notes: string;
+    assignments: TacticalPresetAssignment[];
+  }>
+): TacticalPreset | null {
+  const db = getDb();
+  const existing = getTacticalPresetById(presetId);
+  if (!existing) return null;
+
+  const nextAssignments = input.assignments ?? existing.assignments;
+  validateTacticalAssignments(existing.clubId, nextAssignments, db);
+
+  const nextFormationName = input.formationName?.trim() ?? existing.formationName;
+  const resolvedFormation =
+    input.formationId !== undefined
+      ? input.formationId
+        ? getCatalogFormationByIdOrName(input.formationId, db)
+        : null
+      : getCatalogFormationByIdOrName(nextFormationName, db);
+
+  const now = new Date().toISOString();
+
+  const tx = db.transaction(() => {
+    if (input.isDefault === true) {
+      db.prepare('UPDATE tactical_presets SET is_default = 0 WHERE club_id = ?').run(
+        existing.clubId
+      );
+    }
+
+    db.prepare(`
+      UPDATE tactical_presets
+      SET name = ?, formation_id = ?, formation_name = ?, build_up_style = ?,
+          defensive_approach = ?, defensive_line_height = ?, is_default = ?,
+          bench_json = ?, notes = ?, updated_at = ?
+      WHERE id = ?
+    `).run(
+      input.name?.trim() ?? existing.name,
+      resolvedFormation?.id ?? existing.formationId,
+      nextFormationName,
+      input.buildUpStyle?.trim() ?? existing.buildUpStyle,
+      input.defensiveApproach?.trim() ?? existing.defensiveApproach,
+      input.defensiveLineHeight !== undefined
+        ? Math.max(1, Math.min(100, Math.round(input.defensiveLineHeight)))
+        : existing.defensiveLineHeight,
+      input.isDefault !== undefined ? (input.isDefault ? 1 : 0) : existing.isDefault ? 1 : 0,
+      input.benchPlayerIds !== undefined
+        ? JSON.stringify(input.benchPlayerIds)
+        : JSON.stringify(existing.benchPlayerIds),
+      input.notes !== undefined ? input.notes.trim() : existing.notes,
+      now,
+      presetId
+    );
+
+    if (input.assignments) {
+      db.prepare('DELETE FROM tactical_preset_assignments WHERE preset_id = ?').run(presetId);
+      const insertSlot = db.prepare(`
+        INSERT INTO tactical_preset_assignments (
+          id, preset_id, slot_order, position_code, player_id, role, focus
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+      `);
+      for (const a of input.assignments) {
+        insertSlot.run(
+          crypto.randomUUID(),
+          presetId,
+          a.slotOrder,
+          a.positionCode.trim().toUpperCase(),
+          a.playerId ?? null,
+          a.role.trim(),
+          a.focus.trim()
+        );
+      }
+    }
+  });
+
+  tx();
+  return getTacticalPresetById(presetId);
+}
+
+export function duplicateTacticalPreset(presetId: string, newName?: string): TacticalPreset | null {
+  const existing = getTacticalPresetById(presetId);
+  if (!existing) return null;
+  return createTacticalPreset(existing.clubId, {
+    name: newName?.trim() || `${existing.name} (Copy)`,
+    formationId: existing.formationId,
+    formationName: existing.formationName,
+    buildUpStyle: existing.buildUpStyle,
+    defensiveApproach: existing.defensiveApproach,
+    defensiveLineHeight: existing.defensiveLineHeight,
+    isDefault: false,
+    benchPlayerIds: existing.benchPlayerIds,
+    notes: existing.notes,
+    assignments: existing.assignments,
+  });
+}
+
+export function setDefaultTacticalPreset(presetId: string): TacticalPreset | null {
+  return updateTacticalPreset(presetId, { isDefault: true });
+}
+
+export function deleteTacticalPreset(presetId: string): boolean {
+  const db = getDb();
+  const existing = db
+    .prepare('SELECT id, club_id, is_default FROM tactical_presets WHERE id = ?')
+    .get(presetId) as { id: string; club_id: string; is_default: number } | undefined;
+  if (!existing) return false;
+
+  const tx = db.transaction(() => {
+    db.prepare('DELETE FROM tactical_presets WHERE id = ?').run(presetId);
+    if (existing.is_default === 1) {
+      const next = db
+        .prepare(
+          'SELECT id FROM tactical_presets WHERE club_id = ? ORDER BY updated_at DESC LIMIT 1'
+        )
+        .get(existing.club_id) as { id: string } | undefined;
+      if (next) {
+        db.prepare('UPDATE tactical_presets SET is_default = 1 WHERE id = ?').run(next.id);
+      }
+    }
+  });
+  tx();
+  return true;
 }
 
 export function listOpponents(): Opponent[] {
@@ -615,6 +1450,288 @@ export function deleteOpponent(id: string): { deleted: boolean; error?: string }
   return { deleted: res.changes > 0 };
 }
 
+function mapMatchTacticalSnapshotRow(r: Record<string, unknown>): MatchTacticalSnapshot {
+  return {
+    id: String(r.id),
+    matchId: String(r.match_id),
+    sourcePresetId: r.source_preset_id ? String(r.source_preset_id) : null,
+    sourcePresetName: r.source_preset_name ? String(r.source_preset_name) : null,
+    snapshotType: String(r.snapshot_type) as MatchTacticalSnapshot['snapshotType'],
+    isLocked: Boolean(r.is_locked),
+    formationId: r.formation_id ? String(r.formation_id) : null,
+    formationName: String(r.formation_name),
+    buildUpStyle: String(r.build_up_style),
+    defensiveApproach: String(r.defensive_approach),
+    defensiveLineHeight: Number(r.defensive_line_height),
+    assignments: safeJsonParse<MatchTacticalSnapshotAssignment[]>(
+      String(r.assignments_json ?? '[]'),
+      []
+    ),
+    benchPlayers: safeJsonParse<MatchTacticalSnapshotBenchEntry[]>(
+      String(r.bench_json ?? '[]'),
+      []
+    ),
+    notes: String(r.notes ?? ''),
+    createdAt: String(r.created_at),
+    updatedAt: String(r.updated_at),
+  };
+}
+
+function buildFrozenSnapshotPayloads(
+  clubId: string,
+  playerAssignments: PlayerRoleAssignment[],
+  benchIds: string[],
+  db: ReturnType<typeof getDb>
+): {
+  assignments: MatchTacticalSnapshotAssignment[];
+  benchPlayers: MatchTacticalSnapshotBenchEntry[];
+} {
+  const clubPlayers = listPlayers(clubId);
+  const byId = new Map<string, Player>(clubPlayers.map((p) => [p.id, p]));
+
+  const assignments: MatchTacticalSnapshotAssignment[] = playerAssignments.map((a) => {
+    const p = a.playerId ? byId.get(a.playerId) : undefined;
+    return {
+      slotOrder: a.slotIndex,
+      positionCode: a.positionCode.trim().toUpperCase(),
+      playerId: a.playerId,
+      playerDisplayName: p ? p.displayName : a.playerName,
+      playerFullName: p ? p.fullName : a.playerName,
+      role: a.role.trim(),
+      focus: a.focus.trim(),
+      squadStatusAtSnapshot: p?.squadStatus ?? null,
+      availabilityAtSnapshot: p?.availability ?? null,
+    };
+  });
+
+  const benchPlayers: MatchTacticalSnapshotBenchEntry[] = benchIds
+    .map((pid) => byId.get(pid))
+    .filter((p): p is Player => Boolean(p))
+    .map((p) => ({
+      playerId: p.id,
+      displayName: p.displayName,
+      fullName: p.fullName,
+      position: p.position,
+      overallRating: p.overallRating,
+    }));
+
+  return { assignments, benchPlayers };
+}
+
+export function listMatchTacticalSnapshots(matchId: string): MatchTacticalSnapshot[] {
+  const db = getDb();
+  const rows = db
+    .prepare(
+      `SELECT * FROM match_tactical_snapshots
+       WHERE match_id = ?
+       ORDER BY CASE snapshot_type WHEN 'pre_match' THEN 0 ELSE 1 END, created_at ASC`
+    )
+    .all(matchId) as Array<Record<string, unknown>>;
+  return rows.map(mapMatchTacticalSnapshotRow);
+}
+
+export function getPreMatchTacticalSnapshot(matchId: string): MatchTacticalSnapshot | null {
+  const db = getDb();
+  const row = db
+    .prepare(
+      `SELECT * FROM match_tactical_snapshots
+       WHERE match_id = ? AND snapshot_type = 'pre_match'
+       ORDER BY created_at DESC LIMIT 1`
+    )
+    .get(matchId) as Record<string, unknown> | undefined;
+  return row ? mapMatchTacticalSnapshotRow(row) : null;
+}
+
+export function updatePreMatchTacticalSnapshot(
+  matchId: string,
+  input: {
+    sourcePresetId?: string | null;
+    formationId?: string | null;
+    formationName: string;
+    buildUpStyle: string;
+    defensiveApproach: string;
+    defensiveLineHeight: number;
+    playerAssignments: PlayerRoleAssignment[];
+    benchIds?: string[];
+    notes?: string;
+  }
+): MatchTacticalSnapshot {
+  const db = getDb();
+  const matchRow = db
+    .prepare('SELECT id, club_id, status FROM matches WHERE id = ?')
+    .get(matchId) as { id: string; club_id: string; status: MatchStatus } | undefined;
+  if (!matchRow) {
+    throw new Error(`Match "${matchId}" not found.`);
+  }
+
+  const existing = getPreMatchTacticalSnapshot(matchId);
+  if (existing?.isLocked || matchRow.status !== 'scheduled') {
+    throw new Error(
+      'Pre-match tactical snapshot is locked because recording has already started. Save an in-match tactical adjustment instead.'
+    );
+  }
+
+  validateTacticalAssignments(
+    matchRow.club_id,
+    input.playerAssignments.map((a) => ({
+      slotOrder: a.slotIndex,
+      positionCode: a.positionCode,
+      playerId: a.playerId,
+      role: a.role,
+      focus: a.focus,
+    })),
+    db
+  );
+
+  const now = new Date().toISOString();
+  const sourcePreset = input.sourcePresetId ? getTacticalPresetById(input.sourcePresetId) : null;
+  const resolvedFormation = input.formationId
+    ? getCatalogFormationByIdOrName(input.formationId, db)
+    : getCatalogFormationByIdOrName(input.formationName, db);
+  const frozen = buildFrozenSnapshotPayloads(
+    matchRow.club_id,
+    input.playerAssignments,
+    input.benchIds ?? [],
+    db
+  );
+
+  const tx = db.transaction(() => {
+    if (existing) {
+      db.prepare(`
+        UPDATE match_tactical_snapshots
+        SET source_preset_id = ?, source_preset_name = ?, formation_id = ?, formation_name = ?,
+            build_up_style = ?, defensive_approach = ?, defensive_line_height = ?,
+            assignments_json = ?, bench_json = ?, notes = ?, updated_at = ?
+        WHERE id = ?
+      `).run(
+        sourcePreset?.id ?? null,
+        sourcePreset?.name ?? null,
+        resolvedFormation?.id ?? null,
+        input.formationName.trim(),
+        input.buildUpStyle.trim(),
+        input.defensiveApproach.trim(),
+        Math.max(1, Math.min(100, Math.round(input.defensiveLineHeight))),
+        JSON.stringify(frozen.assignments),
+        JSON.stringify(frozen.benchPlayers),
+        (input.notes ?? existing.notes).trim(),
+        now,
+        existing.id
+      );
+    } else {
+      db.prepare(`
+        INSERT INTO match_tactical_snapshots (
+          id, match_id, source_preset_id, source_preset_name, snapshot_type, is_locked,
+          formation_id, formation_name, build_up_style, defensive_approach, defensive_line_height,
+          assignments_json, bench_json, notes, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, 'pre_match', 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        crypto.randomUUID(),
+        matchId,
+        sourcePreset?.id ?? null,
+        sourcePreset?.name ?? null,
+        resolvedFormation?.id ?? null,
+        input.formationName.trim(),
+        input.buildUpStyle.trim(),
+        input.defensiveApproach.trim(),
+        Math.max(1, Math.min(100, Math.round(input.defensiveLineHeight))),
+        JSON.stringify(frozen.assignments),
+        JSON.stringify(frozen.benchPlayers),
+        (input.notes ?? '').trim(),
+        now,
+        now
+      );
+    }
+
+    const startingXiIds = frozen.assignments
+      .map((a) => a.playerId)
+      .filter((id): id is string => Boolean(id));
+    db.prepare(
+      'UPDATE matches SET starting_formation = ?, starting_xi_json = ?, bench_json = ?, updated_at = ? WHERE id = ?'
+    ).run(
+      input.formationName.trim(),
+      JSON.stringify(startingXiIds),
+      JSON.stringify(input.benchIds ?? []),
+      now,
+      matchId
+    );
+  });
+
+  tx();
+  return getPreMatchTacticalSnapshot(matchId)!;
+}
+
+export function createInMatchTacticalAdjustment(
+  matchId: string,
+  input: {
+    formationId?: string | null;
+    formationName: string;
+    buildUpStyle: string;
+    defensiveApproach: string;
+    defensiveLineHeight: number;
+    playerAssignments: PlayerRoleAssignment[];
+    benchIds?: string[];
+    notes?: string;
+  }
+): MatchTacticalSnapshot {
+  const db = getDb();
+  const matchRow = db.prepare('SELECT id, club_id FROM matches WHERE id = ?').get(matchId) as
+    | { id: string; club_id: string }
+    | undefined;
+  if (!matchRow) {
+    throw new Error(`Match "${matchId}" not found.`);
+  }
+
+  validateTacticalAssignments(
+    matchRow.club_id,
+    input.playerAssignments.map((a) => ({
+      slotOrder: a.slotIndex,
+      positionCode: a.positionCode,
+      playerId: a.playerId,
+      role: a.role,
+      focus: a.focus,
+    })),
+    db
+  );
+
+  const id = crypto.randomUUID();
+  const now = new Date().toISOString();
+  const resolvedFormation = input.formationId
+    ? getCatalogFormationByIdOrName(input.formationId, db)
+    : getCatalogFormationByIdOrName(input.formationName, db);
+  const frozen = buildFrozenSnapshotPayloads(
+    matchRow.club_id,
+    input.playerAssignments,
+    input.benchIds ?? [],
+    db
+  );
+
+  db.prepare(`
+    INSERT INTO match_tactical_snapshots (
+      id, match_id, source_preset_id, source_preset_name, snapshot_type, is_locked,
+      formation_id, formation_name, build_up_style, defensive_approach, defensive_line_height,
+      assignments_json, bench_json, notes, created_at, updated_at
+    ) VALUES (?, ?, NULL, NULL, 'in_match_adjustment', 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    id,
+    matchId,
+    resolvedFormation?.id ?? null,
+    input.formationName.trim(),
+    input.buildUpStyle.trim(),
+    input.defensiveApproach.trim(),
+    Math.max(1, Math.min(100, Math.round(input.defensiveLineHeight))),
+    JSON.stringify(frozen.assignments),
+    JSON.stringify(frozen.benchPlayers),
+    (input.notes ?? '').trim(),
+    now,
+    now
+  );
+
+  const row = db
+    .prepare('SELECT * FROM match_tactical_snapshots WHERE id = ?')
+    .get(id) as Record<string, unknown>;
+  return mapMatchTacticalSnapshotRow(row);
+}
+
 function mapMatchRow(r: Record<string, unknown>, db: ReturnType<typeof getDb>): MatchRecord {
   const matchId = String(r.id);
   const configRow = db
@@ -646,6 +1763,15 @@ function mapMatchRow(r: Record<string, unknown>, db: ReturnType<typeof getDb>): 
       }
     : null;
 
+  const snapshotRow = db
+    .prepare(
+      `SELECT * FROM match_tactical_snapshots
+       WHERE match_id = ? AND snapshot_type = 'pre_match'
+       ORDER BY created_at DESC LIMIT 1`
+    )
+    .get(matchId) as Record<string, unknown> | undefined;
+  const tacticalSnapshot = snapshotRow ? mapMatchTacticalSnapshotRow(snapshotRow) : null;
+
   return {
     id: matchId,
     clubId: String(r.club_id),
@@ -670,6 +1796,7 @@ function mapMatchRow(r: Record<string, unknown>, db: ReturnType<typeof getDb>): 
     createdAt: String(r.created_at),
     updatedAt: String(r.updated_at),
     tacticalConfiguration,
+    tacticalSnapshot,
     hasHalftimeReport: Boolean(r.has_halftime_report),
     hasPostMatchReport: Boolean(r.has_post_match_report),
   };
@@ -711,12 +1838,14 @@ export function createMatch(input: {
   competition: string;
   venue: MatchVenue;
   matchDate: string;
+  sourcePresetId?: string | null;
   startingFormation: string;
   startingXiIds: string[];
   benchIds: string[];
   objective: string;
   preMatchNotes: string;
   tacticalSetup: {
+    formationId?: string | null;
     buildUpStyle: string;
     defensiveApproach: string;
     defensiveLineHeight: number;
@@ -727,22 +1856,42 @@ export function createMatch(input: {
   const db = getDb();
   const matchId = crypto.randomUUID();
   const configId = crypto.randomUUID();
+  const snapshotId = crypto.randomUUID();
   const now = new Date().toISOString();
 
-  // Enforce verified FC 26 Role-Position and Role-Focus compatibility before persisting
-  for (const assignment of input.tacticalSetup.playerAssignments) {
-    if (assignment.role.trim() || assignment.focus.trim()) {
-      const check = validatePlayerRoleFocus(
-        assignment.positionCode,
-        assignment.role,
-        assignment.focus,
-        db
-      );
-      if (!check.valid) {
-        throw new Error(`Slot #${assignment.slotIndex + 1} (${assignment.positionCode}): ${check.reason}`);
-      }
-    }
-  }
+  // Enforce duplicate-player prevention + verified FC 26 Role-Position and Role-Focus compatibility
+  validateTacticalAssignments(
+    input.clubId,
+    input.tacticalSetup.playerAssignments.map((a) => ({
+      slotOrder: a.slotIndex,
+      positionCode: a.positionCode,
+      playerId: a.playerId,
+      role: a.role,
+      focus: a.focus,
+    })),
+    db
+  );
+
+  const sourcePreset = input.sourcePresetId ? getTacticalPresetById(input.sourcePresetId) : null;
+  const resolvedFormation = input.tacticalSetup.formationId
+    ? getCatalogFormationByIdOrName(input.tacticalSetup.formationId, db)
+    : getCatalogFormationByIdOrName(input.startingFormation, db);
+  const frozenSnapshot = buildFrozenSnapshotPayloads(
+    input.clubId,
+    input.tacticalSetup.playerAssignments,
+    input.benchIds,
+    db
+  );
+
+  // Sync standardized display names into tactical_configurations as well
+  const standardizedAssignments: PlayerRoleAssignment[] = frozenSnapshot.assignments.map((a) => ({
+    slotIndex: a.slotOrder,
+    positionCode: a.positionCode,
+    playerId: a.playerId,
+    playerName: a.playerDisplayName,
+    role: a.role,
+    focus: a.focus,
+  }));
 
   let resolvedOpponentId = input.opponentId;
 
@@ -800,13 +1949,36 @@ export function createMatch(input: {
       configId,
       matchId,
       input.clubId,
-      'Pre-Match Setup',
+      sourcePreset ? `Preset: ${sourcePreset.name}` : 'Pre-Match Setup',
       input.startingFormation,
       input.tacticalSetup.buildUpStyle,
       input.tacticalSetup.defensiveApproach,
       input.tacticalSetup.defensiveLineHeight,
-      JSON.stringify(input.tacticalSetup.playerAssignments),
+      JSON.stringify(standardizedAssignments),
       JSON.stringify(input.tacticalSetup.customParameters ?? {}),
+      now
+    );
+
+    db.prepare(`
+      INSERT INTO match_tactical_snapshots (
+        id, match_id, source_preset_id, source_preset_name, snapshot_type, is_locked,
+        formation_id, formation_name, build_up_style, defensive_approach, defensive_line_height,
+        assignments_json, bench_json, notes, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, 'pre_match', 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      snapshotId,
+      matchId,
+      sourcePreset?.id ?? null,
+      sourcePreset?.name ?? null,
+      resolvedFormation?.id ?? null,
+      input.startingFormation,
+      input.tacticalSetup.buildUpStyle,
+      input.tacticalSetup.defensiveApproach,
+      input.tacticalSetup.defensiveLineHeight,
+      JSON.stringify(frozenSnapshot.assignments),
+      JSON.stringify(frozenSnapshot.benchPlayers),
+      input.preMatchNotes.trim(),
+      now,
       now
     );
   });
@@ -1258,6 +2430,9 @@ function mapMatchSessionRow(
     integrityStatus: (r.integrity_status
       ? String(r.integrity_status)
       : 'pending') as RecordingIntegrityStatus,
+    aiEligible: Boolean(r.ai_eligible),
+    failureReason: r.failure_reason ? String(r.failure_reason) : null,
+    diagnosticsPath: r.diagnostics_path ? String(r.diagnostics_path) : null,
     recoveryNotes: r.recovery_notes ? String(r.recovery_notes) : null,
     startedAt: r.started_at ? String(r.started_at) : null,
     endedAt: r.ended_at ? String(r.ended_at) : null,
@@ -1364,6 +2539,9 @@ export function createOrUpsertMatchSession(input: {
   audioEnabled?: boolean;
   outputDirectory?: string | null;
   integrityStatus?: RecordingIntegrityStatus;
+  aiEligible?: boolean;
+  failureReason?: string | null;
+  diagnosticsPath?: string | null;
   recoveryNotes?: string | null;
   startedAt?: string | null;
   endedAt?: string | null;
@@ -1384,9 +2562,9 @@ export function createOrUpsertMatchSession(input: {
       INSERT INTO match_sessions (
         id, match_id, half, status, capture_source_id, capture_source_name,
         resolution, fps, duration_seconds, total_bytes, encoder, audio_enabled,
-        output_directory, integrity_status, recovery_notes, started_at, ended_at,
-        created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        output_directory, integrity_status, ai_eligible, failure_reason, diagnostics_path,
+        recovery_notes, started_at, ended_at, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET
         status = excluded.status,
         capture_source_id = COALESCE(excluded.capture_source_id, match_sessions.capture_source_id),
@@ -1399,6 +2577,9 @@ export function createOrUpsertMatchSession(input: {
         audio_enabled = excluded.audio_enabled,
         output_directory = COALESCE(excluded.output_directory, match_sessions.output_directory),
         integrity_status = excluded.integrity_status,
+        ai_eligible = excluded.ai_eligible,
+        failure_reason = COALESCE(excluded.failure_reason, match_sessions.failure_reason),
+        diagnostics_path = COALESCE(excluded.diagnostics_path, match_sessions.diagnostics_path),
         recovery_notes = COALESCE(excluded.recovery_notes, match_sessions.recovery_notes),
         started_at = COALESCE(match_sessions.started_at, excluded.started_at),
         ended_at = COALESCE(excluded.ended_at, match_sessions.ended_at),
@@ -1418,6 +2599,9 @@ export function createOrUpsertMatchSession(input: {
       input.audioEnabled ? 1 : 0,
       input.outputDirectory ?? null,
       input.integrityStatus ?? 'pending',
+      input.aiEligible ? 1 : 0,
+      input.failureReason ?? null,
+      input.diagnosticsPath ?? null,
       input.recoveryNotes ?? null,
       input.startedAt ?? now,
       input.endedAt ?? null,
@@ -1425,7 +2609,7 @@ export function createOrUpsertMatchSession(input: {
       now
     );
 
-    syncMatchStatusForSession(db, input.matchId, input.half, input.status, now);
+    syncMatchStatusForSession(db, sessionId, input.matchId, input.half, input.status, now);
   });
 
   tx();
@@ -1434,6 +2618,7 @@ export function createOrUpsertMatchSession(input: {
 
 function syncMatchStatusForSession(
   db: ReturnType<typeof getDb>,
+  sessionId: string,
   matchId: string,
   half: 'first_half' | 'second_half',
   sessionStatus: MatchSession['status'],
@@ -1447,12 +2632,55 @@ function syncMatchStatusForSession(
       now,
       matchId
     );
+    // Workstream E: Lock pre-match tactical snapshot once recording begins
+    db.prepare(
+      `UPDATE match_tactical_snapshots
+       SET is_locked = 1, updated_at = ?
+       WHERE match_id = ? AND snapshot_type = 'pre_match' AND is_locked = 0`
+    ).run(now, matchId);
     return;
   }
 
-  if (sessionStatus === 'completed' || sessionStatus === 'recovered') {
+  if (
+    sessionStatus === 'completed' ||
+    sessionStatus === 'recovered' ||
+    sessionStatus === 'partial'
+  ) {
+    // Workstream A critical invariant: NEVER transition a match to halftime_ready
+    // unless at least 1 FFprobe-verified non-empty segment exists for this session!
+    const validSegRow = db
+      .prepare(
+        `SELECT COUNT(*) as c
+         FROM recording_segments
+         WHERE session_id = ?
+           AND status IN ('finalized', 'recovered')
+           AND size_bytes > 0
+           AND duration_seconds > 0`
+      )
+      .get(sessionId) as { c: number };
+
+    if (validSegRow.c === 0) {
+      db.prepare(
+        `UPDATE match_sessions
+         SET status = 'failed',
+             ai_eligible = 0,
+             integrity_status = 'corrupted',
+             failure_reason = COALESCE(failure_reason, 'Finalized with 0 valid non-empty segments.'),
+             updated_at = ?
+         WHERE id = ?`
+      ).run(now, sessionId);
+      // Fall through to failed/discarded match recovery so user can retry cleanly
+      syncMatchStatusForSession(db, sessionId, matchId, half, 'failed', now);
+      return;
+    }
+
+    // Confirmed >=1 valid segment: ensure ai_eligible = 1
+    db.prepare('UPDATE match_sessions SET ai_eligible = 1, updated_at = ? WHERE id = ?').run(
+      now,
+      sessionId
+    );
+
     if (half === 'first_half') {
-      // Advance scheduled / first_half_recording matches to halftime_ready without regressing completed matches
       db.prepare(
         `UPDATE matches
          SET status = CASE WHEN status IN ('scheduled', 'first_half_recording') THEN 'halftime_ready' ELSE status END,
@@ -1460,7 +2688,6 @@ function syncMatchStatusForSession(
          WHERE id = ?`
       ).run(now, matchId);
     } else {
-      // Only set has_second_half_recording = 1 after a valid second-half session is finalized/recovered
       db.prepare(
         `UPDATE matches
          SET has_second_half_recording = 1,
@@ -1472,11 +2699,16 @@ function syncMatchStatusForSession(
     return;
   }
 
-  if (sessionStatus === 'discarded') {
+  if (sessionStatus === 'failed' || sessionStatus === 'discarded') {
     if (half === 'first_half') {
       const hasValidFirst = db
         .prepare(
-          `SELECT COUNT(*) as c FROM match_sessions WHERE match_id = ? AND half = 'first_half' AND status IN ('completed', 'recovered')`
+          `SELECT COUNT(*) as c
+           FROM match_sessions ms
+           WHERE ms.match_id = ?
+             AND ms.half = 'first_half'
+             AND ms.status IN ('completed', 'recovered', 'partial')
+             AND ms.ai_eligible = 1`
         )
         .get(matchId) as { c: number };
       if (hasValidFirst.c === 0) {
@@ -1490,7 +2722,12 @@ function syncMatchStatusForSession(
     } else {
       const hasValidSecond = db
         .prepare(
-          `SELECT COUNT(*) as c FROM match_sessions WHERE match_id = ? AND half = 'second_half' AND status IN ('completed', 'recovered')`
+          `SELECT COUNT(*) as c
+           FROM match_sessions ms
+           WHERE ms.match_id = ?
+             AND ms.half = 'second_half'
+             AND ms.status IN ('completed', 'recovered', 'partial')
+             AND ms.ai_eligible = 1`
         )
         .get(matchId) as { c: number };
       if (hasValidSecond.c === 0) {
@@ -1518,6 +2755,9 @@ export function updateMatchSession(
     audioEnabled: boolean;
     outputDirectory: string | null;
     integrityStatus: RecordingIntegrityStatus;
+    aiEligible: boolean;
+    failureReason: string | null;
+    diagnosticsPath: string | null;
     recoveryNotes: string | null;
     endedAt: string | null;
   }>
@@ -1545,6 +2785,9 @@ export function updateMatchSession(
           audio_enabled = ?,
           output_directory = ?,
           integrity_status = ?,
+          ai_eligible = ?,
+          failure_reason = ?,
+          diagnostics_path = ?,
           recovery_notes = ?,
           ended_at = ?,
           updated_at = ?
@@ -1560,16 +2803,23 @@ export function updateMatchSession(
         ? Math.max(0, Math.round(input.totalBytes))
         : Number(existing.total_bytes),
       input.encoder !== undefined ? input.encoder : existing.encoder,
-      input.audioEnabled !== undefined ? (input.audioEnabled ? 1 : 0) : Number(existing.audio_enabled ?? 0),
+      input.audioEnabled !== undefined
+        ? input.audioEnabled
+          ? 1
+          : 0
+        : Number(existing.audio_enabled ?? 0),
       input.outputDirectory !== undefined ? input.outputDirectory : existing.output_directory,
       input.integrityStatus ?? String(existing.integrity_status ?? 'pending'),
+      input.aiEligible !== undefined ? (input.aiEligible ? 1 : 0) : Number(existing.ai_eligible ?? 0),
+      input.failureReason !== undefined ? input.failureReason : existing.failure_reason,
+      input.diagnosticsPath !== undefined ? input.diagnosticsPath : existing.diagnostics_path,
       input.recoveryNotes !== undefined ? input.recoveryNotes : existing.recovery_notes,
       input.endedAt !== undefined ? input.endedAt : existing.ended_at,
       now,
       sessionId
     );
 
-    syncMatchStatusForSession(db, matchId, half, nextStatus, now);
+    syncMatchStatusForSession(db, sessionId, matchId, half, nextStatus, now);
   });
 
   tx();
@@ -1650,4 +2900,56 @@ export function upsertRecordingSegment(input: {
     .prepare('SELECT * FROM recording_segments WHERE session_id = ? AND segment_index = ?')
     .get(input.sessionId, input.segmentIndex) as Record<string, unknown>;
   return mapRecordingSegmentRow(row);
+}
+
+export function saveRecordingDiagnostics(input: {
+  sessionId: string;
+  matchId: string;
+  failureReason?: string | null;
+  payload: RecordingPipelineDiagnostics;
+}): RecordingDiagnosticsRecord {
+  const db = getDb();
+  const id = crypto.randomUUID();
+  const now = new Date().toISOString();
+
+  db.prepare(`
+    INSERT INTO recording_diagnostics (
+      id, session_id, match_id, failure_reason, payload_json, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(session_id) DO UPDATE SET
+      failure_reason = excluded.failure_reason,
+      payload_json = excluded.payload_json,
+      updated_at = excluded.updated_at
+  `).run(
+    id,
+    input.sessionId,
+    input.matchId,
+    input.failureReason ?? null,
+    JSON.stringify(input.payload),
+    now,
+    now
+  );
+
+  return getRecordingDiagnostics(input.sessionId)!;
+}
+
+export function getRecordingDiagnostics(sessionId: string): RecordingDiagnosticsRecord | null {
+  const db = getDb();
+  const row = db
+    .prepare('SELECT * FROM recording_diagnostics WHERE session_id = ?')
+    .get(sessionId) as Record<string, unknown> | undefined;
+  if (!row) return null;
+
+  return {
+    id: String(row.id),
+    sessionId: String(row.session_id),
+    matchId: String(row.match_id),
+    failureReason: row.failure_reason ? String(row.failure_reason) : null,
+    payload: safeJsonParse<RecordingPipelineDiagnostics>(
+      String(row.payload_json),
+      {} as RecordingPipelineDiagnostics
+    ),
+    createdAt: String(row.created_at),
+    updatedAt: String(row.updated_at),
+  };
 }

@@ -1,9 +1,11 @@
 import type Database from 'better-sqlite3';
 import type {
   AiMatchTacticalContext,
+  MatchTacticalSnapshotAssignment,
   PlayerRoleAssignment,
   RoleFocusValidationResult,
 } from '../../src/types/domain.ts';
+import { resolvePlayerDisplayName } from '../../src/utils/playerDisplayName.ts';
 import { getDb } from '../db/database.ts';
 import {
   getCatalogFormationByIdOrName,
@@ -92,17 +94,58 @@ export function buildAiMatchTacticalContext(
 
   if (!matchRow) return null;
 
-  const configRow = db
+  // Prefer immutable Match Tactical Snapshot (latest in_match_adjustment if present, else pre_match)
+  const snapshotRow = db
     .prepare(
-      `SELECT * FROM tactical_configurations WHERE match_id = ? ORDER BY CASE phase WHEN 'pre_match' THEN 0 ELSE 1 END, created_at DESC LIMIT 1`
+      `SELECT * FROM match_tactical_snapshots
+       WHERE match_id = ?
+       ORDER BY CASE snapshot_type WHEN 'in_match_adjustment' THEN 0 ELSE 1 END, created_at DESC
+       LIMIT 1`
     )
     .get(matchId) as Record<string, unknown> | undefined;
 
-  const assignments: PlayerRoleAssignment[] = configRow
-    ? (JSON.parse(String(configRow.player_assignments_json || '[]')) as PlayerRoleAssignment[])
-    : [];
+  let formationName = String(matchRow.starting_formation);
+  let assignments: Array<{
+    slotIndex: number;
+    positionCode: string;
+    playerId: string | null;
+    playerName: string | null;
+    role: string;
+    focus: string;
+  }> = [];
 
-  const formationName = String(matchRow.starting_formation);
+  if (snapshotRow) {
+    formationName = String(snapshotRow.formation_name || formationName);
+    try {
+      const parsed = JSON.parse(String(snapshotRow.assignments_json || '[]')) as MatchTacticalSnapshotAssignment[];
+      assignments = parsed.map((a, idx) => ({
+        slotIndex: typeof a.slotOrder === 'number' ? a.slotOrder : idx,
+        positionCode: a.positionCode,
+        playerId: a.playerId,
+        playerName: a.playerDisplayName ?? a.playerFullName ?? null,
+        role: a.role,
+        focus: a.focus,
+      }));
+    } catch {
+      assignments = [];
+    }
+  } else {
+    const configRow = db
+      .prepare(
+        `SELECT * FROM tactical_configurations WHERE match_id = ? ORDER BY CASE phase WHEN 'pre_match' THEN 0 ELSE 1 END, created_at DESC LIMIT 1`
+      )
+      .get(matchId) as Record<string, unknown> | undefined;
+
+    if (configRow) {
+      formationName = String(configRow.formation || formationName);
+      try {
+        assignments = JSON.parse(String(configRow.player_assignments_json || '[]')) as PlayerRoleAssignment[];
+      } catch {
+        assignments = [];
+      }
+    }
+  }
+
   const catalogFormation = getCatalogFormationByIdOrName(formationName, db);
 
   const squadRows = db
@@ -121,10 +164,24 @@ export function buildAiMatchTacticalContext(
     const masterPlayer = catalogPlayerId ? getCatalogPlayerById(catalogPlayerId, db) : null;
     const validation = validatePlayerRoleFocus(a.positionCode, a.role, a.focus, db);
 
+    const resolvedDisplayName =
+      a.playerName ??
+      (squadPlayer
+        ? resolvePlayerDisplayName({
+            displayNameOverride: squadPlayer.display_name_override
+              ? String(squadPlayer.display_name_override)
+              : null,
+            displayName: squadPlayer.display_name ? String(squadPlayer.display_name) : null,
+            shortName: squadPlayer.short_name ? String(squadPlayer.short_name) : null,
+            fullName: squadPlayer.full_name ? String(squadPlayer.full_name) : null,
+            name: String(squadPlayer.name),
+          })
+        : null);
+
     return {
       slotIndex: a.slotIndex,
       positionCode: a.positionCode,
-      playerName: a.playerName ?? (squadPlayer ? String(squadPlayer.name) : null),
+      playerName: resolvedDisplayName,
       assignedRole: a.role,
       assignedFocus: a.focus,
       roleFocusValid: validation.valid,

@@ -135,7 +135,7 @@ export function getCatalogOverview(dbArg?: Database.Database): CatalogOverview {
   }
 
   return {
-    schemaVersion: schemaRow?.version ?? 2,
+    schemaVersion: schemaRow?.version ?? 4,
     counts: {
       players,
       clubs,
@@ -264,12 +264,25 @@ export function listCatalogLeagues(
   }));
 }
 
+export type ClubSortBy = 'name' | 'code' | 'category' | 'league' | 'nation' | 'players';
+
+const CLUB_SORT_COLUMNS: Record<ClubSortBy, string> = {
+  name: 'c.name',
+  code: 'c.short_name',
+  category: 'c.team_category',
+  league: 'l.name',
+  nation: 'n.display_name',
+  players: 'player_count',
+};
+
 export function searchCatalogClubs(
   filters: {
     q?: string;
     leagueId?: string;
     nationId?: string;
     teamCategory?: 'mens' | 'womens' | '';
+    sortBy?: ClubSortBy;
+    sortDir?: 'asc' | 'desc';
     page?: number;
     pageSize?: number;
   } = {},
@@ -308,6 +321,9 @@ export function searchCatalogClubs(
     }
   ).count;
 
+  const clubSortCol = CLUB_SORT_COLUMNS[filters.sortBy ?? 'name'] ?? 'c.name';
+  const clubSortDir = filters.sortDir === 'desc' ? 'DESC' : 'ASC';
+
   const rows = db
     .prepare(`
       SELECT c.*, l.name as league_name, n.display_name as nation_name,
@@ -316,7 +332,7 @@ export function searchCatalogClubs(
       LEFT JOIN catalog_leagues l ON l.id = c.league_id
       LEFT JOIN catalog_nations n ON n.id = c.nation_id
       ${where}
-      ORDER BY c.name ASC
+      ORDER BY ${clubSortCol} ${clubSortDir} NULLS LAST, c.name ASC
       LIMIT ? OFFSET ?
     `)
     .all(...params, pageSize, offset) as Array<Record<string, unknown>>;
@@ -354,7 +370,16 @@ export interface PlayerSearchFilters {
   minAge?: number;
   maxAge?: number;
   preferredFoot?: 'Right' | 'Left' | 'Both' | '';
-  sortBy?: 'overall' | 'potential' | 'growth' | 'age' | 'name' | 'pace' | 'market_value';
+  sortBy?:
+    | 'overall'
+    | 'potential'
+    | 'growth'
+    | 'age'
+    | 'name'
+    | 'pace'
+    | 'market_value'
+    | 'position'
+    | 'club';
   sortDir?: 'asc' | 'desc';
   page?: number;
   pageSize?: number;
@@ -368,6 +393,8 @@ const PLAYER_SORT_COLUMNS: Record<NonNullable<PlayerSearchFilters['sortBy']>, st
   name: 'p.full_name',
   pace: 'p.pace',
   market_value: 'p.market_value_eur',
+  position: 'p.primary_position',
+  club: 'resolved_club_name',
 };
 
 export function searchCatalogPlayers(
@@ -499,6 +526,7 @@ function mapCatalogPlayerRow(r: Record<string, unknown>, secondaryPositions: str
     externalSourceId: String(r.external_source_id),
     fullName: String(r.full_name),
     shortName: String(r.short_name ?? ''),
+    displayNameOverride: r.display_name_override ? String(r.display_name_override) : null,
     clubId: r.club_id ? String(r.club_id) : null,
     clubName: r.resolved_club_name ? String(r.resolved_club_name) : null,
     leagueId: r.league_id ? String(r.league_id) : null,

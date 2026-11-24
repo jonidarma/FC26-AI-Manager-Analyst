@@ -52,8 +52,18 @@ export interface FfmpegQueueMetrics {
   queuedChunks: number;
   queuedBytes: number;
   backpressureActive: boolean;
+  backpressureEvents: number;
+  chunksEnqueued: number;
+  bytesEnqueued: number;
   totalBytesWritten: number;
   droppedChunks: number;
+  lastChunkEnqueuedAt: string | null;
+  currentOutputFileBytes: number;
+  lastError: string | null;
+  stderrTail: string[];
+  exitCode: number | null;
+  exitSignal: NodeJS.Signals | null;
+  spawnedArgs: string[];
 }
 
 export interface FfmpegProcessEvents {
@@ -859,8 +869,17 @@ export class FfmpegSegmentProcess {
   private child: ChildProcess | null = null;
   private queue: Buffer[] = [];
   private queuedBytes = 0;
+  private chunksEnqueued = 0;
+  private bytesEnqueued = 0;
   private totalBytesWritten = 0;
   private droppedChunks = 0;
+  private backpressureEvents = 0;
+  private lastChunkEnqueuedAt: string | null = null;
+  private currentOutputFileBytes = 0;
+  private lastError: string | null = null;
+  private exitCode: number | null = null;
+  private exitSignal: NodeJS.Signals | null = null;
+  private spawnedArgs: string[] = [];
   private writingPausedForDrain = false;
   private backpressureActive = false;
   private ending = false;
@@ -885,13 +904,31 @@ export class FfmpegSegmentProcess {
     return this.child !== null && !this.exited;
   }
 
+  public getSpawnedArgs(): string[] {
+    return [...this.spawnedArgs];
+  }
+
+  public getStderrTail(limit = 20): string[] {
+    return this.stderrLines.slice(-limit);
+  }
+
   public getMetrics(): FfmpegQueueMetrics {
     return {
       queuedChunks: this.queue.length,
       queuedBytes: this.queuedBytes,
       backpressureActive: this.backpressureActive,
+      backpressureEvents: this.backpressureEvents,
+      chunksEnqueued: this.chunksEnqueued,
+      bytesEnqueued: this.bytesEnqueued,
       totalBytesWritten: this.totalBytesWritten,
       droppedChunks: this.droppedChunks,
+      lastChunkEnqueuedAt: this.lastChunkEnqueuedAt,
+      currentOutputFileBytes: this.currentOutputFileBytes,
+      lastError: this.lastError,
+      stderrTail: this.stderrLines.slice(-15),
+      exitCode: this.exitCode,
+      exitSignal: this.exitSignal,
+      spawnedArgs: [...this.spawnedArgs],
     };
   }
 
@@ -911,6 +948,7 @@ export class FfmpegSegmentProcess {
     }
 
     const args = buildFfmpegSegmentArgs(this.config);
+    this.spawnedArgs = [...args];
     const child = spawn(this.config.ffmpegPath, args, {
       cwd: this.config.outputDirectory,
       stdio: ['pipe', 'ignore', 'pipe'],
@@ -919,11 +957,15 @@ export class FfmpegSegmentProcess {
     this.child = child;
     this.exited = false;
     this.ending = false;
+    this.exitCode = null;
+    this.exitSignal = null;
+    this.lastError = null;
 
     child.stdin?.on('error', (err: NodeJS.ErrnoException) => {
       // EPIPE/EOF can occur if FFmpeg terminates early; never crash the main process
       if (!this.ending && err.code !== 'EPIPE') {
-        this.events.onError?.(`FFmpeg stdin error: ${err.message}`);
+        this.lastError = `FFmpeg stdin error: ${err.message}`;
+        this.events.onError?.(this.lastError);
       }
     });
 
@@ -937,8 +979,11 @@ export class FfmpegSegmentProcess {
       const lines = text.split(/\r|\n/).map((l) => l.trim()).filter(Boolean);
       for (const line of lines) {
         this.stderrLines.push(line);
-        if (this.stderrLines.length > 40) {
+        if (this.stderrLines.length > 60) {
           this.stderrLines.shift();
+        }
+        if (/error|invalid|failed|cannot|no such|broken pipe/i.test(line) && !line.includes('frame=')) {
+          this.lastError = line;
         }
         this.parseProgressLine(line);
       }
@@ -947,18 +992,27 @@ export class FfmpegSegmentProcess {
     this.exitPromise = new Promise((resolve) => {
       child.on('error', (err) => {
         this.exited = true;
+        this.exitCode = 1;
+        this.exitSignal = null;
+        this.lastError = `Failed to spawn FFmpeg: ${err.message}`;
         this.stopSegmentPolling();
-        this.events.onError?.(`Failed to spawn FFmpeg: ${err.message}`);
+        this.events.onError?.(this.lastError);
         this.events.onExit?.(1, null, err.message);
         resolve({ code: 1, signal: null });
       });
 
       child.on('close', (code, signal) => {
         this.exited = true;
+        this.exitCode = code;
+        this.exitSignal = signal;
         this.stopSegmentPolling();
         // Final scan of .segments.list after FFmpeg exits cleanly
         this.scanCompletedSegmentsList();
-        const stderrTail = this.stderrLines.slice(-10).join(' | ');
+        this.detectActiveSegmentOnDisk();
+        const stderrTail = this.stderrLines.slice(-12).join(' | ');
+        if (code !== 0 && !this.lastError) {
+          this.lastError = stderrTail || `FFmpeg exited with code ${code ?? 'unknown'}`;
+        }
         this.events.onExit?.(code, signal, stderrTail);
         resolve({ code, signal });
       });
@@ -971,9 +1025,18 @@ export class FfmpegSegmentProcess {
     this.pollTimer.unref();
   }
 
-  public enqueueChunk(chunk: Buffer): { accepted: boolean; backpressureActive: boolean } {
+  public enqueueChunk(chunk: Buffer): { accepted: boolean; backpressureActive: boolean; reason?: string } {
     if (!this.child || this.exited || this.ending) {
-      return { accepted: false, backpressureActive: this.backpressureActive };
+      this.droppedChunks += 1;
+      return {
+        accepted: false,
+        backpressureActive: this.backpressureActive,
+        reason: this.exited
+          ? 'FFmpeg process already exited.'
+          : this.ending
+            ? 'FFmpeg process is finalizing.'
+            : 'FFmpeg process not started.',
+      };
     }
     if (chunk.byteLength === 0) {
       return { accepted: true, backpressureActive: this.backpressureActive };
@@ -982,14 +1045,19 @@ export class FfmpegSegmentProcess {
     // Hard memory safety ceiling
     if (this.queuedBytes + chunk.byteLength > MAX_QUEUE_BYTES || this.queue.length >= MAX_QUEUE_CHUNKS) {
       this.droppedChunks += 1;
+      if (!this.backpressureActive) {
+        this.backpressureEvents += 1;
+      }
       this.backpressureActive = true;
+      this.lastError = `Recording pipeline buffer reached ${Math.round(MAX_QUEUE_BYTES / (1024 * 1024))} MB limit; chunk dropped to protect system stability.`;
       this.events.onQueueChange?.(this.getMetrics());
-      this.events.onError?.(
-        `Recording pipeline buffer reached ${Math.round(MAX_QUEUE_BYTES / (1024 * 1024))} MB limit; chunk dropped to protect system stability.`
-      );
-      return { accepted: false, backpressureActive: true };
+      this.events.onError?.(this.lastError);
+      return { accepted: false, backpressureActive: true, reason: this.lastError };
     }
 
+    this.chunksEnqueued += 1;
+    this.bytesEnqueued += chunk.byteLength;
+    this.lastChunkEnqueuedAt = new Date().toISOString();
     this.queue.push(chunk);
     this.queuedBytes += chunk.byteLength;
     this.flushQueue();
@@ -1012,7 +1080,8 @@ export class FfmpegSegmentProcess {
       let canContinue = false;
       try {
         canContinue = stdin.write(next);
-      } catch {
+      } catch (err) {
+        this.lastError = `FFmpeg stdin write threw: ${err instanceof Error ? err.message : String(err)}`;
         this.queue = [];
         this.queuedBytes = 0;
         return;
@@ -1040,6 +1109,7 @@ export class FfmpegSegmentProcess {
     if (!this.backpressureActive) {
       if (this.queuedBytes >= HIGH_WATER_BYTES || this.queue.length >= HIGH_WATER_CHUNKS) {
         this.backpressureActive = true;
+        this.backpressureEvents += 1;
       }
     } else if (this.queuedBytes <= LOW_WATER_BYTES && this.queue.length <= LOW_WATER_CHUNKS) {
       this.backpressureActive = false;
@@ -1146,11 +1216,29 @@ export class FfmpegSegmentProcess {
     try {
       const files = fs.readdirSync(this.config.outputDirectory);
       let maxIdx = this.lastKnownActiveSegmentIndex;
+      let latestFileName: string | null = null;
+      let highestOnDiskIdx = 0;
       for (const f of files) {
         const idx = parseSegmentIndexFromFileName(f);
-        if (idx !== null && idx > maxIdx) {
-          maxIdx = idx;
+        if (idx !== null) {
+          if (idx >= highestOnDiskIdx) {
+            highestOnDiskIdx = idx;
+            latestFileName = f;
+          }
+          if (idx > maxIdx) {
+            maxIdx = idx;
+          }
         }
+      }
+      if (latestFileName) {
+        try {
+          const st = fs.statSync(path.join(this.config.outputDirectory, latestFileName));
+          this.currentOutputFileBytes = st.size;
+        } catch {
+          // ignore stat race
+        }
+      } else {
+        this.currentOutputFileBytes = 0;
       }
       if (maxIdx !== this.lastKnownActiveSegmentIndex) {
         this.lastKnownActiveSegmentIndex = maxIdx;

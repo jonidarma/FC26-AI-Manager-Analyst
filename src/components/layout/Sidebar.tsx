@@ -11,10 +11,11 @@ import {
   Settings,
   Shield,
   SlidersHorizontal,
+  Target,
+  Users,
 } from 'lucide-react';
 import React from 'react';
 import { useApp } from '../../context/AppContext';
-import { desktopBridge } from '../../services/desktopBridge';
 import type { NavigationSection } from '../../types/domain';
 
 interface NavGroup {
@@ -28,17 +29,19 @@ interface NavGroup {
 
 const NAV_GROUPS: NavGroup[] = [
   {
-    label: 'Club Operations',
+    label: 'Club Management',
     items: [
       { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
       { id: 'clubs', label: 'Career Mode Clubs', icon: Shield },
+      { id: 'squad-management', label: 'Squad Management', icon: Users },
+      { id: 'tactical-setup', label: 'Tactical Setup', icon: Target },
       { id: 'database-center', label: 'FC26 Database Center', icon: Database },
-      { id: 'opposition', label: 'Opposition Analysis', icon: Crosshair },
     ],
   },
   {
     label: 'Matchday Workflow',
     items: [
+      { id: 'opposition', label: 'Opposition Analysis', icon: Crosshair },
       { id: 'match-prep', label: 'Match Preparation', icon: ClipboardList },
       { id: 'match-capture', label: 'Match Capture', icon: Radio },
       { id: 'halftime-briefing', label: 'Half-Time Briefing', icon: Activity },
@@ -60,19 +63,8 @@ const NAV_GROUPS: NavGroup[] = [
 ];
 
 export function Sidebar() {
-  const { activeSection, setActiveSection, clubs, activeClub, capabilities, refreshAll, notify } =
+  const { activeSection, requestNavigation, clubs, activeClub, capabilities, guardedActivateClub } =
     useApp();
-
-  async function handleSwitchClub(clubId: string) {
-    if (!clubId || clubId === activeClub?.id) return;
-    try {
-      await desktopBridge.activateClub(clubId);
-      await refreshAll();
-      notify('info', 'Switched active Career Mode club.');
-    } catch (err) {
-      notify('error', err instanceof Error ? err.message : 'Failed to switch club');
-    }
-  }
 
   return (
     <aside className="w-64 shrink-0 border-r border-white/[0.08] bg-[#101318] flex flex-col h-screen sticky top-0 select-none">
@@ -80,7 +72,7 @@ export function Sidebar() {
       <div className="px-5 py-5 border-b border-white/[0.08]">
         <button
           type="button"
-          onClick={() => setActiveSection('dashboard')}
+          onClick={() => requestNavigation('dashboard')}
           className="text-left block w-full focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 rounded"
         >
           <span className="block text-[15px] font-bold tracking-tight text-white">
@@ -104,7 +96,7 @@ export function Sidebar() {
           <select
             id="sidebar-club-select"
             value={activeClub?.id ?? ''}
-            onChange={(e) => void handleSwitchClub(e.target.value)}
+            onChange={(e) => guardedActivateClub(e.target.value)}
             className="w-full bg-[#171B22] border border-white/[0.1] rounded-md px-2.5 py-2 text-[13px] text-white focus:outline-none focus:border-emerald-500 transition-colors"
           >
             {clubs.map((c) => (
@@ -116,7 +108,7 @@ export function Sidebar() {
         ) : (
           <button
             type="button"
-            onClick={() => setActiveSection('clubs')}
+            onClick={() => requestNavigation('clubs')}
             className="w-full text-left bg-[#171B22] border border-white/[0.1] hover:border-emerald-500/50 rounded-md px-2.5 py-2 text-[13px] text-[#B8C0CE] transition-colors"
           >
             Create Career Club
@@ -139,7 +131,7 @@ export function Sidebar() {
                   <li key={item.id}>
                     <button
                       type="button"
-                      onClick={() => setActiveSection(item.id)}
+                      onClick={() => requestNavigation(item.id)}
                       className={`w-full flex items-center gap-2.5 px-2.5 py-2 rounded-md text-[13px] font-medium transition-colors whitespace-nowrap ${
                         active
                           ? 'bg-emerald-500/12 text-emerald-300'

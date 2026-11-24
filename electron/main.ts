@@ -21,6 +21,7 @@ import {
   ipcMain,
   MessageChannelMain,
   type MessagePortMain,
+  powerSaveBlocker,
   safeStorage,
   session,
   shell,
@@ -32,15 +33,19 @@ import http from 'node:http';
 import net from 'node:net';
 import path from 'node:path';
 import { CaptureSessionEngine } from './captureEngine';
-import type {
-  CaptureEngineCapabilities,
-  CaptureManifest,
-  CaptureManifestSegment,
-  CaptureSourceInfo,
-  RecordingHalf,
-  RecordingIntegrityStatus,
-  RecordingTelemetry,
-  StartRecordingSessionRequest,
+import {
+  createEmptyPipelineDiagnostics,
+  EMPTY_RENDERER_DIAGNOSTICS,
+  type CaptureEngineCapabilities,
+  type CaptureManifest,
+  type CaptureManifestSegment,
+  type CaptureSourceInfo,
+  type RecordingHalf,
+  type RecordingIntegrityStatus,
+  type RecordingPipelineDiagnostics,
+  type RecordingTelemetry,
+  type RendererCaptureDiagnostics,
+  type StartRecordingSessionRequest,
 } from './captureTypes';
 import {
   attemptPartialSegmentRepair,
@@ -67,6 +72,10 @@ let ipcHandlersRegistered = false;
 let transportReady = true;
 
 let recordingsRootDirGlobal = '';
+let logsDirGlobal = '';
+let backendLogPathGlobal = '';
+let backendStderrTail: string[] = [];
+let activePowerSaveBlockerId: number | null = null;
 let captureEngine: CaptureSessionEngine | null = null;
 let cachedProbe: {
   ready: boolean;
@@ -111,9 +120,53 @@ interface ActiveRecordingState {
   expectedFfmpegClose: boolean;
   segmentVerificationQueue: Promise<void>;
   monitorTimer: NodeJS.Timeout | null;
+  // Phase 2.1 Diagnostics & Watchdogs
+  transportPortAttached: boolean;
+  transportPortReadyAck: boolean;
+  chunksReceivedMain: number;
+  bytesReceivedMain: number;
+  lastChunkReceivedAtMs: number | null;
+  lastChunkReceivedAtIso: string | null;
+  startupTimeoutSeconds: number;
+  stallTimeoutSeconds: number;
+  startupWatchdogState: RecordingPipelineDiagnostics['startupWatchdogState'];
+  stallWatchdogState: RecordingPipelineDiagnostics['stallWatchdogState'];
+  lastFfmpegError: string | null;
+  lastPipelineError: string | null;
+  lastFfmpegArgs: string[];
+  lastFfmpegStderrTail: string;
+  lastFfmpegExitCode: number | null;
+  lastFfmpegExitSignal: string | null;
+  hadPipelineErrors: boolean;
+  rendererDiagnostics: RendererCaptureDiagnostics;
 }
 
 let activeRecording: ActiveRecordingState | null = null;
+let lastCompletedTelemetry: RecordingTelemetry | null = null;
+
+function acquirePowerSaveBlocker(): void {
+  if (activePowerSaveBlockerId !== null && powerSaveBlocker.isStarted(activePowerSaveBlockerId)) {
+    return;
+  }
+  try {
+    activePowerSaveBlockerId = powerSaveBlocker.start('prevent-app-suspension');
+  } catch {
+    activePowerSaveBlockerId = null;
+  }
+}
+
+function releasePowerSaveBlocker(): void {
+  if (activePowerSaveBlockerId !== null) {
+    try {
+      if (powerSaveBlocker.isStarted(activePowerSaveBlockerId)) {
+        powerSaveBlocker.stop(activePowerSaveBlockerId);
+      }
+    } catch {
+      // ignore
+    }
+    activePowerSaveBlockerId = null;
+  }
+}
 
 function buildIdleTelemetry(): RecordingTelemetry {
   return {
@@ -145,10 +198,13 @@ function buildIdleTelemetry(): RecordingTelemetry {
     backpressureActive: false,
     outputDirectory: null,
     integrityStatus: 'pending',
+    aiEligible: false,
+    failureReason: null,
     maxRecordingWarning: false,
     lastWarning: null,
     lastError: null,
     segments: [],
+    diagnostics: createEmptyPipelineDiagnostics(),
   };
 }
 
@@ -160,19 +216,68 @@ function getActiveDurationSeconds(state: ActiveRecordingState): number {
   return Math.floor((state.accumulatedActiveMs + runningDeltaMs) / 1000);
 }
 
-function buildActiveTelemetry(state: ActiveRecordingState): RecordingTelemetry {
+function buildPipelineDiagnostics(state: ActiveRecordingState): RecordingPipelineDiagnostics {
   const queueMetrics = state.ffmpeg?.getMetrics() ?? {
     queuedChunks: 0,
     queuedBytes: 0,
     backpressureActive: false,
+    backpressureEvents: 0,
     totalBytesWritten: 0,
     droppedChunks: 0,
+    chunksEnqueued: 0,
+    bytesEnqueued: 0,
+    lastChunkEnqueuedAt: null,
+    currentOutputFileBytes: 0,
+    lastError: state.lastFfmpegError,
+    stderrTail: state.lastFfmpegStderrTail,
+    exitCode: state.lastFfmpegExitCode,
+    exitSignal: state.lastFfmpegExitSignal,
+    spawnedArgs: state.lastFfmpegArgs,
   };
+
+  const completedCount = state.manifest.segments.filter(
+    (s) =>
+      (s.finalized || s.status === 'finalized' || s.status === 'recovered') &&
+      s.sizeBytes > 0 &&
+      s.durationSeconds > 0
+  ).length;
+
+  return {
+    sessionId: state.sessionId,
+    matchId: state.matchId,
+    transportPortAttached: state.transportPortAttached,
+    transportPortReadyAck: state.transportPortReadyAck,
+    chunksReceivedMain: state.chunksReceivedMain,
+    bytesReceivedMain: state.bytesReceivedMain,
+    ffmpegPid: state.ffmpeg?.pid ?? null,
+    ffmpegState: state.ffmpegStatus,
+    ffmpegStdinBytesWritten: queueMetrics.totalBytesWritten,
+    ffmpegExitCode: queueMetrics.exitCode ?? state.lastFfmpegExitCode,
+    ffmpegExitSignal: queueMetrics.exitSignal ?? state.lastFfmpegExitSignal,
+    queueSizeChunks: queueMetrics.queuedChunks,
+    queueSizeBytes: queueMetrics.queuedBytes,
+    backpressureEvents: queueMetrics.backpressureEvents,
+    droppedChunks: queueMetrics.droppedChunks,
+    currentOutputFileBytes: queueMetrics.currentOutputFileBytes,
+    completedSegmentsCount: completedCount,
+    lastChunkReceivedAt: state.lastChunkReceivedAtIso,
+    startupWatchdogState: state.startupWatchdogState,
+    stallWatchdogState: state.stallWatchdogState,
+    startupTimeoutSeconds: state.startupTimeoutSeconds,
+    stallTimeoutSeconds: state.stallTimeoutSeconds,
+    lastFfmpegError: queueMetrics.lastError ?? state.lastFfmpegError,
+    lastPipelineError: state.lastPipelineError ?? state.lastError,
+    diagnosticsLogPath:
+      state.manifest.diagnosticsPath ??
+      (captureEngine ? captureEngine.getSessionDiagnosticsLogPath(state.matchId, state.sessionId) : null),
+    renderer: { ...state.rendererDiagnostics },
+  };
+}
+
+function buildActiveTelemetry(state: ActiveRecordingState): RecordingTelemetry {
+  const diagnostics = buildPipelineDiagnostics(state);
   const elapsedSeconds = Math.max(0, Math.floor((Date.now() - state.startedWallMs) / 1000));
   const activeSeconds = getActiveDurationSeconds(state);
-  const completedCount = state.manifest.segments.filter(
-    (s) => s.finalized || s.status === 'finalized' || s.status === 'recovered'
-  ).length;
 
   let audioStatusLabel = 'Video-only (Audio Disabled)';
   if (state.manifest.audioRequested) {
@@ -196,8 +301,8 @@ function buildActiveTelemetry(state: ActiveRecordingState): RecordingTelemetry {
     captureResolution: state.manifest.resolution,
     encoder: state.manifest.encoder,
     currentSegmentIndex: state.currentSegmentIndex,
-    completedSegmentCount: completedCount,
-    totalBytes: state.manifest.totalBytes,
+    completedSegmentCount: diagnostics.completedSegmentsCount,
+    totalBytes: Math.max(state.manifest.totalBytes, diagnostics.currentOutputFileBytes),
     availableDiskBytes: state.availableDiskBytes,
     diskLowWarning: state.diskLowWarning,
     audioRequested: state.manifest.audioRequested,
@@ -205,15 +310,18 @@ function buildActiveTelemetry(state: ActiveRecordingState): RecordingTelemetry {
     audioStatusLabel,
     ffmpegStatus: state.ffmpegStatus,
     ffmpegPid: state.ffmpeg?.pid ?? null,
-    queuedChunks: queueMetrics.queuedChunks,
-    queuedBytes: queueMetrics.queuedBytes,
-    backpressureActive: queueMetrics.backpressureActive,
+    queuedChunks: diagnostics.queueSizeChunks,
+    queuedBytes: diagnostics.queueSizeBytes,
+    backpressureActive: state.ffmpeg?.getMetrics().backpressureActive ?? false,
     outputDirectory: state.manifest.outputDirectory,
     integrityStatus: state.manifest.integrityStatus,
+    aiEligible: state.manifest.aiEligible,
+    failureReason: state.manifest.failureReason,
     maxRecordingWarning: state.maxRecordingWarning,
     lastWarning: state.lastWarning,
     lastError: state.lastError,
     segments: state.manifest.segments,
+    diagnostics,
   };
 }
 
@@ -264,7 +372,10 @@ function resolvePackagedPaths(): {
   staticDistDir: string;
   userDataDbDir: string;
   recordingsRootDir: string;
+  logsDir: string;
   referenceDataDir: string;
+  unpackedNodeModulesDir: string;
+  asarNodeModulesDir: string;
 } {
   const appPath = app.getAppPath();
   const unpackedAppPath = app.isPackaged
@@ -272,6 +383,8 @@ function resolvePackagedPaths(): {
     : appPath;
 
   const candidateServerPaths = [
+    path.join(unpackedAppPath, 'dist-server', 'server.cjs'),
+    path.join(appPath, 'dist-server', 'server.cjs'),
     path.join(unpackedAppPath, 'dist-server', 'server.mjs'),
     path.join(appPath, 'dist-server', 'server.mjs'),
   ];
@@ -289,11 +402,24 @@ function resolvePackagedPaths(): {
   const userDataRoot = app.getPath('userData');
   const userDataDbDir = path.join(userDataRoot, 'database');
   const recordingsRootDir = path.join(userDataRoot, 'recordings');
+  const logsDir = path.join(userDataRoot, 'logs');
+  const unpackedNodeModulesDir = path.join(unpackedAppPath, 'node_modules');
+  const asarNodeModulesDir = path.join(appPath, 'node_modules');
 
   fs.mkdirSync(userDataDbDir, { recursive: true });
   fs.mkdirSync(recordingsRootDir, { recursive: true });
+  fs.mkdirSync(logsDir, { recursive: true });
 
-  return { serverScriptPath, staticDistDir, userDataDbDir, recordingsRootDir, referenceDataDir };
+  return {
+    serverScriptPath,
+    staticDistDir,
+    userDataDbDir,
+    recordingsRootDir,
+    logsDir,
+    referenceDataDir,
+    unpackedNodeModulesDir,
+    asarNodeModulesDir,
+  };
 }
 
 /**
@@ -379,6 +505,9 @@ async function syncSessionToBackend(manifest: CaptureManifest): Promise<void> {
     audioEnabled: manifest.audioActive,
     outputDirectory: manifest.outputDirectory,
     integrityStatus: manifest.integrityStatus,
+    aiEligible: manifest.aiEligible,
+    failureReason: manifest.failureReason,
+    diagnosticsPath: manifest.diagnosticsPath,
     recoveryNotes: manifest.recoveryLog.length > 0 ? manifest.recoveryLog.slice(-5).join('\n') : null,
     startedAt: manifest.startedAt,
     endedAt: manifest.endedAt,
@@ -394,9 +523,27 @@ async function syncSessionPatchToBackend(manifest: CaptureManifest): Promise<voi
     audioEnabled: manifest.audioActive,
     outputDirectory: manifest.outputDirectory,
     integrityStatus: manifest.integrityStatus,
+    aiEligible: manifest.aiEligible,
+    failureReason: manifest.failureReason,
+    diagnosticsPath: manifest.diagnosticsPath,
     recoveryNotes: manifest.recoveryLog.length > 0 ? manifest.recoveryLog.slice(-5).join('\n') : null,
     endedAt: manifest.endedAt,
   });
+}
+
+async function syncDiagnosticsToBackend(
+  manifest: CaptureManifest,
+  diagnostics: RecordingPipelineDiagnostics
+): Promise<void> {
+  await localBackendRequest(
+    'PUT',
+    `/api/recording-sessions/${encodeURIComponent(manifest.sessionId)}/diagnostics`,
+    {
+      matchId: manifest.matchId,
+      failureReason: manifest.failureReason,
+      payload: diagnostics,
+    }
+  );
 }
 
 async function syncSegmentToBackend(
@@ -542,6 +689,23 @@ function detachTransportPort(state: ActiveRecordingState): void {
   }
 }
 
+function extractBinaryChunkBuffer(candidate: unknown): Buffer | null {
+  if (!candidate) return null;
+  if (Buffer.isBuffer(candidate)) {
+    return candidate;
+  }
+  if (ArrayBuffer.isView(candidate)) {
+    return Buffer.from(candidate.buffer, candidate.byteOffset, candidate.byteLength);
+  }
+  if (
+    candidate instanceof ArrayBuffer ||
+    Object.prototype.toString.call(candidate) === '[object ArrayBuffer]'
+  ) {
+    return Buffer.from(candidate as ArrayBuffer);
+  }
+  return null;
+}
+
 function attachBinaryTransportPort(state: ActiveRecordingState): void {
   if (!mainWindow || mainWindow.isDestroyed()) {
     throw new Error('Main window is unavailable for binary media transport.');
@@ -552,13 +716,16 @@ function attachBinaryTransportPort(state: ActiveRecordingState): void {
   const mainPort = channel.port1;
   const rendererPort = channel.port2;
   state.port = mainPort;
+  state.transportPortAttached = true;
+  state.transportPortReadyAck = false;
 
   let lastNotifiedBackpressure = false;
 
   mainPort.on('message', (event) => {
     const data = event.data as
-      | { type?: 'chunk'; sessionId?: string; payload?: Uint8Array | ArrayBuffer }
+      | { type?: 'chunk'; sessionId?: string; payload?: unknown }
       | { type?: 'eos'; sessionId?: string }
+      | { type?: 'port-ready'; sessionId?: string }
       | Uint8Array
       | ArrayBuffer;
 
@@ -566,48 +733,98 @@ function attachBinaryTransportPort(state: ActiveRecordingState): void {
       return;
     }
 
-    // Handle control EOS message
-    if (data && typeof data === 'object' && 'type' in data && data.type === 'eos') {
-      if (data.sessionId === state.sessionId && state.eosResolver) {
-        const resolve = state.eosResolver;
-        state.eosResolver = null;
-        resolve();
+    if (data && typeof data === 'object' && 'type' in data) {
+      if (data.type === 'port-ready') {
+        if (data.sessionId === state.sessionId) {
+          state.transportPortReadyAck = true;
+          captureEngine?.appendDiagnosticEvent(state.matchId, state.sessionId, {
+            level: 'info',
+            stage: 'transport',
+            message: 'Preload binary MessagePort acknowledged ready.',
+          });
+          broadcastTelemetry();
+        }
+        return;
       }
-      return;
+
+      if (data.type === 'eos') {
+        if (data.sessionId === state.sessionId) {
+          captureEngine?.appendDiagnosticEvent(state.matchId, state.sessionId, {
+            level: 'info',
+            stage: 'transport',
+            message: `Renderer EOS received (chunksReceivedMain=${state.chunksReceivedMain}, bytesReceivedMain=${state.bytesReceivedMain}).`,
+          });
+          if (state.eosResolver) {
+            const resolve = state.eosResolver;
+            state.eosResolver = null;
+            resolve();
+          }
+        }
+        return;
+      }
     }
 
-    // Handle binary chunk (ArrayBuffer or Uint8Array or wrapped chunk)
+    // Handle binary chunk (cross-realm safe for structured-cloned Uint8Array / ArrayBuffer)
     let chunkBuffer: Buffer | null = null;
-    if (data instanceof Uint8Array) {
-      chunkBuffer = Buffer.from(data.buffer, data.byteOffset, data.byteLength);
-    } else if (data instanceof ArrayBuffer) {
-      chunkBuffer = Buffer.from(data);
-    } else if (
+    if (
       data &&
       typeof data === 'object' &&
       'type' in data &&
-      data.type === 'chunk' &&
-      data.sessionId === state.sessionId &&
-      data.payload
+      data.type === 'chunk'
     ) {
-      if (data.payload instanceof Uint8Array) {
-        chunkBuffer = Buffer.from(
-          data.payload.buffer,
-          data.payload.byteOffset,
-          data.payload.byteLength
-        );
-      } else if (data.payload instanceof ArrayBuffer) {
-        chunkBuffer = Buffer.from(data.payload);
+      if (data.sessionId !== state.sessionId) {
+        captureEngine?.appendDiagnosticEvent(state.matchId, state.sessionId, {
+          level: 'warn',
+          stage: 'transport',
+          message: `Ignored chunk for mismatched sessionId (${String(data.sessionId)}).`,
+        });
+        return;
       }
+      chunkBuffer = extractBinaryChunkBuffer(data.payload);
+    } else {
+      chunkBuffer = extractBinaryChunkBuffer(data);
     }
 
-    if (!chunkBuffer || chunkBuffer.byteLength === 0) return;
+    if (!chunkBuffer || chunkBuffer.byteLength === 0) {
+      captureEngine?.appendDiagnosticEvent(state.matchId, state.sessionId, {
+        level: 'warn',
+        stage: 'transport',
+        message: 'Received empty or unrecognized binary payload on transport port.',
+      });
+      return;
+    }
     if (state.uiStatus !== 'recording' && state.uiStatus !== 'finalizing' && state.uiStatus !== 'paused') {
       return;
     }
 
+    const nowMs = Date.now();
+    const isFirstChunk = state.chunksReceivedMain === 0;
+    state.chunksReceivedMain += 1;
+    state.bytesReceivedMain += chunkBuffer.byteLength;
+    state.lastChunkReceivedAtMs = nowMs;
+    state.lastChunkReceivedAtIso = new Date(nowMs).toISOString();
+
+    if (isFirstChunk) {
+      state.startupWatchdogState = 'satisfied';
+      state.stallWatchdogState = 'monitoring';
+      captureEngine?.appendDiagnosticEvent(state.matchId, state.sessionId, {
+        level: 'info',
+        stage: 'transport',
+        message: `First binary media chunk received in Electron Main (${chunkBuffer.byteLength} bytes). Startup watchdog satisfied.`,
+      });
+    }
+
     if (state.ffmpeg) {
       const res = state.ffmpeg.enqueueChunk(chunkBuffer);
+      if (!res.accepted) {
+        state.hadPipelineErrors = true;
+        state.lastPipelineError = res.reason ?? 'FFmpeg rejected incoming media chunk.';
+        captureEngine?.appendDiagnosticEvent(state.matchId, state.sessionId, {
+          level: 'warn',
+          stage: 'ffmpeg',
+          message: `Chunk rejected by FFmpeg queue: ${state.lastPipelineError}`,
+        });
+      }
       if (res.backpressureActive !== lastNotifiedBackpressure) {
         lastNotifiedBackpressure = res.backpressureActive;
         const metrics = state.ffmpeg.getMetrics();
@@ -631,6 +848,11 @@ function attachBinaryTransportPort(state: ActiveRecordingState): void {
     { sessionId: state.sessionId },
     [rendererPort]
   );
+  captureEngine?.appendDiagnosticEvent(state.matchId, state.sessionId, {
+    level: 'info',
+    stage: 'transport',
+    message: 'Binary MessagePort posted from Electron Main to preload.',
+  });
 }
 
 function waitForRendererEos(state: ActiveRecordingState, timeoutMs = 2500): Promise<void> {
@@ -768,14 +990,37 @@ function spawnFfmpegForActiveSession(
         // Reflected in periodic telemetry broadcast
       },
       onError: (msg) => {
+        state.lastFfmpegError = msg;
         state.lastWarning = msg;
+        state.hadPipelineErrors = true;
+        captureEngine?.appendDiagnosticEvent(state.matchId, state.sessionId, {
+          level: 'error',
+          stage: 'ffmpeg',
+          message: msg,
+        });
         broadcastTelemetry();
       },
       onExit: (code, signal, stderrTail) => {
+        state.lastFfmpegExitCode = code;
+        state.lastFfmpegExitSignal = signal;
+        state.lastFfmpegStderrTail = stderrTail;
+        captureEngine?.appendDiagnosticEvent(state.matchId, state.sessionId, {
+          level: !state.expectedFfmpegClose && code !== 0 ? 'error' : 'info',
+          stage: 'ffmpeg',
+          message: `FFmpeg exited (code=${code ?? 'null'}, signal=${signal ?? 'none'}, expected=${state.expectedFfmpegClose}).`,
+          details: stderrTail ? { stderrTail: stderrTail.slice(-600) } : undefined,
+        });
+
         if (!state.expectedFfmpegClose && state.uiStatus === 'recording') {
           state.ffmpegStatus = 'error';
-          state.uiStatus = 'interrupted';
-          state.lastError = `FFmpeg exited unexpectedly (code=${code ?? 'null'}, signal=${signal ?? 'none'}). ${stderrTail}`;
+          state.hadPipelineErrors = true;
+          state.lastFfmpegError = `FFmpeg exited unexpectedly (code=${code ?? 'null'}, signal=${signal ?? 'none'}).`;
+          state.lastError = `${state.lastFfmpegError} ${stderrTail ? stderrTail.slice(-240) : ''}`.trim();
+          state.lastPipelineError = state.lastError;
+          if (!state.autoStopTriggered) {
+            state.autoStopTriggered = true;
+            void finalizeActiveSession(state.lastFfmpegError, 4000);
+          }
           broadcastTelemetry();
         } else if (state.uiStatus === 'paused') {
           state.ffmpegStatus = 'paused';
@@ -788,7 +1033,98 @@ function spawnFfmpegForActiveSession(
 
   proc.start();
   state.ffmpeg = proc;
+  state.lastFfmpegArgs = proc.getSpawnedArgs();
   state.ffmpegStatus = 'running';
+  captureEngine?.appendDiagnosticEvent(state.matchId, state.sessionId, {
+    level: 'info',
+    stage: 'ffmpeg',
+    message: `FFmpeg process started (pid=${proc.pid ?? 'unknown'}, encoder=${encoder}, inputFormat=${inputFormat}).`,
+  });
+}
+
+async function failActiveSessionDueToWatchdog(
+  state: ActiveRecordingState,
+  failureReason: string
+): Promise<void> {
+  if (!activeRecording || activeRecording.sessionId !== state.sessionId || !captureEngine) {
+    return;
+  }
+  state.autoStopTriggered = true;
+  state.hadPipelineErrors = true;
+  state.lastPipelineError = failureReason;
+  state.lastError = failureReason;
+  stopActiveSessionMonitor(state);
+
+  captureEngine.appendDiagnosticEvent(state.matchId, state.sessionId, {
+    level: 'error',
+    stage: 'watchdog',
+    message: failureReason,
+    details: {
+      chunksReceivedMain: state.chunksReceivedMain,
+      bytesReceivedMain: state.bytesReceivedMain,
+      transportPortAttached: state.transportPortAttached,
+      transportPortReadyAck: state.transportPortReadyAck,
+      renderer: state.rendererDiagnostics,
+    },
+  });
+
+  if (state.ffmpeg) {
+    state.expectedFfmpegClose = true;
+    await state.ffmpeg.stopGracefully(4000);
+    state.ffmpeg = null;
+  }
+  detachTransportPort(state);
+  await state.segmentVerificationQueue;
+  await verifyAnyUnregisteredDiskSegments(state);
+
+  const validSegments = state.manifest.segments.filter(
+    (s) =>
+      (s.status === 'finalized' || s.status === 'recovered') &&
+      s.sizeBytes > 0 &&
+      s.durationSeconds > 0
+  );
+
+  let finalManifest: CaptureManifest | null = null;
+  if (validSegments.length > 0) {
+    finalManifest = captureEngine.finalizeSessionManifest(state.sessionId, {
+      activeDurationSeconds: getActiveDurationSeconds(state),
+      matchId: state.matchId,
+      hadErrors: true,
+      failureReason,
+    });
+  } else {
+    finalManifest = captureEngine.failSessionManifest(state.sessionId, failureReason, {
+      activeDurationSeconds: getActiveDurationSeconds(state),
+      matchId: state.matchId,
+    });
+  }
+
+  releasePowerSaveBlocker();
+
+  if (finalManifest) {
+    state.manifest = finalManifest;
+    state.uiStatus = finalManifest.status === 'partial' ? 'partial' : 'failed';
+    state.ffmpegStatus = 'error';
+    const diagnostics = buildPipelineDiagnostics(state);
+    const summaryPath = captureEngine.writeSessionDiagnosticsSummary(finalManifest, diagnostics, {
+      ffmpegArgs: state.lastFfmpegArgs,
+      ffmpegStderrTail: state.lastFfmpegStderrTail
+        ? state.lastFfmpegStderrTail.split(/\r?\n/).filter(Boolean)
+        : [],
+    });
+    finalManifest.diagnosticsPath = summaryPath;
+    await syncSessionPatchToBackend(finalManifest);
+    await syncDiagnosticsToBackend(finalManifest, diagnostics);
+
+    const terminalTelemetry = buildActiveTelemetry(state);
+    lastCompletedTelemetry = terminalTelemetry;
+    activeRecording = null;
+    broadcastTelemetry(terminalTelemetry);
+    return;
+  }
+
+  activeRecording = null;
+  broadcastTelemetry();
 }
 
 function startActiveSessionMonitor(state: ActiveRecordingState): void {
@@ -800,8 +1136,57 @@ function startActiveSessionMonitor(state: ActiveRecordingState): void {
       return;
     }
     tickCount += 1;
+    const nowMs = Date.now();
 
-    // Every 5 seconds: verify disk space and maxRecordingMinutes safeguard
+    // 1. Startup Watchdog: fail fast if ZERO binary chunks arrive in Main within startupTimeoutSeconds
+    if (
+      state.uiStatus === 'recording' &&
+      !state.autoStopTriggered &&
+      state.chunksReceivedMain === 0 &&
+      state.activeSegmentStartMs !== null
+    ) {
+      state.startupWatchdogState = 'armed';
+      const elapsedSinceStartMs = nowMs - state.activeSegmentStartMs;
+      if (elapsedSinceStartMs >= state.startupTimeoutSeconds * 1000) {
+        state.startupWatchdogState = 'triggered';
+        const diagHint =
+          state.rendererDiagnostics.chunksGenerated === 0
+            ? 'MediaRecorder produced 0 chunks (verify game capture window is visible and not DRM-protected).'
+            : !state.transportPortReadyAck
+              ? 'Preload binary MessagePort never acknowledged readiness.'
+              : state.rendererDiagnostics.chunksFailedTransport > 0
+                ? `Renderer failed to transmit ${state.rendererDiagnostics.chunksFailedTransport} chunks over MessagePort (${state.rendererDiagnostics.lastRendererError ?? 'transport error'}).`
+                : 'Binary chunks did not reach Electron Main FFmpeg pipeline.';
+        await failActiveSessionDueToWatchdog(
+          state,
+          `Startup watchdog triggered after ${state.startupTimeoutSeconds}s with 0 bytes received in recording pipeline. ${diagHint}`
+        );
+        return;
+      }
+    }
+
+    // 2. Stall Watchdog: detect silent pipeline stall after initial chunks succeeded (never while paused)
+    if (
+      state.uiStatus === 'recording' &&
+      !state.autoStopTriggered &&
+      state.chunksReceivedMain > 0 &&
+      state.lastChunkReceivedAtMs !== null
+    ) {
+      state.stallWatchdogState = 'monitoring';
+      const silentMs = nowMs - state.lastChunkReceivedAtMs;
+      if (silentMs >= state.stallTimeoutSeconds * 1000) {
+        state.stallWatchdogState = 'triggered';
+        await failActiveSessionDueToWatchdog(
+          state,
+          `Recording pipeline stalled: no binary media chunks arrived for ${Math.round(silentMs / 1000)}s (threshold: ${state.stallTimeoutSeconds}s). Any already-finalized segments were preserved.`
+        );
+        return;
+      }
+    } else if (state.uiStatus === 'paused') {
+      state.stallWatchdogState = 'paused';
+    }
+
+    // 3. Every 5 seconds: verify disk space and maxRecordingMinutes safeguard
     if (tickCount % 5 === 0) {
       const avail = getAvailableDiskBytes(state.manifest.outputDirectory);
       state.availableDiskBytes = avail;
@@ -809,6 +1194,7 @@ function startActiveSessionMonitor(state: ActiveRecordingState): void {
 
       if (avail !== null && avail < CRITICAL_DISK_STOP_BYTES && !state.autoStopTriggered) {
         state.autoStopTriggered = true;
+        state.hadPipelineErrors = true;
         state.lastError =
           'Available disk space dropped below 150 MB. Automatically finalizing recording safely.';
         void finalizeActiveSession('Critical low disk space safeguard triggered.');
@@ -861,7 +1247,12 @@ async function finalizeActiveSession(
   }
 
   const state = activeRecording;
-  if (state.uiStatus === 'finalizing' || state.uiStatus === 'completed') {
+  if (
+    state.uiStatus === 'finalizing' ||
+    state.uiStatus === 'completed' ||
+    state.uiStatus === 'partial' ||
+    state.uiStatus === 'failed'
+  ) {
     return state.manifest;
   }
 
@@ -874,6 +1265,11 @@ async function finalizeActiveSession(
   state.ffmpegStatus = 'finalizing';
   if (reason) state.lastWarning = reason;
   stopActiveSessionMonitor(state);
+  captureEngine.appendDiagnosticEvent(state.matchId, state.sessionId, {
+    level: 'info',
+    stage: 'finalization',
+    message: `Finalizing session (${reason ?? 'user requested'}). chunksReceivedMain=${state.chunksReceivedMain}, bytesReceivedMain=${state.bytesReceivedMain}.`,
+  });
   broadcastTelemetry();
 
   // Wait briefly for renderer's final MediaRecorder flush EOS
@@ -883,7 +1279,17 @@ async function finalizeActiveSession(
 
   if (state.ffmpeg) {
     state.expectedFfmpegClose = true;
+    const metricsBeforeStop = state.ffmpeg.getMetrics();
+    if (metricsBeforeStop.stderrTail.length > 0) {
+      state.lastFfmpegStderrTail = metricsBeforeStop.stderrTail.join('\n');
+    }
     await state.ffmpeg.stopGracefully(gracefulTimeoutMs);
+    const metricsAfterStop = state.ffmpeg.getMetrics();
+    state.lastFfmpegExitCode = metricsAfterStop.exitCode;
+    state.lastFfmpegExitSignal = metricsAfterStop.exitSignal;
+    if (metricsAfterStop.stderrTail.length > 0) {
+      state.lastFfmpegStderrTail = metricsAfterStop.stderrTail.join('\n');
+    }
     state.ffmpeg = null;
   }
 
@@ -896,19 +1302,58 @@ async function finalizeActiveSession(
     Math.round(state.manifest.segments.reduce((sum, s) => sum + s.durationSeconds, 0))
   );
 
+  const derivedFailureReason =
+    state.lastPipelineError ??
+    state.lastError ??
+    (state.chunksReceivedMain === 0
+      ? 'Recording produced 0 bytes: no binary chunks reached the FFmpeg capture pipeline.'
+      : null);
+
   const finalized = captureEngine.finalizeSessionManifest(state.sessionId, {
     activeDurationSeconds: activeSeconds,
     matchId: state.matchId,
+    hadErrors: state.hadPipelineErrors,
+    failureReason: derivedFailureReason,
   });
+
+  releasePowerSaveBlocker();
 
   if (finalized) {
     state.manifest = finalized;
-    state.uiStatus = 'completed';
-    state.ffmpegStatus = 'stopped';
+    if (finalized.status === 'failed') {
+      state.uiStatus = 'failed';
+      state.ffmpegStatus = 'error';
+      state.lastError =
+        finalized.failureReason ??
+        'Recording failed: no valid non-empty MP4 segments were produced.';
+      state.lastPipelineError = state.lastError;
+    } else if (finalized.status === 'partial') {
+      state.uiStatus = 'partial';
+      state.ffmpegStatus = 'stopped';
+      state.lastWarning =
+        finalized.failureReason ??
+        'Recording finalized as partial: valid segments were saved, but some segments failed or were interrupted.';
+    } else {
+      state.uiStatus = 'completed';
+      state.ffmpegStatus = 'stopped';
+    }
+
+    const diagnostics = buildPipelineDiagnostics(state);
+    const summaryPath = captureEngine.writeSessionDiagnosticsSummary(finalized, diagnostics, {
+      ffmpegArgs: state.lastFfmpegArgs,
+      ffmpegStderrTail: state.lastFfmpegStderrTail
+        ? state.lastFfmpegStderrTail.split(/\r?\n/).filter(Boolean)
+        : [],
+    });
+    finalized.diagnosticsPath = summaryPath;
+
     await syncSessionPatchToBackend(finalized);
-    const completedSnapshot = buildActiveTelemetry(state);
+    await syncDiagnosticsToBackend(finalized, diagnostics);
+
+    const terminalSnapshot = buildActiveTelemetry(state);
+    lastCompletedTelemetry = terminalSnapshot;
     activeRecording = null;
-    broadcastTelemetry(completedSnapshot);
+    broadcastTelemetry(terminalSnapshot);
     return finalized;
   }
 
@@ -954,39 +1399,91 @@ function checkHealthOnce(port: number): Promise<boolean> {
   });
 }
 
+function appendBackendStartupLog(line: string): void {
+  if (!backendLogPathGlobal) return;
+  try {
+    fs.mkdirSync(path.dirname(backendLogPathGlobal), { recursive: true });
+    if (fs.existsSync(backendLogPathGlobal)) {
+      const stat = fs.statSync(backendLogPathGlobal);
+      if (stat.size > 1024 * 1024) {
+        const rotated = `${backendLogPathGlobal}.1`;
+        if (fs.existsSync(rotated)) fs.unlinkSync(rotated);
+        fs.renameSync(backendLogPathGlobal, rotated);
+      }
+    }
+    fs.appendFileSync(backendLogPathGlobal, `[${new Date().toISOString()}] ${line}\n`, 'utf8');
+  } catch {
+    // ignore log write errors
+  }
+}
+
 async function waitForBackendReady(port: number, timeoutMs = 15000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     if (backendProcess && backendProcess.exitCode !== null) {
-      throw new Error(`Local backend exited prematurely with code ${backendProcess.exitCode}.`);
+      const stderrPreview =
+        backendStderrTail.length > 0 ? `\n\nBackend stderr:\n${backendStderrTail.slice(-10).join('\n')}` : '';
+      throw new Error(
+        `Local backend exited prematurely with code ${backendProcess.exitCode}.${stderrPreview}\n\nStartup log: ${backendLogPathGlobal}`
+      );
     }
     const healthy = await checkHealthOnce(port);
     if (healthy) return;
     await new Promise((r) => setTimeout(r, 150));
   }
-  throw new Error('Timed out waiting for local Express backend health check.');
+  const stderrPreview =
+    backendStderrTail.length > 0 ? `\n\nLast backend stderr:\n${backendStderrTail.slice(-8).join('\n')}` : '';
+  throw new Error(
+    `Timed out waiting for local Express backend health check on 127.0.0.1:${port}.${stderrPreview}\n\nStartup log: ${backendLogPathGlobal}`
+  );
 }
 
 async function startLocalBackend(): Promise<void> {
-  const { serverScriptPath, staticDistDir, userDataDbDir, recordingsRootDir, referenceDataDir } =
-    resolvePackagedPaths();
+  const {
+    serverScriptPath,
+    staticDistDir,
+    userDataDbDir,
+    recordingsRootDir,
+    logsDir,
+    referenceDataDir,
+    unpackedNodeModulesDir,
+    asarNodeModulesDir,
+  } = resolvePackagedPaths();
 
   recordingsRootDirGlobal = recordingsRootDir;
+  logsDirGlobal = logsDir;
+  backendLogPathGlobal = path.join(logsDir, 'backend-startup.log');
+  backendStderrTail = [];
   captureEngine = new CaptureSessionEngine(recordingsRootDir);
 
+  appendBackendStartupLog(
+    `Starting local backend (isPackaged=${app.isPackaged}, platform=${process.platform}, serverScript=${serverScriptPath}, userDataDbDir=${userDataDbDir})`
+  );
+
   if (!fs.existsSync(serverScriptPath)) {
-    throw new Error(
-      `Packaged backend bundle missing at ${serverScriptPath}. Run "npm run build:desktop" before launching Electron.`
-    );
+    const msg = `Packaged backend bundle missing at ${serverScriptPath}. Run "npm run build:desktop" before launching Electron.`;
+    appendBackendStartupLog(`ERROR: ${msg}`);
+    throw new Error(msg);
   }
   if (!fs.existsSync(path.join(staticDistDir, 'index.html'))) {
-    throw new Error(
-      `Built React frontend missing at ${staticDistDir}. Run "npm run build:desktop" before launching Electron.`
-    );
+    const msg = `Built React frontend missing at ${staticDistDir}. Run "npm run build:desktop" before launching Electron.`;
+    appendBackendStartupLog(`ERROR: ${msg}`);
+    throw new Error(msg);
   }
 
   backendPort = await findFreeLoopbackPort();
   backendBaseUrl = `http://127.0.0.1:${backendPort}`;
+
+  const nodePathEntries = [
+    unpackedNodeModulesDir,
+    asarNodeModulesDir,
+    process.env.NODE_PATH || '',
+  ].filter(Boolean);
+  const resolvedNodePath = nodePathEntries.join(path.delimiter);
+
+  appendBackendStartupLog(
+    `Spawning backend on 127.0.0.1:${backendPort} | NODE_PATH=${resolvedNodePath}`
+  );
 
   const child = spawn(process.execPath, [serverScriptPath], {
     cwd: app.isPackaged ? path.dirname(serverScriptPath) : app.getAppPath(),
@@ -994,6 +1491,7 @@ async function startLocalBackend(): Promise<void> {
       ...process.env,
       ELECTRON_RUN_AS_NODE: '1',
       NODE_ENV: 'production',
+      NODE_PATH: resolvedNodePath,
       FC26_DESKTOP_MODE: '1',
       FC26_HOST: '127.0.0.1',
       FC26_PORT: String(backendPort),
@@ -1008,26 +1506,40 @@ async function startLocalBackend(): Promise<void> {
   backendProcess = child;
 
   child.stdout?.on('data', (chunk: Buffer) => {
-    console.log(`[backend] ${chunk.toString().trim()}`);
+    const text = chunk.toString().trim();
+    if (!text) return;
+    console.log(`[backend] ${text}`);
+    appendBackendStartupLog(`[stdout] ${text}`);
   });
 
   child.stderr?.on('data', (chunk: Buffer) => {
-    console.error(`[backend:err] ${chunk.toString().trim()}`);
+    const text = chunk.toString().trim();
+    if (!text) return;
+    console.error(`[backend:err] ${text}`);
+    appendBackendStartupLog(`[stderr] ${text}`);
+    backendStderrTail.push(...text.split(/\r?\n/).slice(-6));
+    if (backendStderrTail.length > 30) {
+      backendStderrTail = backendStderrTail.slice(-30);
+    }
   });
 
   child.on('exit', (code, signal) => {
     backendProcess = null;
+    appendBackendStartupLog(`Backend process exited (code=${code ?? 'null'}, signal=${signal ?? 'none'}).`);
     if (!isQuitting) {
+      const stderrExcerpt =
+        backendStderrTail.length > 0 ? `\n\nRecent error output:\n${backendStderrTail.slice(-8).join('\n')}` : '';
       console.error(`Local backend stopped unexpectedly (code=${code}, signal=${signal}).`);
       dialog.showErrorBox(
         'FC26 AI Manager — Backend Stopped',
-        `The local database backend stopped unexpectedly (exit code ${code ?? 'unknown'}). Please restart FC26 AI Manager.`
+        `The local database backend stopped unexpectedly (exit code ${code ?? 'unknown'}).${stderrExcerpt}\n\nDiagnostic log: ${backendLogPathGlobal}`
       );
       app.quit();
     }
   });
 
   await waitForBackendReady(backendPort);
+  appendBackendStartupLog(`Backend health check passed on 127.0.0.1:${backendPort}.`);
   configureDisplayMediaHandler();
   await refreshCapabilityProbe();
 }
@@ -1070,6 +1582,7 @@ function createMainWindow(): void {
       sandbox: true,
       webSecurity: true,
       allowRunningInsecureContent: false,
+      backgroundThrottling: false,
     },
   });
 
@@ -1235,6 +1748,15 @@ function registerIpcHandlers(): void {
         maxRecordingMinutes,
       });
 
+      const startupTimeoutSeconds = Math.max(
+        5,
+        Math.min(30, Math.round(Number(req.startupTimeoutSeconds) || 10))
+      );
+      const stallTimeoutSeconds = Math.max(
+        8,
+        Math.min(60, Math.round(Number(req.stallTimeoutSeconds) || 18))
+      );
+
       const state: ActiveRecordingState = {
         sessionId: manifest.sessionId,
         matchId,
@@ -1260,11 +1782,37 @@ function registerIpcHandlers(): void {
         expectedFfmpegClose: false,
         segmentVerificationQueue: Promise.resolve(),
         monitorTimer: null,
+        transportPortAttached: false,
+        transportPortReadyAck: false,
+        chunksReceivedMain: 0,
+        bytesReceivedMain: 0,
+        lastChunkReceivedAtMs: null,
+        lastChunkReceivedAtIso: null,
+        startupTimeoutSeconds,
+        stallTimeoutSeconds,
+        startupWatchdogState: 'armed',
+        stallWatchdogState: 'idle',
+        lastFfmpegError: null,
+        lastPipelineError: null,
+        lastFfmpegArgs: [],
+        lastFfmpegStderrTail: '',
+        lastFfmpegExitCode: null,
+        lastFfmpegExitSignal: null,
+        hadPipelineErrors: false,
+        rendererDiagnostics: { ...EMPTY_RENDERER_DIAGNOSTICS },
       };
 
       activeRecording = state;
+      lastCompletedTelemetry = null;
+      acquirePowerSaveBlocker();
 
       try {
+        captureEngine.appendDiagnosticEvent(matchId, manifest.sessionId, {
+          level: 'info',
+          stage: 'session',
+          message: `Starting ${half} recording session (${resolution} @ ${fps}fps, source="${authorizedSelection.sourceName}").`,
+        });
+
         const inputFormat: 'webm' | 'matroska' =
           req.inputMimeType && req.inputMimeType.toLowerCase().includes('matroska')
             ? 'matroska'
@@ -1286,6 +1834,7 @@ function registerIpcHandlers(): void {
           state.expectedFfmpegClose = true;
           await state.ffmpeg.stopGracefully(3000);
         }
+        releasePowerSaveBlocker();
         activeRecording = null;
         broadcastTelemetry();
         throw err;
@@ -1369,6 +1918,13 @@ function registerIpcHandlers(): void {
       );
       state.uiStatus = 'recording';
       state.activeSegmentStartMs = Date.now();
+      state.lastChunkReceivedAtMs = Date.now();
+      state.stallWatchdogState = state.chunksReceivedMain > 0 ? 'monitoring' : 'idle';
+      captureEngine.appendDiagnosticEvent(state.matchId, state.sessionId, {
+        level: 'info',
+        stage: 'session',
+        message: 'Resuming recording session with fresh FFmpeg segment process.',
+      });
       spawnFfmpegForActiveSession(state, inputFormat);
       attachBinaryTransportPort(state);
       await syncSessionPatchToBackend(state.manifest);
@@ -1382,7 +1938,11 @@ function registerIpcHandlers(): void {
     async (event, payload: { sessionId?: string; reason?: string }) => {
       assertAuthorizedSender(event.sender);
       if (!activeRecording) {
-        return { stopped: false, manifest: null, telemetry: buildIdleTelemetry() };
+        return {
+          stopped: false,
+          manifest: null,
+          telemetry: lastCompletedTelemetry ?? buildIdleTelemetry(),
+        };
       }
       if (payload?.sessionId && payload.sessionId !== activeRecording.sessionId) {
         throw new Error('Requested sessionId does not match the active recording session.');
@@ -1391,7 +1951,7 @@ function registerIpcHandlers(): void {
       return {
         stopped: true,
         manifest,
-        telemetry: buildIdleTelemetry(),
+        telemetry: lastCompletedTelemetry ?? buildIdleTelemetry(),
       };
     }
   );
@@ -1401,10 +1961,16 @@ function registerIpcHandlers(): void {
     async (event, payload: { sessionId: string; reason: string }) => {
       assertAuthorizedSender(event.sender);
       if (!activeRecording || activeRecording.sessionId !== payload?.sessionId) {
-        return buildIdleTelemetry();
+        return {
+          interrupted: false,
+          manifest: null,
+          telemetry: lastCompletedTelemetry ?? buildIdleTelemetry(),
+        };
       }
       activeRecording.sourceAvailable = false;
+      activeRecording.hadPipelineErrors = true;
       activeRecording.lastError = payload.reason || 'Capture stream ended unexpectedly.';
+      activeRecording.lastPipelineError = activeRecording.lastError;
       const manifest = await finalizeActiveSession(
         `Capture interrupted: ${activeRecording.lastError}`,
         5000
@@ -1412,8 +1978,44 @@ function registerIpcHandlers(): void {
       return {
         interrupted: true,
         manifest,
-        telemetry: buildIdleTelemetry(),
+        telemetry: lastCompletedTelemetry ?? buildIdleTelemetry(),
       };
+    }
+  );
+
+  ipcMain.handle(
+    'capture:report-renderer-diagnostics',
+    async (
+      event,
+      payload: { sessionId: string; renderer: Partial<RendererCaptureDiagnostics> }
+    ) => {
+      assertAuthorizedSender(event.sender);
+      if (!activeRecording || activeRecording.sessionId !== payload?.sessionId) {
+        return { updated: false };
+      }
+      activeRecording.rendererDiagnostics = {
+        ...activeRecording.rendererDiagnostics,
+        ...payload.renderer,
+      };
+      if (payload.renderer?.lastRendererError) {
+        activeRecording.lastPipelineError = payload.renderer.lastRendererError;
+      }
+      return { updated: true };
+    }
+  );
+
+  ipcMain.handle(
+    'capture:report-watchdog-failure',
+    async (event, payload: { sessionId: string; reason: string }) => {
+      assertAuthorizedSender(event.sender);
+      if (!activeRecording || activeRecording.sessionId !== payload?.sessionId) {
+        return { failed: false };
+      }
+      await failActiveSessionDueToWatchdog(
+        activeRecording,
+        payload.reason || 'Renderer reported unrecoverable capture pipeline failure.'
+      );
+      return { failed: true };
     }
   );
 
@@ -1433,6 +2035,7 @@ function registerIpcHandlers(): void {
           state.ffmpeg = null;
         }
         detachTransportPort(state);
+        releasePowerSaveBlocker();
         activeRecording = null;
       }
 
@@ -1440,6 +2043,7 @@ function registerIpcHandlers(): void {
       if (result.manifest) {
         await syncSessionPatchToBackend(result.manifest);
       }
+      lastCompletedTelemetry = null;
       broadcastTelemetry();
       return {
         discarded: result.discarded,
@@ -1530,6 +2134,57 @@ function registerIpcHandlers(): void {
     return { opened: true, path: safeFolder };
   });
 
+  ipcMain.handle('capture:open-diagnostics-folder', async (event) => {
+    assertAuthorizedSender(event.sender);
+    if (!captureEngine) throw new Error('Capture engine unavailable.');
+    const diagDir = captureEngine.getGlobalDiagnosticsDir();
+    fs.mkdirSync(diagDir, { recursive: true });
+    const errMsg = await shell.openPath(diagDir);
+    if (errMsg) {
+      throw new Error(`Failed to open diagnostics folder: ${errMsg}`);
+    }
+    return { opened: true, path: diagDir };
+  });
+
+  ipcMain.handle(
+    'capture:export-diagnostics',
+    async (event, payload: { sessionId?: string; matchId?: string }) => {
+      assertAuthorizedSender(event.sender);
+      if (!captureEngine) throw new Error('Capture engine unavailable.');
+      const targetSessionId = payload?.sessionId || activeRecording?.sessionId || lastCompletedTelemetry?.sessionId;
+      const diagDir = captureEngine.getGlobalDiagnosticsDir();
+      fs.mkdirSync(diagDir, { recursive: true });
+
+      const exportData: Record<string, unknown> = {
+        exportedAt: new Date().toISOString(),
+        platform: process.platform,
+        isPackaged: app.isPackaged,
+        backendLogPath: backendLogPathGlobal || null,
+        capabilities: cachedProbe?.capabilities ?? null,
+        activeTelemetry: activeRecording ? buildActiveTelemetry(activeRecording) : lastCompletedTelemetry,
+        manifest: null,
+        sessionEventLogTail: null,
+      };
+
+      if (targetSessionId) {
+        const manifest = captureEngine.loadSessionManifest(targetSessionId, payload?.matchId);
+        if (manifest) {
+          exportData.manifest = manifest;
+          const logPath = captureEngine.getSessionDiagnosticsLogPath(manifest.matchId, manifest.sessionId);
+          if (fs.existsSync(logPath)) {
+            const rawLog = fs.readFileSync(logPath, 'utf8');
+            exportData.sessionEventLogTail = rawLog.split(/\r?\n/).slice(-120);
+          }
+        }
+      }
+
+      const fileName = `fc26-diagnostics-${targetSessionId ?? 'system'}-${Date.now()}.json`;
+      const exportPath = path.join(diagDir, fileName);
+      fs.writeFileSync(exportPath, JSON.stringify(exportData, null, 2), 'utf8');
+      return { exported: true, path: exportPath };
+    }
+  );
+
   ipcMain.handle('window:minimize', (event) => {
     assertAuthorizedSender(event.sender);
     mainWindow?.minimize();
@@ -1590,6 +2245,7 @@ app.on('before-quit', (event) => {
 
 app.on('will-quit', () => {
   isQuitting = true;
+  releasePowerSaveBlocker();
   stopLocalBackend();
 });
 
