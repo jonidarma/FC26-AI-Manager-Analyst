@@ -1,8 +1,9 @@
-import { Check, Search, Trash2 } from 'lucide-react';
+import { Check, Film, FolderOpen, Search, Trash2 } from 'lucide-react';
 import { useMemo, useState } from 'react';
 import { useApp } from '../context/AppContext';
 import { desktopBridge } from '../services/desktopBridge';
-import type { FeedbackChoice, MatchRecord } from '../types/domain';
+import { recordingController } from '../services/recordingController';
+import type { FeedbackChoice, MatchRecord, MatchSessionWithSegments } from '../types/domain';
 
 const FEEDBACK_LABELS: Record<FeedbackChoice, string> = {
   applied_all: 'Applied all recommendations',
@@ -11,9 +12,26 @@ const FEEDBACK_LABELS: Record<FeedbackChoice, string> = {
   custom_changes: 'Made my own tactical changes',
 };
 
+function formatBytes(bytes: number): string {
+  const gb = bytes / (1024 * 1024 * 1024);
+  if (gb >= 1) return `${gb.toFixed(2)} GB`;
+  const mb = bytes / (1024 * 1024);
+  if (mb >= 1) return `${mb.toFixed(1)} MB`;
+  return `${Math.round(bytes / 1024)} KB`;
+}
+
+function formatDuration(seconds: number): string {
+  const safe = Math.max(0, Math.floor(seconds));
+  const m = Math.floor(safe / 60);
+  const s = safe % 60;
+  return `${m}m ${String(s).padStart(2, '0')}s`;
+}
+
 export function MatchHistoryView() {
   const {
+    capabilities,
     matches,
+    recordingSessions,
     feedbackRecords,
     refreshAll,
     notify,
@@ -33,11 +51,30 @@ export function MatchHistoryView() {
   const [feedbackChoice, setFeedbackChoice] = useState<FeedbackChoice>('applied_some');
   const [feedbackNotes, setFeedbackNotes] = useState('');
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
+  const [expandedRecordingsMatchId, setExpandedRecordingsMatchId] = useState<string | null>(null);
+  const [confirmDiscardSession, setConfirmDiscardSession] = useState<{
+    sessionId: string;
+    matchId: string;
+    step: 1 | 2;
+  } | null>(null);
+
+  const isNativeElectron = capabilities?.environment === 'electron-native';
 
   const feedbackByMatch = useMemo(
     () => new Map(feedbackRecords.map((f) => [f.matchId, f])),
     [feedbackRecords]
   );
+
+  const sessionsByMatch = useMemo(() => {
+    const map = new Map<string, MatchSessionWithSegments[]>();
+    for (const sess of recordingSessions) {
+      if (sess.status === 'discarded') continue;
+      const list = map.get(sess.matchId) ?? [];
+      list.push(sess);
+      map.set(sess.matchId, list);
+    }
+    return map;
+  }, [recordingSessions]);
 
   const filteredMatches = useMemo(() => {
     return matches.filter((m) => {
@@ -122,14 +159,49 @@ export function MatchHistoryView() {
     }
   }
 
+  async function handleOpenSegment(filePath: string) {
+    try {
+      await desktopBridge.openRecordingSegment(filePath);
+    } catch (err) {
+      notify('error', err instanceof Error ? err.message : 'Failed to open recording segment');
+    }
+  }
+
+  async function handleOpenFolder(folderPath: string) {
+    try {
+      await desktopBridge.openSessionFolder(folderPath);
+    } catch (err) {
+      notify('error', err instanceof Error ? err.message : 'Failed to open recording folder');
+    }
+  }
+
+  async function handleConfirmDiscardSession() {
+    if (!confirmDiscardSession) return;
+    if (confirmDiscardSession.step === 1) {
+      setConfirmDiscardSession({ ...confirmDiscardSession, step: 2 });
+      return;
+    }
+    try {
+      const res = await recordingController.discardRecording(
+        confirmDiscardSession.sessionId,
+        confirmDiscardSession.matchId
+      );
+      setConfirmDiscardSession(null);
+      await refreshAll();
+      notify('info', `Recording discarded (${res.removedFiles} local file(s) deleted).`);
+    } catch (err) {
+      notify('error', err instanceof Error ? err.message : 'Failed to discard recording');
+    }
+  }
+
   return (
     <div className="space-y-6">
       <div className="flex flex-wrap items-end justify-between gap-4 border-b border-white/[0.08] pb-5">
         <div>
           <h1 className="text-[24px] font-bold text-white tracking-tight">Match History</h1>
           <p className="mt-1 text-[14px] text-[#9AA4B4]">
-            Log final results manually when second-half capture is skipped, record recommendation
-            adoption, and review past fixtures.
+            Review past fixtures, inspect recorded first-half and second-half video sessions, log
+            final scores, and track tactical recommendation adoption.
           </p>
         </div>
 
@@ -166,9 +238,11 @@ export function MatchHistoryView() {
         <div className="space-y-3">
           {filteredMatches.map((m) => {
             const fb = feedbackByMatch.get(m.id);
+            const matchRecordings = sessionsByMatch.get(m.id) ?? [];
             const isEditingResult = editingResultMatchId === m.id;
             const isEditingFeedback = feedbackMatchId === m.id;
             const isConfirmingDelete = confirmDeleteId === m.id;
+            const isShowingRecordings = expandedRecordingsMatchId === m.id;
 
             return (
               <article
@@ -186,7 +260,8 @@ export function MatchHistoryView() {
                       {m.opponentName}
                     </h2>
                     <div className="mt-1 text-[12px] text-[#9AA4B4]">
-                      Status: <span className="capitalize text-white">{m.status.replace(/_/g, ' ')}</span>
+                      Status:{' '}
+                      <span className="capitalize text-white">{m.status.replace(/_/g, ' ')}</span>
                       <span className="mx-2 text-[#4B5362]">·</span>
                       HT:{' '}
                       <span className="font-mono tabular-nums text-white">
@@ -201,6 +276,17 @@ export function MatchHistoryView() {
                           ? `${m.finalScoreFor}–${m.finalScoreAgainst}`
                           : 'Unrecorded'}
                       </span>
+                      <span className="mx-2 text-[#4B5362]">·</span>
+                      Recordings:{' '}
+                      <span className="font-mono tabular-nums text-white">
+                        {matchRecordings.length} session{matchRecordings.length === 1 ? '' : 's'}
+                      </span>
+                      {m.hasSecondHalfRecording && (
+                        <>
+                          <span className="mx-2 text-[#4B5362]">·</span>
+                          <span className="text-emerald-400">2nd Half Recorded</span>
+                        </>
+                      )}
                       {fb && (
                         <>
                           <span className="mx-2 text-[#4B5362]">·</span>
@@ -211,6 +297,18 @@ export function MatchHistoryView() {
                   </div>
 
                   <div className="flex flex-wrap items-center gap-2">
+                    {matchRecordings.length > 0 && (
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setExpandedRecordingsMatchId(isShowingRecordings ? null : m.id)
+                        }
+                        className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md border border-emerald-500/40 bg-emerald-500/10 hover:bg-emerald-500/15 text-[12px] text-emerald-200"
+                      >
+                        <Film className="w-3.5 h-3.5" />
+                        {isShowingRecordings ? 'Hide Recordings' : `Recordings (${matchRecordings.length})`}
+                      </button>
+                    )}
                     <button
                       type="button"
                       onClick={() => openResultEditor(m)}
@@ -245,6 +343,132 @@ export function MatchHistoryView() {
                     </button>
                   </div>
                 </div>
+
+                {/* Phase 2 Recording Session History Panel */}
+                {isShowingRecordings && matchRecordings.length > 0 && (
+                  <div className="pt-4 border-t border-white/[0.08] space-y-3">
+                    <div className="text-[12px] font-medium text-[#C5CCD7]">
+                      Local Gameplay Recording Sessions
+                    </div>
+                    {matchRecordings.map((sess) => (
+                      <div
+                        key={sess.id}
+                        className="border border-white/[0.07] bg-[#0D1015] rounded-md p-3.5 space-y-2.5 text-[12px]"
+                      >
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <div>
+                            <div className="text-white font-medium">
+                              {sess.half === 'first_half' ? 'First Half' : 'Second Half'} ·{' '}
+                              <span className="capitalize">{sess.status}</span> · Integrity:{' '}
+                              <span
+                                className={
+                                  sess.integrityStatus === 'verified'
+                                    ? 'text-emerald-400'
+                                    : sess.integrityStatus === 'partial'
+                                      ? 'text-amber-300'
+                                      : 'text-[#C5CCD7]'
+                                }
+                              >
+                                {sess.integrityStatus ?? 'pending'}
+                              </span>
+                            </div>
+                            <div className="text-[#8A94A6] font-mono tabular-nums mt-0.5">
+                              {sess.startedAt ? sess.startedAt.slice(0, 19).replace('T', ' ') : '—'}{' '}
+                              → {sess.endedAt ? sess.endedAt.slice(0, 19).replace('T', ' ') : '—'} ·{' '}
+                              {formatDuration(sess.durationSeconds)} · {sess.segments.length}{' '}
+                              segment{sess.segments.length === 1 ? '' : 's'} ·{' '}
+                              {formatBytes(sess.totalBytes)} · {sess.resolution} @ {sess.fps} FPS
+                            </div>
+                          </div>
+
+                          <div className="flex items-center gap-2">
+                            {isNativeElectron && sess.outputDirectory && (
+                              <button
+                                type="button"
+                                onClick={() => void handleOpenFolder(sess.outputDirectory!)}
+                                className="inline-flex items-center gap-1 px-2.5 py-1 rounded border border-white/[0.12] hover:border-white/[0.25] text-[#D7DDE7]"
+                              >
+                                <FolderOpen className="w-3.5 h-3.5" />
+                                Folder
+                              </button>
+                            )}
+                            {isNativeElectron && (
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  setConfirmDiscardSession({
+                                    sessionId: sess.id,
+                                    matchId: sess.matchId,
+                                    step: 1,
+                                  })
+                                }
+                                className="px-2.5 py-1 rounded border border-red-500/25 hover:bg-red-500/10 text-red-300"
+                              >
+                                Delete Video
+                              </button>
+                            )}
+                          </div>
+                        </div>
+
+                        {confirmDiscardSession?.sessionId === sess.id && (
+                          <div className="border border-red-500/35 bg-[#191114] rounded px-3 py-2 flex flex-wrap items-center justify-between gap-2">
+                            <span className="text-red-200">
+                              {confirmDiscardSession.step === 1
+                                ? 'Step 1 of 2: Permanently delete these verified local MP4 files?'
+                                : 'Final confirmation: Permanently delete all MP4 segments for this session?'}
+                            </span>
+                            <div className="flex items-center gap-2">
+                              <button
+                                type="button"
+                                onClick={() => setConfirmDiscardSession(null)}
+                                className="px-2.5 py-1 rounded border border-white/[0.12] text-[#C5CCD7]"
+                              >
+                                Cancel
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => void handleConfirmDiscardSession()}
+                                className="px-2.5 py-1 rounded bg-red-600 hover:bg-red-500 text-white font-medium"
+                              >
+                                {confirmDiscardSession.step === 1
+                                  ? 'Continue'
+                                  : 'Confirm Delete'}
+                              </button>
+                            </div>
+                          </div>
+                        )}
+
+                        {sess.segments.length > 0 && (
+                          <div className="divide-y divide-white/[0.06] border-t border-white/[0.06] pt-2">
+                            {sess.segments.map((seg) => (
+                              <div
+                                key={seg.id}
+                                className="py-1.5 flex flex-wrap items-center justify-between gap-2"
+                              >
+                                <span className="font-mono tabular-nums text-[#C5CCD7]">
+                                  segment_{String(seg.segmentIndex).padStart(3, '0')}.mp4 ·{' '}
+                                  {formatDuration(seg.durationSeconds)} ·{' '}
+                                  {formatBytes(seg.sizeBytes)} ·{' '}
+                                  <span className="uppercase">{seg.status}</span>
+                                </span>
+                                {isNativeElectron &&
+                                  (seg.status === 'finalized' || seg.status === 'recovered') && (
+                                    <button
+                                      type="button"
+                                      onClick={() => void handleOpenSegment(seg.filePath)}
+                                      className="px-2 py-0.5 rounded border border-white/[0.12] hover:border-emerald-500/60 text-white text-[11px]"
+                                    >
+                                      Play MP4
+                                    </button>
+                                  )}
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                )}
 
                 {/* Inline Manual Score Entry */}
                 {isEditingResult && (

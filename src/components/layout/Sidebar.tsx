@@ -171,8 +171,8 @@ export function Sidebar() {
         <div className="mt-0.5 text-[11px] text-[#7D8798] leading-snug">
           {capabilities?.environment === 'electron-native'
             ? capabilities.localFfmpegRecording
-              ? 'Local SQLite & FFmpeg capture active'
-              : 'Local SQLite (userData) · Recording planned for Phase 2'
+              ? 'Local SQLite & FFmpeg capture ready'
+              : 'Local SQLite active · Capture prerequisite blocked'
             : 'Local SQLite live · Native capture requires Windows Electron'}
         </div>
       </div>

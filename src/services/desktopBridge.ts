@@ -2,6 +2,7 @@ import type {
   AiMatchTacticalContext,
   ApiUsageLog,
   ApplicationSettings,
+  CaptureManifest,
   CaptureSourceInfo,
   CatalogClub,
   CatalogCompatibilityRow,
@@ -27,6 +28,7 @@ import type {
   ImportExecuteResult,
   ImportPreviewResult,
   MatchRecord,
+  MatchSessionWithSegments,
   MatchStatus,
   MatchVenue,
   Opponent,
@@ -35,6 +37,9 @@ import type {
   PlayerRoleAssignment,
   PostMatchReportRecord,
   RecommendationFeedbackRecord,
+  RecoverableSessionSummary,
+  RecordingTelemetry,
+  RecoveryExecutionResult,
   RoleFocusValidationResult,
   TacticalCatalogItem,
   TacticalMemoryEntry,
@@ -45,13 +50,86 @@ interface ElectronBackendConnection {
   apiToken: string;
 }
 
+export interface StartRecordingPayload {
+  matchId: string;
+  half: 'first_half' | 'second_half';
+  sourceId: string;
+  sourceName: string;
+  sourceType: 'window' | 'screen';
+  resolution: '1280x720' | '1920x1080';
+  fps: 20 | 30;
+  bitrateKbps: number;
+  segmentDurationMinutes: number;
+  maxRecordingMinutes: number;
+  audioRequested: boolean;
+  audioActive: boolean;
+  inputMimeType?: string;
+}
+
 interface ElectronPreloadApi {
   getBackendConnection: () => Promise<ElectronBackendConnection>;
   getCapabilities: () => Promise<DesktopBridgeCapabilities>;
   listCaptureSources: () => Promise<CaptureSourceInfo[]>;
+  selectCaptureSource: (payload: {
+    sourceId: string;
+    sourceName: string;
+    sourceType: 'window' | 'screen';
+    audioRequested: boolean;
+  }) => Promise<{
+    authorized: boolean;
+    sourceId?: string;
+    sourceName?: string;
+    sourceType?: 'window' | 'screen';
+    reason?: string;
+  }>;
+  startRecordingSession: (req: StartRecordingPayload) => Promise<{
+    sessionId: string;
+    manifest: CaptureManifest;
+    telemetry: RecordingTelemetry;
+  }>;
+  pauseRecordingSession: (sessionId: string) => Promise<RecordingTelemetry>;
+  resumeRecordingSession: (payload: {
+    sessionId: string;
+    inputMimeType?: string;
+  }) => Promise<RecordingTelemetry>;
+  stopRecordingSession: (payload: {
+    sessionId?: string;
+    reason?: string;
+  }) => Promise<{
+    stopped: boolean;
+    manifest: CaptureManifest | null;
+    telemetry: RecordingTelemetry;
+  }>;
+  reportStreamInterrupted: (payload: {
+    sessionId: string;
+    reason: string;
+  }) => Promise<{
+    interrupted?: boolean;
+    manifest?: CaptureManifest | null;
+    telemetry?: RecordingTelemetry;
+  }>;
+  discardRecordingSession: (payload: {
+    sessionId: string;
+    matchId?: string;
+  }) => Promise<{ discarded: boolean; removedFiles: number }>;
+  getRecordingStatus: () => Promise<RecordingTelemetry>;
   getDiskSpace: (targetDir: string) => Promise<DiskSpaceInfo>;
-  getRecoverableSessions: () => Promise<unknown[]>;
+  getRecoverableSessions: () => Promise<RecoverableSessionSummary[]>;
+  recoverSession: (sessionId: string) => Promise<RecoveryExecutionResult>;
+  openRecordingSegment: (filePath: string) => Promise<{ opened: boolean; path: string }>;
+  openSessionFolder: (folderPath: string) => Promise<{ opened: boolean; path: string }>;
   minimizeWindow: () => Promise<void>;
+  sendRecordingChunk: (sessionId: string, chunk: ArrayBuffer) => boolean;
+  endRecordingTransport: (sessionId: string) => void;
+  onTransportControl: (
+    cb: (msg: {
+      type: 'backpressure';
+      active: boolean;
+      queuedBytes: number;
+      queuedChunks: number;
+    }) => void
+  ) => () => void;
+  onRecordingTelemetry: (cb: (telemetry: RecordingTelemetry) => void) => () => void;
 }
 
 declare global {
@@ -186,7 +264,7 @@ class DesktopBridgeService {
       safeStorageAvailable: false,
       platform: 'browser',
       notice:
-        'Browser Preview Environment active. Local SQLite database and tactical workspace are live; native Windows FC26 window capture requires the packaged Electron desktop runtime, and FFmpeg video recording is planned for Phase 2.',
+        'Browser Preview Environment active. Local SQLite database and tactical workspace are live; native Windows FC26 window capture and FFmpeg segmented recording require the packaged Windows Electron desktop application.',
     };
   }
 
@@ -208,6 +286,134 @@ class DesktopBridgeService {
     };
   }
 
+  public async selectCaptureSource(payload: {
+    sourceId: string;
+    sourceName: string;
+    sourceType: 'window' | 'screen';
+    audioRequested: boolean;
+  }): Promise<{
+    authorized: boolean;
+    sourceId?: string;
+    sourceName?: string;
+    sourceType?: 'window' | 'screen';
+    reason?: string;
+  }> {
+    if (this.isElectron() && window.fc26Desktop) {
+      return window.fc26Desktop.selectCaptureSource(payload);
+    }
+    return {
+      authorized: false,
+      reason: 'Native capture source authorization is unavailable in Browser Preview.',
+    };
+  }
+
+  public async startRecordingSession(req: StartRecordingPayload): Promise<{
+    sessionId: string;
+    manifest: CaptureManifest;
+    telemetry: RecordingTelemetry;
+  }> {
+    if (!this.isElectron() || !window.fc26Desktop) {
+      throw new Error('Local FFmpeg video recording requires the Windows Electron desktop application.');
+    }
+    return window.fc26Desktop.startRecordingSession(req);
+  }
+
+  public async pauseRecordingSession(sessionId: string): Promise<RecordingTelemetry> {
+    if (!this.isElectron() || !window.fc26Desktop) {
+      throw new Error('Native capture unavailable in Browser Preview.');
+    }
+    return window.fc26Desktop.pauseRecordingSession(sessionId);
+  }
+
+  public async resumeRecordingSession(payload: {
+    sessionId: string;
+    inputMimeType?: string;
+  }): Promise<RecordingTelemetry> {
+    if (!this.isElectron() || !window.fc26Desktop) {
+      throw new Error('Native capture unavailable in Browser Preview.');
+    }
+    return window.fc26Desktop.resumeRecordingSession(payload);
+  }
+
+  public async stopRecordingSession(payload: {
+    sessionId?: string;
+    reason?: string;
+  }): Promise<{
+    stopped: boolean;
+    manifest: CaptureManifest | null;
+    telemetry: RecordingTelemetry;
+  }> {
+    if (!this.isElectron() || !window.fc26Desktop) {
+      throw new Error('Native capture unavailable in Browser Preview.');
+    }
+    return window.fc26Desktop.stopRecordingSession(payload);
+  }
+
+  public async reportStreamInterrupted(payload: {
+    sessionId: string;
+    reason: string;
+  }): Promise<{
+    interrupted?: boolean;
+    manifest?: CaptureManifest | null;
+    telemetry?: RecordingTelemetry;
+  }> {
+    if (!this.isElectron() || !window.fc26Desktop) {
+      return {};
+    }
+    return window.fc26Desktop.reportStreamInterrupted(payload);
+  }
+
+  public async discardRecordingSession(payload: {
+    sessionId: string;
+    matchId?: string;
+  }): Promise<{ discarded: boolean; removedFiles: number }> {
+    if (!this.isElectron() || !window.fc26Desktop) {
+      throw new Error('Native capture unavailable in Browser Preview.');
+    }
+    return window.fc26Desktop.discardRecordingSession(payload);
+  }
+
+  public async getRecordingStatus(): Promise<RecordingTelemetry> {
+    if (!this.isElectron() || !window.fc26Desktop) {
+      throw new Error('Native capture unavailable in Browser Preview.');
+    }
+    return window.fc26Desktop.getRecordingStatus();
+  }
+
+  public sendRecordingChunk(sessionId: string, chunk: ArrayBuffer): boolean {
+    if (this.isElectron() && window.fc26Desktop) {
+      return window.fc26Desktop.sendRecordingChunk(sessionId, chunk);
+    }
+    return false;
+  }
+
+  public endRecordingTransport(sessionId: string): void {
+    if (this.isElectron() && window.fc26Desktop) {
+      window.fc26Desktop.endRecordingTransport(sessionId);
+    }
+  }
+
+  public onTransportControl(
+    cb: (msg: {
+      type: 'backpressure';
+      active: boolean;
+      queuedBytes: number;
+      queuedChunks: number;
+    }) => void
+  ): () => void {
+    if (this.isElectron() && window.fc26Desktop) {
+      return window.fc26Desktop.onTransportControl(cb);
+    }
+    return () => undefined;
+  }
+
+  public onRecordingTelemetry(cb: (telemetry: RecordingTelemetry) => void): () => void {
+    if (this.isElectron() && window.fc26Desktop) {
+      return window.fc26Desktop.onRecordingTelemetry(cb);
+    }
+    return () => undefined;
+  }
+
   public async getDiskSpace(targetDir: string): Promise<DiskSpaceInfo> {
     if (this.isElectron() && window.fc26Desktop) {
       return window.fc26Desktop.getDiskSpace(targetDir);
@@ -221,11 +427,32 @@ class DesktopBridgeService {
     };
   }
 
-  public async getRecoverableSessions(): Promise<unknown[]> {
+  public async getRecoverableSessions(): Promise<RecoverableSessionSummary[]> {
     if (this.isElectron() && window.fc26Desktop) {
       return window.fc26Desktop.getRecoverableSessions();
     }
     return [];
+  }
+
+  public async recoverSession(sessionId: string): Promise<RecoveryExecutionResult> {
+    if (!this.isElectron() || !window.fc26Desktop) {
+      throw new Error('Crash recovery requires the Windows Electron desktop application.');
+    }
+    return window.fc26Desktop.recoverSession(sessionId);
+  }
+
+  public async openRecordingSegment(filePath: string): Promise<{ opened: boolean; path: string }> {
+    if (!this.isElectron() || !window.fc26Desktop) {
+      throw new Error('Local recording playback requires the Windows Electron desktop application.');
+    }
+    return window.fc26Desktop.openRecordingSegment(filePath);
+  }
+
+  public async openSessionFolder(folderPath: string): Promise<{ opened: boolean; path: string }> {
+    if (!this.isElectron() || !window.fc26Desktop) {
+      throw new Error('Opening local folders requires the Windows Electron desktop application.');
+    }
+    return window.fc26Desktop.openSessionFolder(folderPath);
   }
 
   public async minimizeWindow(): Promise<boolean> {
@@ -786,6 +1013,24 @@ class DesktopBridgeService {
 
   public getMatchAiContext(matchId: string): Promise<AiMatchTacticalContext> {
     return this.apiFetch<AiMatchTacticalContext>(`/api/matches/${matchId}/ai-context`);
+  }
+
+  // Phase 2 — Persisted Recording Sessions & Segments
+  public listRecordingSessions(params?: {
+    matchId?: string;
+    clubId?: string;
+  }): Promise<MatchSessionWithSegments[]> {
+    const qs = new URLSearchParams();
+    if (params?.matchId) qs.set('matchId', params.matchId);
+    if (params?.clubId) qs.set('clubId', params.clubId);
+    const suffix = qs.toString() ? `?${qs.toString()}` : '';
+    return this.apiFetch<MatchSessionWithSegments[]>(`/api/recording-sessions${suffix}`);
+  }
+
+  public getRecordingSession(sessionId: string): Promise<MatchSessionWithSegments> {
+    return this.apiFetch<MatchSessionWithSegments>(
+      `/api/recording-sessions/${encodeURIComponent(sessionId)}`
+    );
   }
 }
 

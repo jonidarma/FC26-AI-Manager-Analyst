@@ -291,16 +291,24 @@ export function SettingsView() {
           </div>
 
           <div className="pt-3 border-t border-white/[0.08] space-y-2.5 text-[13px]">
-            <label className="flex items-center gap-2.5 cursor-pointer text-[#D7DDE7]">
+            <label className="flex items-start gap-2.5 cursor-pointer text-[#D7DDE7]">
               <input
                 type="checkbox"
                 checked={effectiveCapture.audioEnabled}
                 onChange={(e) =>
                   setCaptureDraft({ ...effectiveCapture, audioEnabled: e.target.checked })
                 }
-                className="accent-emerald-500"
+                className="accent-emerald-500 mt-1"
               />
-              Record Game Audio (Disabled by default to minimize file size)
+              <span>
+                Record Game Audio via Windows System Loopback (Disabled by default to minimize file
+                size).{' '}
+                <span className="text-[#8A94A6]">
+                  Note: Windows loopback captures system output audio, which may include sound from
+                  other active desktop applications. If unavailable, recording falls back cleanly to
+                  video-only.
+                </span>
+              </span>
             </label>
 
             <label className="flex items-center gap-2.5 cursor-pointer text-[#D7DDE7]">

@@ -23,6 +23,11 @@ asarUnpack:
   - "node_modules/better-sqlite3/**"
   - "dist-server/**"
   - "data/fc26/**"
+extraResources:
+  - from: resources/ffmpeg/win-x64
+    to: ffmpeg
+    filter:
+      - "**/*"
 win:
   target:
     - target: nsis

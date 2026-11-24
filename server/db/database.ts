@@ -194,7 +194,7 @@ export function getDatabaseMetadata(): {
     storageMode,
     dbDirectory: dataDir,
     sizeBytes,
-    schemaVersion: versionRow?.version ?? 2,
+    schemaVersion: versionRow?.version ?? 3,
     tableCounts,
   };
 }
@@ -205,11 +205,14 @@ export function exportDatabaseBackup(): Record<string, unknown> {
   for (const table of ALLOWED_RESTORE_TABLES) {
     data[table] = db.prepare(`SELECT * FROM ${table}`).all();
   }
+  const versionRow = db
+    .prepare('SELECT MAX(version) as version FROM schema_migrations')
+    .get() as { version: number | null };
 
   return {
     format: 'fc26-ai-manager-backup-v2',
     exportedAt: new Date().toISOString(),
-    schemaVersion: 2,
+    schemaVersion: versionRow?.version ?? 3,
     tables: data,
   };
 }
@@ -219,7 +222,9 @@ export function restoreDatabaseBackup(payload: {
   tables?: Record<string, Array<Record<string, unknown>>>;
 }): void {
   const isV1 = payload.format === 'fc26-ai-manager-backup-v1';
-  const isV2 = payload.format === 'fc26-ai-manager-backup-v2';
+  const isV2 =
+    payload.format === 'fc26-ai-manager-backup-v2' ||
+    payload.format === 'fc26-ai-manager-backup-v3';
 
   if ((!isV1 && !isV2) || !payload.tables) {
     throw new Error(

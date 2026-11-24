@@ -150,6 +150,13 @@ export interface MatchRecord {
   hasPostMatchReport?: boolean;
 }
 
+export type RecordingIntegrityStatus =
+  | 'pending'
+  | 'verified'
+  | 'partial'
+  | 'corrupted'
+  | 'unverified';
+
 export interface MatchSession {
   id: string;
   matchId: string;
@@ -161,9 +168,15 @@ export interface MatchSession {
   fps: number;
   durationSeconds: number;
   totalBytes: number;
+  encoder?: string | null;
+  audioEnabled?: boolean;
+  outputDirectory?: string | null;
+  integrityStatus?: RecordingIntegrityStatus;
+  recoveryNotes?: string | null;
   startedAt: string | null;
   endedAt: string | null;
   createdAt: string;
+  updatedAt?: string | null;
 }
 
 export interface RecordingSegment {
@@ -176,7 +189,21 @@ export interface RecordingSegment {
   sizeBytes: number;
   checksum: string | null;
   status: 'writing' | 'finalized' | 'corrupted' | 'recovered';
+  resolution?: string | null;
+  fps?: number | null;
+  codec?: string | null;
+  hasAudio?: boolean;
+  integrityStatus?: RecordingIntegrityStatus;
+  startedAt?: string | null;
+  endedAt?: string | null;
   createdAt: string;
+}
+
+export interface MatchSessionWithSegments extends MatchSession {
+  opponentName?: string;
+  competition?: string;
+  matchDate?: string;
+  segments: RecordingSegment[];
 }
 
 export interface MatchObservation {
@@ -406,6 +433,8 @@ export interface CaptureSourceInfo {
   name: string;
   type: 'window' | 'screen';
   thumbnailDataUrl?: string;
+  isFc26Candidate?: boolean;
+  available?: boolean;
 }
 
 export interface DiskSpaceInfo {
@@ -413,6 +442,31 @@ export interface DiskSpaceInfo {
   availableBytes: number | null;
   totalBytes: number | null;
   isEstimate: boolean;
+}
+
+export interface CapturePrerequisiteCheck {
+  key: string;
+  label: string;
+  ok: boolean;
+  detail: string;
+}
+
+export interface CaptureEngineCapabilities {
+  ffmpegAvailable: boolean;
+  ffprobeAvailable: boolean;
+  ffmpegVersion: string | null;
+  ffmpegPathSource: 'packaged-resource' | 'dev-resource' | 'env-override' | 'system-path' | 'missing';
+  h264Encoders: string[];
+  preferredEncoder: string | null;
+  supportedInputFormats: string[];
+  aacAudioAvailable: boolean;
+  recordingsRootDir: string | null;
+  recordingsDirWritable: boolean;
+  transportReady: boolean;
+  ipcHandlersReady: boolean;
+  prerequisites: CapturePrerequisiteCheck[];
+  blockingReason: string | null;
+  licenseNotice: string;
 }
 
 export interface DesktopBridgeCapabilities {
@@ -424,6 +478,135 @@ export interface DesktopBridgeCapabilities {
   platform: string;
   isPackaged?: boolean;
   notice: string;
+  captureDiagnostics?: CaptureEngineCapabilities;
+}
+
+export type RecordingUiStatus =
+  | 'idle'
+  | 'initializing'
+  | 'recording'
+  | 'paused'
+  | 'finalizing'
+  | 'completed'
+  | 'interrupted'
+  | 'recoverable'
+  | 'recovered'
+  | 'failed'
+  | 'discarded';
+
+export interface CaptureManifestSegment {
+  index: number;
+  fileName: string;
+  filePath: string;
+  startedAt: string;
+  endedAt: string | null;
+  durationSeconds: number;
+  sizeBytes: number;
+  checksum: string | null;
+  resolution: string | null;
+  fps: number | null;
+  codec: string | null;
+  hasAudio: boolean;
+  finalized: boolean;
+  status: 'writing' | 'finalized' | 'corrupted' | 'recovered';
+  integrityStatus: RecordingIntegrityStatus;
+}
+
+export interface CaptureManifest {
+  manifestVersion: number;
+  sessionId: string;
+  matchId: string;
+  half: 'first_half' | 'second_half';
+  sourceId: string;
+  sourceName: string;
+  sourceType: 'window' | 'screen';
+  resolution: string;
+  fps: number;
+  bitrateKbps: number;
+  encoder: string;
+  audioRequested: boolean;
+  audioActive: boolean;
+  segmentDurationMinutes: number;
+  maxRecordingMinutes: number;
+  outputDirectory: string;
+  status: 'recording' | 'paused' | 'finalizing' | 'completed' | 'recovered' | 'discarded';
+  integrityStatus: RecordingIntegrityStatus;
+  activeDurationSeconds: number;
+  totalBytes: number;
+  nextSegmentIndex: number;
+  segments: CaptureManifestSegment[];
+  recoveryLog: string[];
+  startedAt: string;
+  endedAt: string | null;
+  updatedAt: string;
+}
+
+export interface RecordingTelemetry {
+  uiStatus: RecordingUiStatus;
+  sessionId: string | null;
+  matchId: string | null;
+  half: 'first_half' | 'second_half' | null;
+  sourceId: string | null;
+  sourceName: string | null;
+  sourceType: 'window' | 'screen' | null;
+  sourceAvailable: boolean;
+  sessionElapsedSeconds: number;
+  activeDurationSeconds: number;
+  currentFps: number | null;
+  captureResolution: string | null;
+  encoder: string | null;
+  currentSegmentIndex: number;
+  completedSegmentCount: number;
+  totalBytes: number;
+  availableDiskBytes: number | null;
+  diskLowWarning: boolean;
+  audioRequested: boolean;
+  audioActive: boolean;
+  audioStatusLabel: string;
+  ffmpegStatus: 'idle' | 'starting' | 'running' | 'paused' | 'finalizing' | 'stopped' | 'error';
+  ffmpegPid: number | null;
+  queuedChunks: number;
+  queuedBytes: number;
+  backpressureActive: boolean;
+  outputDirectory: string | null;
+  integrityStatus: RecordingIntegrityStatus;
+  maxRecordingWarning: boolean;
+  lastWarning: string | null;
+  lastError: string | null;
+  segments: CaptureManifestSegment[];
+}
+
+export interface RecoverableSessionSummary {
+  sessionId: string;
+  matchId: string;
+  half: 'first_half' | 'second_half';
+  sourceName: string;
+  previousStatus: CaptureManifest['status'];
+  startedAt: string;
+  updatedAt: string;
+  outputDirectory: string;
+  manifestPath: string;
+  completedSegmentsFound: number;
+  partialSegmentsFound: number;
+  corruptedSegmentsFound: number;
+  totalBytesOnDisk: number;
+  estimatedDurationSeconds: number;
+  recoveryClassification: 'recoverable' | 'partially_recoverable' | 'corrupted';
+  notes: string[];
+}
+
+export interface RecoveryExecutionResult {
+  sessionId: string;
+  matchId: string;
+  half: 'first_half' | 'second_half';
+  status: 'recovered' | 'discarded';
+  integrityStatus: RecordingIntegrityStatus;
+  classification: 'recovered' | 'partially_recovered' | 'corrupted';
+  recoveredSegments: CaptureManifestSegment[];
+  corruptedSegments: CaptureManifestSegment[];
+  totalDurationSeconds: number;
+  totalBytes: number;
+  recoveryLog: string[];
 }
 
 export interface PitchNodePosition {

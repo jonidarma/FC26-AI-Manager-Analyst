@@ -1,5 +1,10 @@
 import {
   AlertTriangle,
+  CheckCircle2,
+  ChevronDown,
+  ChevronUp,
+  Film,
+  FolderOpen,
   HardDrive,
   Monitor,
   Pause,
@@ -10,17 +15,34 @@ import {
   Square,
   Trash2,
 } from 'lucide-react';
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useApp } from '../context/AppContext';
 import { desktopBridge } from '../services/desktopBridge';
-import type { CaptureSourceInfo, DiskSpaceInfo } from '../types/domain';
+import { recordingController } from '../services/recordingController';
+import type {
+  CaptureSourceInfo,
+  DiskSpaceInfo,
+  MatchSessionWithSegments,
+  RecoverableSessionSummary,
+  RecoveryExecutionResult,
+} from '../types/domain';
 
-function formatBytes(bytes: number | null): string {
-  if (bytes === null) return 'Unavailable in Browser Preview';
+function formatBytes(bytes: number | null | undefined): string {
+  if (bytes === null || bytes === undefined) return 'Unavailable in Browser Preview';
   const gb = bytes / (1024 * 1024 * 1024);
   if (gb >= 1) return `${gb.toFixed(2)} GB`;
   const mb = bytes / (1024 * 1024);
-  return `${mb.toFixed(1)} MB`;
+  if (mb >= 1) return `${mb.toFixed(1)} MB`;
+  const kb = bytes / 1024;
+  return `${kb.toFixed(0)} KB`;
+}
+
+function formatDuration(seconds: number): string {
+  const safe = Math.max(0, Math.floor(seconds));
+  const h = Math.floor(safe / 3600);
+  const m = Math.floor((safe % 3600) / 60);
+  const s = safe % 60;
+  return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
 }
 
 export function MatchCaptureView() {
@@ -29,9 +51,13 @@ export function MatchCaptureView() {
     matches,
     selectedMatchId,
     setSelectedMatchId,
+    recordingSessions,
+    recoverableSessions,
+    recordingTelemetry,
     settings,
     setActiveSection,
     refreshAll,
+    refreshRecordingData,
     notify,
   } = useApp();
 
@@ -40,18 +66,57 @@ export function MatchCaptureView() {
   const [sourceError, setSourceError] = useState<string | null>(null);
   const [loadingSources, setLoadingSources] = useState(false);
   const [diskInfo, setDiskInfo] = useState<DiskSpaceInfo | null>(null);
-  const [recoverableCount, setRecoverableCount] = useState<number>(0);
+  const [busyAction, setBusyAction] = useState<string | null>(null);
+  const [showDiagnostics, setShowDiagnostics] = useState(false);
+  const [inspectedRecoveryId, setInspectedRecoveryId] = useState<string | null>(null);
+  const [lastRecoveryResult, setLastRecoveryResult] = useState<RecoveryExecutionResult | null>(null);
+
+  // Explicit discard confirmation state (double-step if discarding an already finalized session)
+  const [discardTarget, setDiscardTarget] = useState<{
+    sessionId: string;
+    matchId: string;
+    isFinalized: boolean;
+    step: 1 | 2;
+  } | null>(null);
 
   const selectedMatch = matches.find((m) => m.id === selectedMatchId) ?? matches[0] ?? null;
   const isNativeElectron = capabilities?.environment === 'electron-native';
   const isRecordingImplemented = capabilities?.localFfmpegRecording === true;
-
   const captureCfg = settings?.capture;
+  const diag = capabilities?.captureDiagnostics;
+
+  const isSessionActive =
+    recordingTelemetry.uiStatus === 'initializing' ||
+    recordingTelemetry.uiStatus === 'recording' ||
+    recordingTelemetry.uiStatus === 'paused' ||
+    recordingTelemetry.uiStatus === 'finalizing';
+
+  const matchSessions = useMemo<MatchSessionWithSegments[]>(() => {
+    if (!selectedMatch) return [];
+    return recordingSessions.filter(
+      (s) => s.matchId === selectedMatch.id && s.status !== 'discarded'
+    );
+  }, [recordingSessions, selectedMatch]);
+
+  const hasValidFirstHalf = useMemo(
+    () =>
+      matchSessions.some(
+        (s) =>
+          s.half === 'first_half' &&
+          (s.status === 'completed' || s.status === 'recovered') &&
+          s.segments.some((seg) => seg.status === 'finalized' || seg.status === 'recovered')
+      ),
+    [matchSessions]
+  );
 
   // Estimate file size for a 15-minute real-time half based on configured bitrate
   const estimatedHalfSizeMb = captureCfg
     ? Math.round((((captureCfg.bitrateKbps * 1000) / 8) * (15 * 60)) / (1024 * 1024))
-    : 495;
+    : 394;
+
+  const effectiveFps: 20 | 30 = captureCfg && captureCfg.fps <= 22 ? 20 : 30;
+  const effectiveResolution: '1280x720' | '1920x1080' =
+    captureCfg?.resolution === '1920x1080' ? '1920x1080' : '1280x720';
 
   async function refreshSources() {
     setLoadingSources(true);
@@ -63,14 +128,16 @@ export function MatchCaptureView() {
         setSourceError(result.reason ?? 'Native capture unavailable in browser preview.');
       } else {
         setSources(result.sources);
-        const fcWindow = result.sources.find(
-          (s) =>
-            s.name.toLowerCase().includes('fc 26') || s.name.toLowerCase().includes('fc26')
-        );
-        if (fcWindow) {
-          setSelectedSourceId(fcWindow.id);
-        } else if (result.sources[0] && !selectedSourceId) {
-          setSelectedSourceId(result.sources[0].id);
+        const stillValid = result.sources.some((s) => s.id === selectedSourceId);
+        if (!stillValid) {
+          const fcWindow = result.sources.find((s) => s.isFc26Candidate);
+          if (fcWindow) {
+            setSelectedSourceId(fcWindow.id);
+          } else if (result.sources[0]) {
+            setSelectedSourceId(result.sources[0].id);
+          } else {
+            setSelectedSourceId('');
+          }
         }
       }
 
@@ -79,8 +146,7 @@ export function MatchCaptureView() {
         setDiskInfo(disk);
       }
 
-      const recoverable = await desktopBridge.getRecoverableSessions();
-      setRecoverableCount(recoverable.length);
+      await refreshRecordingData();
     } catch (err) {
       setSourceError(err instanceof Error ? err.message : 'Failed to inspect capture sources');
     } finally {
@@ -95,6 +161,10 @@ export function MatchCaptureView() {
   async function handleQuickCaptureSetting(
     patch: Partial<NonNullable<typeof settings>['capture']>
   ) {
+    if (isSessionActive) {
+      notify('error', 'Stop the active recording before changing capture parameters.');
+      return;
+    }
     try {
       await desktopBridge.updateSettings({ capture: patch });
       await refreshAll();
@@ -106,16 +176,177 @@ export function MatchCaptureView() {
 
   const selectedSource = sources.find((s) => s.id === selectedSourceId) ?? null;
 
+  async function handleStartHalf(half: 'first_half' | 'second_half') {
+    if (!selectedMatch) {
+      notify('error', 'Prepare or select a match before starting a recording session.');
+      return;
+    }
+    if (!selectedSource) {
+      notify('error', 'Select an active EA SPORTS FC 26 window or display source first.');
+      return;
+    }
+    if (!isRecordingImplemented) {
+      notify(
+        'error',
+        diag?.blockingReason ?? 'Local FFmpeg recording prerequisites are not satisfied.'
+      );
+      return;
+    }
+
+    setBusyAction(`start-${half}`);
+    try {
+      await recordingController.startRecording({
+        matchId: selectedMatch.id,
+        half,
+        sourceId: selectedSource.id,
+        sourceName: selectedSource.name,
+        sourceType: selectedSource.type,
+        resolution: effectiveResolution,
+        fps: effectiveFps,
+        bitrateKbps: captureCfg?.bitrateKbps ?? 3500,
+        segmentDurationMinutes: captureCfg?.segmentDurationMinutes ?? 3,
+        maxRecordingMinutes: captureCfg?.maxRecordingMinutes ?? 90,
+        audioRequested: Boolean(captureCfg?.audioEnabled),
+      });
+      await refreshAll();
+      notify(
+        'success',
+        `${half === 'first_half' ? 'First-half' : 'Second-half'} local recording started.`
+      );
+    } catch (err) {
+      notify('error', err instanceof Error ? err.message : 'Failed to start recording');
+    } finally {
+      setBusyAction(null);
+    }
+  }
+
+  async function handlePause() {
+    setBusyAction('pause');
+    try {
+      await recordingController.pauseRecording();
+      await refreshRecordingData();
+      notify('info', 'Recording paused. Active segment flushed and saved safely.');
+    } catch (err) {
+      notify('error', err instanceof Error ? err.message : 'Failed to pause recording');
+    } finally {
+      setBusyAction(null);
+    }
+  }
+
+  async function handleResume() {
+    setBusyAction('resume');
+    try {
+      await recordingController.resumeRecording();
+      await refreshRecordingData();
+      notify('success', 'Recording resumed cleanly in the same match session.');
+    } catch (err) {
+      notify('error', err instanceof Error ? err.message : 'Failed to resume recording');
+    } finally {
+      setBusyAction(null);
+    }
+  }
+
+  async function handleStopAndFinalize() {
+    setBusyAction('stop');
+    try {
+      const manifest = await recordingController.stopRecording();
+      await refreshAll();
+      if (manifest) {
+        const validCount = manifest.segments.filter((s) => s.finalized).length;
+        notify(
+          'success',
+          `Recording finalized (${validCount} verified MP4 segment${validCount === 1 ? '' : 's'} saved locally).`
+        );
+      } else {
+        notify('info', 'Recording stopped.');
+      }
+    } catch (err) {
+      notify('error', err instanceof Error ? err.message : 'Failed to finalize recording');
+    } finally {
+      setBusyAction(null);
+    }
+  }
+
+  async function handleConfirmDiscard() {
+    if (!discardTarget) return;
+    if (discardTarget.isFinalized && discardTarget.step === 1) {
+      setDiscardTarget({ ...discardTarget, step: 2 });
+      return;
+    }
+
+    setBusyAction('discard');
+    try {
+      const res = await recordingController.discardRecording(
+        discardTarget.sessionId,
+        discardTarget.matchId
+      );
+      setDiscardTarget(null);
+      await refreshAll();
+      notify(
+        'info',
+        `Recording session discarded (${res.removedFiles} local file${res.removedFiles === 1 ? '' : 's'} removed).`
+      );
+    } catch (err) {
+      notify('error', err instanceof Error ? err.message : 'Failed to discard recording session');
+    } finally {
+      setBusyAction(null);
+    }
+  }
+
+  async function handleRecoverSession(summary: RecoverableSessionSummary) {
+    setBusyAction(`recover-${summary.sessionId}`);
+    try {
+      const result = await desktopBridge.recoverSession(summary.sessionId);
+      setLastRecoveryResult(result);
+      await refreshAll();
+      notify(
+        result.classification === 'corrupted' ? 'error' : 'success',
+        result.classification === 'recovered'
+          ? `Recovered ${result.recoveredSegments.length} verified segment(s) cleanly.`
+          : result.classification === 'partially_recovered'
+            ? `Partially recovered: ${result.recoveredSegments.length} valid, ${result.corruptedSegments.length} unrecoverable.`
+            : 'No playable MP4 segments could be recovered from this interrupted session.'
+      );
+    } catch (err) {
+      notify('error', err instanceof Error ? err.message : 'Crash recovery failed');
+    } finally {
+      setBusyAction(null);
+    }
+  }
+
+  async function handleOpenSegment(filePath: string) {
+    try {
+      await desktopBridge.openRecordingSegment(filePath);
+    } catch (err) {
+      notify('error', err instanceof Error ? err.message : 'Failed to open recording segment');
+    }
+  }
+
+  async function handleOpenFolder(folderPath: string) {
+    try {
+      await desktopBridge.openSessionFolder(folderPath);
+    } catch (err) {
+      notify('error', err instanceof Error ? err.message : 'Failed to open session folder');
+    }
+  }
+
+  const diskBytesToDisplay =
+    recordingTelemetry.availableDiskBytes ?? diskInfo?.availableBytes ?? null;
+  const lowDiskWarning =
+    recordingTelemetry.diskLowWarning ||
+    (diskBytesToDisplay !== null && diskBytesToDisplay < 500 * 1024 * 1024);
+
   return (
-    <div className="space-y-7">
+    <div className="space-y-6">
+      {/* Header */}
       <div className="flex flex-wrap items-end justify-between gap-4 border-b border-white/[0.08] pb-5">
         <div>
           <h1 className="text-[24px] font-bold text-white tracking-tight">
-            Match Capture & Recording Configuration
+            Match Capture & Recording Deck
           </h1>
           <p className="mt-1 text-[14px] text-[#9AA4B4]">
-            Half-Time Analyst Mode — Configure FC26 capture parameters locally with zero live AI
-            processing or gameplay notifications.
+            Half-Time Analyst Mode — Local segmented H.264 MP4 gameplay capture with zero live AI
+            processing, cloud uploads, or gameplay notifications.
           </p>
         </div>
 
@@ -123,8 +354,8 @@ export function MatchCaptureView() {
           <button
             type="button"
             onClick={() => void refreshSources()}
-            disabled={loadingSources}
-            className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-md border border-white/[0.12] hover:border-white/[0.24] text-[13px] text-[#D7DDE7] transition-colors"
+            disabled={loadingSources || isSessionActive}
+            className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-md border border-white/[0.12] hover:border-white/[0.24] disabled:opacity-45 text-[13px] text-[#D7DDE7] transition-colors"
           >
             <RefreshCw className={`w-3.5 h-3.5 ${loadingSources ? 'animate-spin' : ''}`} />
             Refresh Sources
@@ -132,22 +363,234 @@ export function MatchCaptureView() {
         </div>
       </div>
 
-      {/* Honest Runtime & Phase Scope Disclosure */}
-      <div className="border border-amber-500/30 bg-amber-500/[0.06] rounded-lg p-5 flex items-start gap-3.5">
-        <ShieldAlert className="w-5 h-5 text-amber-400 shrink-0 mt-0.5" />
-        <div className="space-y-1.5 text-[13px]">
-          <div className="font-semibold text-amber-200">
-            {isNativeElectron
-              ? 'Phase 1.1 Desktop Foundation — Recording Engine Planned for Phase 2'
-              : 'Browser Preview Environment — Native Windows Capture Unavailable'}
+      {/* Honest Runtime Capability Banner */}
+      {isNativeElectron && isRecordingImplemented ? (
+        <div className="border border-emerald-500/30 bg-emerald-500/[0.06] rounded-lg p-4 flex flex-wrap items-start justify-between gap-4">
+          <div className="flex items-start gap-3">
+            <CheckCircle2 className="w-5 h-5 text-emerald-400 shrink-0 mt-0.5" />
+            <div className="space-y-1 text-[13px]">
+              <div className="font-semibold text-emerald-200">
+                Native Desktop Recording Engine Ready ({diag?.preferredEncoder ?? 'H.264'})
+              </div>
+              <p className="text-[#C8D1DD] leading-relaxed">
+                All 8 FFmpeg, binary IPC transport, and local storage prerequisites passed.
+                Recordings save exclusively inside your local Windows application data folder.
+              </p>
+            </div>
           </div>
-          <p className="text-[#D2D7E0] leading-relaxed">
-            {isNativeElectron
-              ? 'Window and display source enumeration via Electron desktopCapturer, local disk space inspection, and persistent SQLite configuration are active. Actual H.264 FFmpeg segmented video recording is intentionally disabled until Phase 2 implementation and Windows verification.'
-              : 'This preview runs inside a browser sandbox. Native Windows FC26 window capture is unavailable here and is never simulated. Recording configuration changes save to your local SQLite database; live video recording activates in Phase 2 on Windows.'}
-          </p>
+          {diag && (
+            <button
+              type="button"
+              onClick={() => setShowDiagnostics((v) => !v)}
+              className="inline-flex items-center gap-1 text-[12px] text-emerald-300 hover:text-emerald-200 shrink-0"
+            >
+              {showDiagnostics ? 'Hide' : 'Inspect'} Prerequisites
+              {showDiagnostics ? (
+                <ChevronUp className="w-3.5 h-3.5" />
+              ) : (
+                <ChevronDown className="w-3.5 h-3.5" />
+              )}
+            </button>
+          )}
         </div>
-      </div>
+      ) : (
+        <div className="border border-amber-500/30 bg-amber-500/[0.06] rounded-lg p-5 space-y-3">
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div className="flex items-start gap-3.5">
+              <ShieldAlert className="w-5 h-5 text-amber-400 shrink-0 mt-0.5" />
+              <div className="space-y-1 text-[13px]">
+                <div className="font-semibold text-amber-200">
+                  {isNativeElectron
+                    ? 'Native Electron Active — Recording Prerequisite Blocked'
+                    : 'Browser Preview Environment — Native Windows Capture Unavailable'}
+                </div>
+                <p className="text-[#D2D7E0] leading-relaxed">
+                  {isNativeElectron
+                    ? diag?.blockingReason ??
+                      'One or more FFmpeg or storage runtime prerequisites failed verification.'
+                    : 'This preview runs inside a browser sandbox. Native Windows FC 26 window capture and local FFmpeg H.264 MP4 recording require the packaged Windows Electron desktop application and are never simulated here.'}
+                </p>
+              </div>
+            </div>
+            {diag && (
+              <button
+                type="button"
+                onClick={() => setShowDiagnostics((v) => !v)}
+                className="inline-flex items-center gap-1 text-[12px] text-amber-200 hover:text-white shrink-0"
+              >
+                {showDiagnostics ? 'Hide' : 'Show'} Diagnostics
+                {showDiagnostics ? (
+                  <ChevronUp className="w-3.5 h-3.5" />
+                ) : (
+                  <ChevronDown className="w-3.5 h-3.5" />
+                )}
+              </button>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Expandable FFmpeg Prerequisite Diagnostics */}
+      {showDiagnostics && diag && (
+        <section className="border border-white/[0.08] bg-[#12151B] rounded-lg p-5 space-y-3 text-[12px]">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="font-semibold text-white">
+              Capture Engine Runtime Verification ({diag.ffmpegPathSource})
+            </div>
+            <div className="font-mono text-[#8A94A6]">
+              FFmpeg: {diag.ffmpegVersion ?? 'Missing'} · FFprobe:{' '}
+              {diag.ffprobeAvailable ? 'OK' : 'Missing'}
+            </div>
+          </div>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-2.5">
+            {diag.prerequisites.map((check) => (
+              <div
+                key={check.key}
+                className="border border-white/[0.07] bg-[#0D1015] rounded-md px-3 py-2 flex items-start justify-between gap-3"
+              >
+                <div className="min-w-0">
+                  <div className="font-medium text-white">{check.label}</div>
+                  <div className="text-[#8A94A6] mt-0.5 break-all">{check.detail}</div>
+                </div>
+                <span
+                  className={`font-mono font-semibold shrink-0 ${
+                    check.ok ? 'text-emerald-400' : 'text-amber-400'
+                  }`}
+                >
+                  {check.ok ? 'PASS' : 'FAIL'}
+                </span>
+              </div>
+            ))}
+          </div>
+          <div className="text-[#7D8798] pt-1">{diag.licenseNotice}</div>
+        </section>
+      )}
+
+      {/* Crash Recovery Panel — Shown whenever interrupted sessions exist on disk */}
+      {recoverableSessions.length > 0 && (
+        <section className="border border-amber-500/35 bg-[#171411] rounded-lg p-5 space-y-4">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="flex items-center gap-2.5">
+              <RotateCcw className="w-4 h-4 text-amber-400" />
+              <h2 className="text-[15px] font-semibold text-amber-100">
+                Interrupted Recording Sessions Detected ({recoverableSessions.length})
+              </h2>
+            </div>
+            <span className="text-[12px] text-amber-300/80">
+              Completed segments are preserved on disk and verified via FFprobe
+            </span>
+          </div>
+
+          <div className="space-y-3">
+            {recoverableSessions.map((item) => {
+              const isExpanded = inspectedRecoveryId === item.sessionId;
+              return (
+                <div
+                  key={item.sessionId}
+                  className="border border-white/[0.08] bg-[#12151B] rounded-md p-4 space-y-3 text-[12px]"
+                >
+                  <div className="flex flex-wrap items-center justify-between gap-3">
+                    <div>
+                      <div className="text-white font-medium text-[13px]">
+                        {item.half === 'first_half' ? 'First Half' : 'Second Half'} ·{' '}
+                        {item.sourceName}
+                      </div>
+                      <div className="text-[#8A94A6] font-mono tabular-nums mt-0.5">
+                        Session {item.sessionId.slice(0, 8)} · Match {item.matchId.slice(0, 8)} ·{' '}
+                        {item.completedSegmentsFound} finalized, {item.partialSegmentsFound} partial
+                        · {formatBytes(item.totalBytesOnDisk)} · Classification:{' '}
+                        <span className="text-amber-300 uppercase">
+                          {item.recoveryClassification.replace(/_/g, ' ')}
+                        </span>
+                      </div>
+                    </div>
+
+                    <div className="flex flex-wrap items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setInspectedRecoveryId(isExpanded ? null : item.sessionId)
+                        }
+                        className="px-3 py-1.5 rounded border border-white/[0.12] hover:border-white/[0.25] text-[#D7DDE7]"
+                      >
+                        {isExpanded ? 'Hide Details' : 'Inspect Recovery Details'}
+                      </button>
+                      <button
+                        type="button"
+                        disabled={busyAction !== null || isSessionActive}
+                        onClick={() => void handleRecoverSession(item)}
+                        className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 text-white font-medium"
+                      >
+                        <RotateCcw className="w-3.5 h-3.5" />
+                        Recover Session
+                      </button>
+                      <button
+                        type="button"
+                        disabled={busyAction !== null || isSessionActive}
+                        onClick={() =>
+                          setDiscardTarget({
+                            sessionId: item.sessionId,
+                            matchId: item.matchId,
+                            isFinalized: false,
+                            step: 1,
+                          })
+                        }
+                        className="px-2.5 py-1.5 rounded border border-red-500/30 hover:bg-red-500/10 text-red-300"
+                      >
+                        Discard
+                      </button>
+                    </div>
+                  </div>
+
+                  {isExpanded && (
+                    <div className="pt-3 border-t border-white/[0.07] space-y-1.5 text-[#9AA4B4]">
+                      <div className="font-mono text-[11px] break-all">
+                        Folder: {item.outputDirectory}
+                      </div>
+                      <div className="font-mono text-[11px]">
+                        Started: {item.startedAt.replace('T', ' ').slice(0, 19)} · Last Updated:{' '}
+                        {item.updatedAt.replace('T', ' ').slice(0, 19)}
+                      </div>
+                      {item.notes.length > 0 && (
+                        <ul className="list-disc pl-4 space-y-0.5 text-[#C5CCD7]">
+                          {item.notes.map((n, idx) => (
+                            <li key={idx}>{n}</li>
+                          ))}
+                        </ul>
+                      )}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </section>
+      )}
+
+      {/* Last Recovery Report Banner */}
+      {lastRecoveryResult && (
+        <section className="border border-white/[0.1] bg-[#12151B] rounded-lg p-4 space-y-2 text-[12px]">
+          <div className="flex items-center justify-between">
+            <div className="font-semibold text-white">
+              Crash Recovery Summary — Session {lastRecoveryResult.sessionId.slice(0, 8)} (
+              {lastRecoveryResult.classification.replace(/_/g, ' ')})
+            </div>
+            <button
+              type="button"
+              onClick={() => setLastRecoveryResult(null)}
+              className="text-[#8A94A6] hover:text-white"
+            >
+              Dismiss
+            </button>
+          </div>
+          <div className="font-mono tabular-nums text-[#C5CCD7]">
+            Verified Segments: {lastRecoveryResult.recoveredSegments.length} · Corrupted:{' '}
+            {lastRecoveryResult.corruptedSegments.length} · Total Duration:{' '}
+            {formatDuration(lastRecoveryResult.totalDurationSeconds)} · Size:{' '}
+            {formatBytes(lastRecoveryResult.totalBytes)}
+          </div>
+        </section>
+      )}
 
       {/* Active Match Selector */}
       <section className="border border-white/[0.08] bg-[#12151B] rounded-lg p-5">
@@ -163,8 +606,9 @@ export function MatchCaptureView() {
               <select
                 id="capture-match-select"
                 value={selectedMatch?.id ?? ''}
+                disabled={isSessionActive}
                 onChange={(e) => setSelectedMatchId(e.target.value)}
-                className="w-full max-w-xl bg-[#0C0F14] border border-white/[0.12] rounded-md px-3 py-2 text-[13px] text-white focus:outline-none focus:border-emerald-500"
+                className="w-full max-w-xl bg-[#0C0F14] border border-white/[0.12] disabled:opacity-60 rounded-md px-3 py-2 text-[13px] text-white focus:outline-none focus:border-emerald-500"
               >
                 {matches.map((m) => (
                   <option key={m.id} value={m.id}>
@@ -194,48 +638,73 @@ export function MatchCaptureView() {
               <div className="mt-0.5 text-[#C5CCD7] capitalize">
                 Status: {selectedMatch.status.replace(/_/g, ' ')}
               </div>
+              <div className="mt-0.5 text-[#8A94A6]">
+                2nd Half Recorded: {selectedMatch.hasSecondHalfRecording ? 'Yes' : 'No'}
+              </div>
             </div>
           )}
         </div>
       </section>
 
       <div className="grid grid-cols-1 xl:grid-cols-12 gap-6">
-        {/* Left 7 cols: Capture Source Preview & Phase 2 Recording Controls */}
+        {/* Left 7 cols: Source Preview, Live Telemetry & Recording Controls */}
         <div className="xl:col-span-7 space-y-6">
           <section className="border border-white/[0.08] bg-[#12151B] rounded-lg p-5 space-y-4">
-            <div className="flex items-center justify-between">
-              <h2 className="text-[16px] font-semibold text-white">FC26 Window & Display Source</h2>
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <h2 className="text-[16px] font-semibold text-white">FC 26 Window & Display Source</h2>
               <span className="text-[12px] text-[#8A94A6]">
                 Recommended: Borderless Windowed Mode
               </span>
             </div>
 
             {isNativeElectron && sources.length > 0 ? (
-              <div className="space-y-4">
+              <div className="space-y-3.5">
                 <div>
                   <label className="block text-[12px] text-[#9AA4B4] mb-1.5">
-                    Select Window or Display Fallback (Active in Phase 1.1)
+                    Select EA SPORTS FC 26 Window (Primary) or Display Fallback
                   </label>
                   <select
                     value={selectedSourceId}
+                    disabled={isSessionActive}
                     onChange={(e) => setSelectedSourceId(e.target.value)}
-                    className="w-full bg-[#0C0F14] border border-white/[0.12] rounded-md px-3 py-2 text-[13px] text-white"
+                    className="w-full bg-[#0C0F14] border border-white/[0.12] disabled:opacity-60 rounded-md px-3 py-2 text-[13px] text-white"
                   >
                     {sources.map((s) => (
                       <option key={s.id} value={s.id}>
-                        [{s.type === 'window' ? 'Window' : 'Display Fallback'}] {s.name}
+                        {s.isFc26Candidate
+                          ? `[FC 26 Detected] ${s.name}`
+                          : `[${s.type === 'window' ? 'Window' : 'Display Fallback'}] ${s.name}`}
                       </option>
                     ))}
                   </select>
                 </div>
 
+                {/* Display Fallback Privacy Warning */}
+                {selectedSource?.type === 'screen' && (
+                  <div className="border border-amber-500/30 bg-amber-500/[0.06] rounded-md px-3.5 py-2.5 text-[12px] text-amber-200 flex items-start gap-2.5">
+                    <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
+                    <div>
+                      <span className="font-semibold">Display Fallback Privacy Notice:</span>{' '}
+                      Capturing an entire monitor will record desktop notifications, other open
+                      windows, and taskbar content if you Alt-Tab out of EA SPORTS FC 26. Switch FC
+                      26 to Borderless Windowed mode and select the game window whenever possible.
+                    </div>
+                  </div>
+                )}
+
                 {selectedSource?.thumbnailDataUrl && (
-                  <div className="rounded-md overflow-hidden border border-white/[0.1] bg-black">
+                  <div className="rounded-md overflow-hidden border border-white/[0.1] bg-black relative">
                     <img
                       src={selectedSource.thumbnailDataUrl}
                       alt={`Capture preview of ${selectedSource.name}`}
                       className="w-full aspect-video object-contain"
                     />
+                    <div className="px-3 py-1.5 bg-[#0C0F14]/90 border-t border-white/[0.08] flex items-center justify-between text-[11px] font-mono text-[#B8C0CE]">
+                      <span className="truncate">{selectedSource.name}</span>
+                      <span className="text-emerald-400 shrink-0 ml-2">
+                        {selectedSource.type === 'window' ? 'WINDOW SOURCE' : 'DISPLAY FALLBACK'}
+                      </span>
+                    </div>
                   </div>
                 )}
               </div>
@@ -254,95 +723,399 @@ export function MatchCaptureView() {
               </div>
             )}
 
-            {/* Recording Telemetry Strip */}
-            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 pt-2 border-t border-white/[0.08] text-[12px]">
+            {/* Live Recording Telemetry Grid */}
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 pt-3 border-t border-white/[0.08] text-[12px]">
               <div>
-                <div className="text-[#7D8798]">Recording Engine</div>
-                <div className="mt-0.5 font-medium text-amber-300">
-                  {isRecordingImplemented ? 'Ready' : 'Planned (Phase 2)'}
+                <div className="text-[#7D8798]">Session State</div>
+                <div className="mt-0.5 font-semibold text-white uppercase flex items-center gap-1.5">
+                  {recordingTelemetry.uiStatus === 'recording' && (
+                    <span className="w-2 h-2 rounded-full bg-red-500 animate-pulse" />
+                  )}
+                  {recordingTelemetry.uiStatus === 'idle'
+                    ? isRecordingImplemented
+                      ? 'Ready'
+                      : 'Unavailable'
+                    : recordingTelemetry.uiStatus}
                 </div>
               </div>
+
               <div>
-                <div className="text-[#7D8798]">Session Duration</div>
-                <div className="mt-0.5 font-mono tabular-nums text-white">00:00:00</div>
-              </div>
-              <div>
-                <div className="text-[#7D8798]">Target Resolution</div>
+                <div className="text-[#7D8798]">Active Duration</div>
                 <div className="mt-0.5 font-mono tabular-nums text-white">
-                  {captureCfg?.resolution ?? '1920x1080'} · {captureCfg?.fps ?? 15} FPS
+                  {formatDuration(recordingTelemetry.activeDurationSeconds)}
                 </div>
               </div>
+
+              <div>
+                <div className="text-[#7D8798]">Segment / Completed</div>
+                <div className="mt-0.5 font-mono tabular-nums text-white">
+                  #{recordingTelemetry.currentSegmentIndex || 0} ·{' '}
+                  {recordingTelemetry.completedSegmentCount} saved
+                </div>
+              </div>
+
               <div>
                 <div className="text-[#7D8798]">Captured Size</div>
-                <div className="mt-0.5 font-mono tabular-nums text-white">0.0 MB</div>
+                <div className="mt-0.5 font-mono tabular-nums text-white">
+                  {formatBytes(recordingTelemetry.totalBytes)}
+                </div>
+              </div>
+
+              <div>
+                <div className="text-[#7D8798]">Encoder & FPS</div>
+                <div className="mt-0.5 font-mono tabular-nums text-[#D7DDE7]">
+                  {recordingTelemetry.encoder ?? diag?.preferredEncoder ?? '—'} ·{' '}
+                  {recordingTelemetry.currentFps !== null
+                    ? `${recordingTelemetry.currentFps} FPS`
+                    : `${effectiveFps} FPS target`}
+                </div>
+              </div>
+
+              <div>
+                <div className="text-[#7D8798]">Resolution</div>
+                <div className="mt-0.5 font-mono tabular-nums text-[#D7DDE7]">
+                  {recordingTelemetry.captureResolution ?? effectiveResolution}
+                </div>
+              </div>
+
+              <div>
+                <div className="text-[#7D8798]">Audio Mode</div>
+                <div className="mt-0.5 text-[#D7DDE7] truncate">
+                  {isSessionActive
+                    ? recordingTelemetry.audioActive
+                      ? 'Loopback Active'
+                      : 'Video-only'
+                    : captureCfg?.audioEnabled
+                      ? 'Loopback Requested'
+                      : 'Video-only'}
+                </div>
+              </div>
+
+              <div>
+                <div className="text-[#7D8798]">FFmpeg / Queue</div>
+                <div className="mt-0.5 font-mono tabular-nums text-[#D7DDE7]">
+                  {recordingTelemetry.ffmpegStatus}
+                  {recordingTelemetry.backpressureActive ? ' (Backpressure)' : ''}
+                </div>
               </div>
             </div>
 
-            {/* Phase 2 Recording Controls — Strictly disabled until localFfmpegRecording is true */}
-            <div className="pt-3 border-t border-white/[0.08] space-y-2.5">
+            {/* Warnings & Errors */}
+            {(recordingTelemetry.lastError || recordingTelemetry.lastWarning || lowDiskWarning) && (
+              <div className="space-y-2 text-[12px]">
+                {recordingTelemetry.lastError && (
+                  <div className="border border-red-500/35 bg-red-500/[0.08] rounded-md px-3.5 py-2 text-red-200">
+                    {recordingTelemetry.lastError}
+                  </div>
+                )}
+                {recordingTelemetry.lastWarning && (
+                  <div className="border border-amber-500/30 bg-amber-500/[0.08] rounded-md px-3.5 py-2 text-amber-200">
+                    {recordingTelemetry.lastWarning}
+                  </div>
+                )}
+                {lowDiskWarning && (
+                  <div className="border border-amber-500/35 bg-amber-500/[0.08] rounded-md px-3.5 py-2 text-amber-200">
+                    Low disk space warning ({formatBytes(diskBytesToDisplay)} free). Recording will
+                    automatically finalize safely if available space drops below 150 MB.
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Phase 2 Recording Controls */}
+            <div className="pt-3 border-t border-white/[0.08] space-y-3">
               <div className="flex flex-wrap items-center justify-between gap-2 text-[12px]">
                 <span className="font-medium text-[#C5CCD7]">
-                  Session Controls — Planned for Phase 2 (FFmpeg Capture Engine)
+                  Match Recording Controls
                 </span>
-                <span className="text-[#7D8798]">Disabled until Phase 2 verification</span>
+                <span className="text-[#7D8798]">
+                  {isSessionActive
+                    ? `Active Session ${recordingTelemetry.sessionId?.slice(0, 8)} · Recording persists while navigating views`
+                    : isRecordingImplemented
+                      ? 'Select FC 26 window and start recording at kickoff'
+                      : 'Disabled until runtime prerequisites pass'}
+                </span>
               </div>
 
               <div className="flex flex-wrap items-center gap-2.5">
-                <button
-                  type="button"
-                  disabled={!isRecordingImplemented}
-                  className="inline-flex items-center gap-2 px-4 py-2 rounded-md bg-[#1E242E] text-[#687283] text-[13px] font-medium cursor-not-allowed"
-                >
-                  <Play className="w-3.5 h-3.5" />
-                  Start First-Half Recording
-                </button>
+                {!isSessionActive ? (
+                  <>
+                    <button
+                      type="button"
+                      disabled={
+                        !isRecordingImplemented ||
+                        !selectedMatch ||
+                        !selectedSource ||
+                        busyAction !== null
+                      }
+                      onClick={() => void handleStartHalf('first_half')}
+                      className="inline-flex items-center gap-2 px-4 py-2 rounded-md bg-emerald-600 hover:bg-emerald-500 disabled:bg-[#1E242E] disabled:text-[#687283] text-white text-[13px] font-medium transition-colors"
+                    >
+                      <Play className="w-3.5 h-3.5" />
+                      Start First-Half Recording
+                    </button>
 
-                <button
-                  type="button"
-                  disabled={!isRecordingImplemented}
-                  className="inline-flex items-center gap-1.5 px-3 py-2 rounded-md border border-white/[0.08] text-[#687283] text-[13px] font-medium cursor-not-allowed"
-                >
-                  <Pause className="w-3.5 h-3.5" />
-                  Pause
-                </button>
+                    <button
+                      type="button"
+                      disabled={
+                        !isRecordingImplemented ||
+                        !selectedMatch ||
+                        !selectedSource ||
+                        busyAction !== null
+                      }
+                      onClick={() => void handleStartHalf('second_half')}
+                      className="inline-flex items-center gap-2 px-3.5 py-2 rounded-md border border-white/[0.14] hover:border-emerald-500/60 disabled:opacity-40 text-white text-[13px] font-medium transition-colors"
+                    >
+                      <Play className="w-3.5 h-3.5 text-emerald-400" />
+                      {hasValidFirstHalf
+                        ? 'Start Second-Half Recording'
+                        : 'Record Second Half (Optional)'}
+                    </button>
+                  </>
+                ) : (
+                  <>
+                    {recordingTelemetry.uiStatus === 'recording' && (
+                      <button
+                        type="button"
+                        disabled={busyAction !== null}
+                        onClick={() => void handlePause()}
+                        className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-md border border-amber-500/40 bg-amber-500/10 hover:bg-amber-500/20 text-amber-200 text-[13px] font-medium"
+                      >
+                        <Pause className="w-3.5 h-3.5" />
+                        Pause Recording
+                      </button>
+                    )}
 
-                <button
-                  type="button"
-                  disabled={!isRecordingImplemented}
-                  className="inline-flex items-center gap-1.5 px-3 py-2 rounded-md border border-white/[0.08] text-[#687283] text-[13px] font-medium cursor-not-allowed"
-                >
-                  <Square className="w-3.5 h-3.5" />
-                  End First Half & Analyze
-                </button>
+                    {recordingTelemetry.uiStatus === 'paused' && (
+                      <button
+                        type="button"
+                        disabled={busyAction !== null}
+                        onClick={() => void handleResume()}
+                        className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-md bg-emerald-600 hover:bg-emerald-500 text-white text-[13px] font-medium"
+                      >
+                        <Play className="w-3.5 h-3.5" />
+                        Resume Recording
+                      </button>
+                    )}
 
-                <button
-                  type="button"
-                  disabled={!isRecordingImplemented || recoverableCount === 0}
-                  className="inline-flex items-center gap-1.5 px-3 py-2 rounded-md border border-white/[0.08] text-[#687283] text-[13px] font-medium cursor-not-allowed"
-                >
-                  <RotateCcw className="w-3.5 h-3.5" />
-                  Recover Session ({recoverableCount})
-                </button>
+                    <button
+                      type="button"
+                      disabled={
+                        busyAction !== null || recordingTelemetry.uiStatus === 'finalizing'
+                      }
+                      onClick={() => void handleStopAndFinalize()}
+                      className="inline-flex items-center gap-1.5 px-4 py-2 rounded-md bg-red-600 hover:bg-red-500 disabled:opacity-50 text-white text-[13px] font-medium"
+                    >
+                      <Square className="w-3.5 h-3.5" />
+                      {recordingTelemetry.half === 'second_half'
+                        ? 'End Second Half & Save'
+                        : 'End First Half & Save'}
+                    </button>
 
-                <button
-                  type="button"
-                  disabled={!isRecordingImplemented}
-                  className="inline-flex items-center gap-1.5 px-3 py-2 rounded-md border border-white/[0.08] text-[#687283] text-[13px] font-medium cursor-not-allowed"
-                >
-                  <Trash2 className="w-3.5 h-3.5" />
-                  Discard
-                </button>
+                    {recordingTelemetry.sessionId && recordingTelemetry.matchId && (
+                      <button
+                        type="button"
+                        disabled={busyAction !== null}
+                        onClick={() =>
+                          setDiscardTarget({
+                            sessionId: recordingTelemetry.sessionId!,
+                            matchId: recordingTelemetry.matchId!,
+                            isFinalized: false,
+                            step: 1,
+                          })
+                        }
+                        className="inline-flex items-center gap-1.5 px-3 py-2 rounded-md border border-white/[0.12] hover:border-red-500/40 text-[#C5CCD7] hover:text-red-300 text-[13px]"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                        Discard
+                      </button>
+                    )}
+                  </>
+                )}
               </div>
+
+              {/* Explicit Discard Confirmation Box */}
+              {discardTarget && (
+                <div className="border border-red-500/35 bg-[#191114] rounded-md p-3.5 flex flex-wrap items-center justify-between gap-3 text-[12px]">
+                  <div className="text-red-200">
+                    {discardTarget.isFinalized && discardTarget.step === 2
+                      ? 'Final confirmation: Permanently delete all verified MP4 segments for this finalized recording session?'
+                      : discardTarget.isFinalized
+                        ? 'This session is already finalized. Step 1 of 2: Are you sure you want to permanently discard its local MP4 files?'
+                        : 'Stop and permanently remove all local MP4 files for this recording session?'}
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setDiscardTarget(null)}
+                      className="px-3 py-1 rounded border border-white/[0.12] text-[#C5CCD7]"
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      type="button"
+                      disabled={busyAction !== null}
+                      onClick={() => void handleConfirmDiscard()}
+                      className="px-3 py-1 rounded bg-red-600 hover:bg-red-500 text-white font-medium"
+                    >
+                      {discardTarget.isFinalized && discardTarget.step === 1
+                        ? 'Continue to Final Confirmation'
+                        : 'Confirm Permanent Discard'}
+                    </button>
+                  </div>
+                </div>
+              )}
             </div>
+          </section>
+
+          {/* Persisted Recorded Sessions & Post-Finalization Summary for Bound Match */}
+          <section className="border border-white/[0.08] bg-[#12151B] rounded-lg p-5 space-y-4">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="flex items-center gap-2">
+                <Film className="w-4 h-4 text-emerald-400" />
+                <h2 className="text-[15px] font-semibold text-white">
+                  Recorded Halves for Selected Match ({matchSessions.length})
+                </h2>
+              </div>
+              <span className="text-[12px] text-[#8A94A6]">
+                Local H.264 MP4 · Ready for Phase 3 Half-Time Analysis
+              </span>
+            </div>
+
+            {matchSessions.length > 0 ? (
+              <div className="space-y-3">
+                {matchSessions.map((sess) => {
+                  const finalizedSegs = sess.segments.filter(
+                    (s) => s.status === 'finalized' || s.status === 'recovered'
+                  );
+                  return (
+                    <div
+                      key={sess.id}
+                      className="border border-white/[0.07] bg-[#0D1015] rounded-md p-4 space-y-3 text-[12px]"
+                    >
+                      <div className="flex flex-wrap items-start justify-between gap-3">
+                        <div>
+                          <div className="font-semibold text-white text-[13px]">
+                            {sess.half === 'first_half' ? 'First Half' : 'Second Half'} ·{' '}
+                            <span className="capitalize">{sess.status}</span>
+                          </div>
+                          <div className="mt-0.5 font-mono tabular-nums text-[#8A94A6]">
+                            {formatDuration(sess.durationSeconds)} · {finalizedSegs.length} segment
+                            {finalizedSegs.length === 1 ? '' : 's'} · {formatBytes(sess.totalBytes)}{' '}
+                            · {sess.resolution} @ {sess.fps} FPS · Integrity:{' '}
+                            <span
+                              className={
+                                sess.integrityStatus === 'verified'
+                                  ? 'text-emerald-400'
+                                  : sess.integrityStatus === 'partial'
+                                    ? 'text-amber-300'
+                                    : 'text-[#C5CCD7]'
+                              }
+                            >
+                              {sess.integrityStatus ?? 'pending'}
+                            </span>
+                          </div>
+                        </div>
+
+                        <div className="flex flex-wrap items-center gap-2">
+                          {isNativeElectron && sess.outputDirectory && (
+                            <button
+                              type="button"
+                              onClick={() => void handleOpenFolder(sess.outputDirectory!)}
+                              className="inline-flex items-center gap-1 px-2.5 py-1 rounded border border-white/[0.12] hover:border-white/[0.25] text-[#D7DDE7]"
+                            >
+                              <FolderOpen className="w-3.5 h-3.5" />
+                              Open Folder
+                            </button>
+                          )}
+                          {isNativeElectron && (
+                            <button
+                              type="button"
+                              disabled={isSessionActive}
+                              onClick={() =>
+                                setDiscardTarget({
+                                  sessionId: sess.id,
+                                  matchId: sess.matchId,
+                                  isFinalized:
+                                    sess.status === 'completed' || sess.status === 'recovered',
+                                  step: 1,
+                                })
+                              }
+                              className="px-2.5 py-1 rounded border border-red-500/25 hover:bg-red-500/10 text-red-300 disabled:opacity-40"
+                            >
+                              Discard
+                            </button>
+                          )}
+                        </div>
+                      </div>
+
+                      {sess.segments.length > 0 && (
+                        <div className="divide-y divide-white/[0.06] border-t border-white/[0.06] pt-2">
+                          {sess.segments.map((seg) => (
+                            <div
+                              key={seg.id}
+                              className="py-1.5 flex flex-wrap items-center justify-between gap-2"
+                            >
+                              <div className="font-mono tabular-nums text-[#C5CCD7]">
+                                segment_{String(seg.segmentIndex).padStart(3, '0')}.mp4 ·{' '}
+                                {formatDuration(seg.durationSeconds)} · {formatBytes(seg.sizeBytes)}
+                                {seg.codec ? ` · ${seg.codec}` : ''}
+                                {seg.hasAudio ? ' · AAC' : ' · Video-only'}
+                              </div>
+                              <div className="flex items-center gap-2">
+                                <span
+                                  className={`font-mono uppercase text-[11px] ${
+                                    seg.status === 'finalized' || seg.status === 'recovered'
+                                      ? 'text-emerald-400'
+                                      : seg.status === 'corrupted'
+                                        ? 'text-red-400'
+                                        : 'text-amber-300'
+                                  }`}
+                                >
+                                  {seg.status}
+                                </span>
+                                {isNativeElectron &&
+                                  (seg.status === 'finalized' || seg.status === 'recovered') && (
+                                    <button
+                                      type="button"
+                                      onClick={() => void handleOpenSegment(seg.filePath)}
+                                      className="px-2 py-0.5 rounded border border-white/[0.12] hover:border-emerald-500/60 text-white text-[11px]"
+                                    >
+                                      Play Segment
+                                    </button>
+                                  )}
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+
+                      {(sess.status === 'completed' || sess.status === 'recovered') && (
+                        <div className="text-[11px] text-[#8A94A6] pt-1 border-t border-white/[0.06]">
+                          Verified local segments are stored for Phase 3 Half-Time AI Analysis
+                          (Gemini video upload & tactical briefing will activate in Phase 3 — zero
+                          frames have been uploaded).
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            ) : (
+              <p className="text-[13px] text-[#8A94A6]">
+                No recording sessions saved yet for this match. Start a First-Half Recording above
+                when kickoff begins in EA SPORTS FC 26.
+              </p>
+            )}
           </section>
         </div>
 
-        {/* Right 5 cols: Active Phase 1.1 Recording Configuration & Safeguards */}
+        {/* Right 5 cols: Persisted Recording Configuration & Half-Time Rules */}
         <div className="xl:col-span-5 space-y-6">
           <section className="border border-white/[0.08] bg-[#12151B] rounded-lg p-5 space-y-4">
             <div className="flex items-center justify-between">
               <h2 className="text-[16px] font-semibold text-white">Recording Configuration</h2>
-              <span className="text-[12px] text-emerald-400">Active (Persisted)</span>
+              <span className="text-[12px] text-emerald-400">SQLite Persisted</span>
             </div>
 
             {captureCfg && (
@@ -351,32 +1124,32 @@ export function MatchCaptureView() {
                   <div>
                     <label className="block text-[12px] text-[#9AA4B4] mb-1">Resolution</label>
                     <select
-                      value={captureCfg.resolution}
+                      value={effectiveResolution}
+                      disabled={isSessionActive}
                       onChange={(e) =>
                         void handleQuickCaptureSetting({
                           resolution: e.target.value as '1920x1080' | '1280x720',
                         })
                       }
-                      className="w-full bg-[#0C0F14] border border-white/[0.12] rounded-md px-2.5 py-1.5 text-[13px] text-white font-mono"
+                      className="w-full bg-[#0C0F14] border border-white/[0.12] disabled:opacity-60 rounded-md px-2.5 py-1.5 text-[13px] text-white font-mono"
                     >
-                      <option value="1920x1080">1920×1080 (Default)</option>
-                      <option value="1280x720">1280×720 (Fallback)</option>
+                      <option value="1280x720">1280×720 (Recommended)</option>
+                      <option value="1920x1080">1920×1080 (Full HD)</option>
                     </select>
                   </div>
 
                   <div>
                     <label className="block text-[12px] text-[#9AA4B4] mb-1">Frame Rate</label>
                     <select
-                      value={captureCfg.fps}
+                      value={effectiveFps}
+                      disabled={isSessionActive}
                       onChange={(e) =>
                         void handleQuickCaptureSetting({ fps: Number(e.target.value) })
                       }
-                      className="w-full bg-[#0C0F14] border border-white/[0.12] rounded-md px-2.5 py-1.5 text-[13px] text-white font-mono tabular-nums"
+                      className="w-full bg-[#0C0F14] border border-white/[0.12] disabled:opacity-60 rounded-md px-2.5 py-1.5 text-[13px] text-white font-mono tabular-nums"
                     >
-                      <option value={10}>10 FPS</option>
-                      <option value={15}>15 FPS (Default)</option>
-                      <option value={24}>24 FPS</option>
-                      <option value={30}>30 FPS</option>
+                      <option value={30}>30 FPS (Default)</option>
+                      <option value={20}>20 FPS (Low Overhead)</option>
                     </select>
                   </div>
 
@@ -386,15 +1159,16 @@ export function MatchCaptureView() {
                     </label>
                     <select
                       value={captureCfg.segmentDurationMinutes}
+                      disabled={isSessionActive}
                       onChange={(e) =>
                         void handleQuickCaptureSetting({
                           segmentDurationMinutes: Number(e.target.value),
                         })
                       }
-                      className="w-full bg-[#0C0F14] border border-white/[0.12] rounded-md px-2.5 py-1.5 text-[13px] text-white font-mono tabular-nums"
+                      className="w-full bg-[#0C0F14] border border-white/[0.12] disabled:opacity-60 rounded-md px-2.5 py-1.5 text-[13px] text-white font-mono tabular-nums"
                     >
                       <option value={2}>2 min segments</option>
-                      <option value={3}>3 min segments</option>
+                      <option value={3}>3 min segments (Default)</option>
                       <option value={4}>4 min segments</option>
                       <option value={5}>5 min segments</option>
                     </select>
@@ -405,7 +1179,7 @@ export function MatchCaptureView() {
                       Video Codec / Format
                     </label>
                     <div className="bg-[#0C0F14] border border-white/[0.08] rounded-md px-2.5 py-1.5 text-[13px] text-[#B8C0CE] font-mono">
-                      H.264 / MP4
+                      H.264 / MP4 (yuv420p)
                     </div>
                   </div>
                 </div>
@@ -422,14 +1196,24 @@ export function MatchCaptureView() {
                       <HardDrive className="w-3.5 h-3.5" />
                       Available Disk Space
                     </span>
-                    <span className="font-mono tabular-nums text-[#C5CCD7]">
-                      {formatBytes(diskInfo?.availableBytes ?? null)}
+                    <span
+                      className={`font-mono tabular-nums ${
+                        lowDiskWarning ? 'text-amber-300 font-semibold' : 'text-[#C5CCD7]'
+                      }`}
+                    >
+                      {formatBytes(diskBytesToDisplay)}
                     </span>
                   </div>
                   <div className="flex items-center justify-between">
-                    <span className="text-[#8A94A6]">Game Audio Recording</span>
+                    <span className="text-[#8A94A6]">Max Recording Safeguard</span>
+                    <span className="font-mono tabular-nums text-[#C5CCD7]">
+                      {captureCfg.maxRecordingMinutes} min auto-stop
+                    </span>
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <span className="text-[#8A94A6]">Windows Loopback Audio</span>
                     <span className="text-[#C5CCD7]">
-                      {captureCfg.audioEnabled ? 'Enabled' : 'Disabled (Default)'}
+                      {captureCfg.audioEnabled ? 'Enabled (System Audio)' : 'Disabled (Video-only)'}
                     </span>
                   </div>
                   <div className="flex items-center justify-between">
@@ -447,13 +1231,18 @@ export function MatchCaptureView() {
               Half-Time Analyst Operational Rules
             </div>
             <p className="leading-relaxed">
-              While recording is active in Phase 2+, no frames or video segments are sent to Gemini,
-              no AI notifications appear, and no controller or keyboard inputs are intercepted.
+              While recording is active, no frames or segments are sent to Gemini, no AI
+              notifications interrupt gameplay, and no controller or keyboard inputs are
+              intercepted.
             </p>
             <p className="leading-relaxed">
-              Footage will be written in crash-resilient {captureCfg?.segmentDurationMinutes ?? 3}
-              -minute local segments so an unexpected game crash or power loss preserves completed
-              segments.
+              Footage writes in crash-resilient fragmented {captureCfg?.segmentDurationMinutes ?? 3}
+              -minute local MP4 segments under your Electron <code className="font-mono">userData/recordings</code>{' '}
+              directory so unexpected crashes never lose previously completed segments.
+            </p>
+            <p className="leading-relaxed">
+              If Windows system loopback audio is enabled, other desktop applications playing audio
+              may also be captured. Microphone capture is permanently disabled.
             </p>
           </section>
         </div>

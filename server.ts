@@ -862,6 +862,138 @@ async function startServer() {
     return res.json(ctx);
   });
 
+  // ============================================================
+  // Phase 2 — Native Gameplay Recording Sessions & Segments API
+  // ============================================================
+
+  const sessionStatusEnum = z.enum([
+    'idle',
+    'recording',
+    'paused',
+    'finalizing',
+    'completed',
+    'recovered',
+    'discarded',
+  ]);
+  const integrityStatusEnum = z.enum(['pending', 'verified', 'partial', 'corrupted', 'unverified']);
+  const segmentStatusEnum = z.enum(['writing', 'finalized', 'corrupted', 'recovered']);
+
+  const createRecordingSessionSchema = z.object({
+    id: z.string().uuid().optional(),
+    matchId: z.string().uuid(),
+    half: z.enum(['first_half', 'second_half']),
+    status: sessionStatusEnum.default('recording'),
+    captureSourceId: z.string().max(200).nullable().optional(),
+    captureSourceName: z.string().max(260).nullable().optional(),
+    resolution: z.string().trim().min(3).max(32).default('1920x1080'),
+    fps: z.number().int().min(1).max(120).default(30),
+    durationSeconds: z.number().min(0).default(0),
+    totalBytes: z.number().min(0).default(0),
+    encoder: z.string().max(64).nullable().optional(),
+    audioEnabled: z.boolean().optional(),
+    outputDirectory: z.string().max(500).nullable().optional(),
+    integrityStatus: integrityStatusEnum.optional(),
+    recoveryNotes: z.string().max(2000).nullable().optional(),
+    startedAt: z.string().max(64).nullable().optional(),
+    endedAt: z.string().max(64).nullable().optional(),
+  });
+
+  const updateRecordingSessionSchema = z.object({
+    status: sessionStatusEnum.optional(),
+    resolution: z.string().trim().min(3).max(32).optional(),
+    fps: z.number().int().min(1).max(120).optional(),
+    durationSeconds: z.number().min(0).optional(),
+    totalBytes: z.number().min(0).optional(),
+    encoder: z.string().max(64).nullable().optional(),
+    audioEnabled: z.boolean().optional(),
+    outputDirectory: z.string().max(500).nullable().optional(),
+    integrityStatus: integrityStatusEnum.optional(),
+    recoveryNotes: z.string().max(2000).nullable().optional(),
+    endedAt: z.string().max(64).nullable().optional(),
+  });
+
+  const upsertRecordingSegmentSchema = z.object({
+    matchId: z.string().uuid(),
+    filePath: z.string().trim().min(1).max(600),
+    durationSeconds: z.number().min(0).default(0),
+    sizeBytes: z.number().min(0).default(0),
+    checksum: z.string().max(128).nullable().optional(),
+    status: segmentStatusEnum,
+    resolution: z.string().max(32).nullable().optional(),
+    fps: z.number().min(0).max(240).nullable().optional(),
+    codec: z.string().max(48).nullable().optional(),
+    hasAudio: z.boolean().optional(),
+    integrityStatus: integrityStatusEnum.optional(),
+    startedAt: z.string().max(64).nullable().optional(),
+    endedAt: z.string().max(64).nullable().optional(),
+  });
+
+  app.get('/api/recording-sessions', (req, res) => {
+    const matchId = typeof req.query.matchId === 'string' ? req.query.matchId : undefined;
+    const clubId = typeof req.query.clubId === 'string' ? req.query.clubId : undefined;
+    res.json(repo.listMatchSessions({ matchId, clubId }));
+  });
+
+  app.get('/api/recording-sessions/:id', (req, res) => {
+    const sessionData = repo.getMatchSessionById(req.params.id);
+    if (!sessionData) return res.status(404).json({ error: 'Recording session not found' });
+    return res.json(sessionData);
+  });
+
+  app.post('/api/recording-sessions', (req, res) => {
+    const parsed = createRecordingSessionSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return res
+        .status(400)
+        .json({ error: 'Invalid recording session payload', details: parsed.error.flatten() });
+    }
+    try {
+      const created = repo.createOrUpsertMatchSession(parsed.data);
+      return res.status(201).json(created);
+    } catch (err) {
+      return res.status(400).json({
+        error: err instanceof Error ? err.message : 'Failed to create recording session',
+      });
+    }
+  });
+
+  app.patch('/api/recording-sessions/:id', (req, res) => {
+    const parsed = updateRecordingSessionSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return res
+        .status(400)
+        .json({ error: 'Invalid recording session update', details: parsed.error.flatten() });
+    }
+    const updated = repo.updateMatchSession(req.params.id, parsed.data);
+    if (!updated) return res.status(404).json({ error: 'Recording session not found' });
+    return res.json(updated);
+  });
+
+  app.put('/api/recording-sessions/:id/segments/:segmentIndex', (req, res) => {
+    const segmentIndex = Number(req.params.segmentIndex);
+    if (!Number.isInteger(segmentIndex) || segmentIndex < 0 || segmentIndex > 9999) {
+      return res.status(400).json({ error: 'Invalid segmentIndex parameter.' });
+    }
+    const parsed = upsertRecordingSegmentSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return res
+        .status(400)
+        .json({ error: 'Invalid recording segment payload', details: parsed.error.flatten() });
+    }
+    try {
+      const segment = repo.upsertRecordingSegment({
+        sessionId: req.params.id,
+        segmentIndex,
+        ...parsed.data,
+      });
+      return res.json(segment);
+    } catch (err) {
+      return res.status(400).json({
+        error: err instanceof Error ? err.message : 'Failed to persist recording segment',
+      });
+    }
+  });
+
   // Settings & API Usage
   app.get('/api/settings', (_req, res) => {
     res.json(repo.getSettings());

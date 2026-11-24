@@ -8,6 +8,8 @@ import type {
   FeedbackChoice,
   HalftimeReportData,
   MatchRecord,
+  MatchSession,
+  MatchSessionWithSegments,
   MatchStatus,
   MatchVenue,
   Opponent,
@@ -15,6 +17,8 @@ import type {
   PlayerRoleAssignment,
   PostMatchReportRecord,
   RecommendationFeedbackRecord,
+  RecordingIntegrityStatus,
+  RecordingSegment,
   StructuredTacticalRecommendation,
   TacticalCatalogItem,
   TacticalConfiguration,
@@ -1203,4 +1207,447 @@ export function getDashboardSummary(): DashboardSummary {
     latestRecommendations,
     formationBreakdown,
   };
+}
+
+// ============================================================
+// Phase 2 — Native Gameplay Recording Sessions & Segments
+// ============================================================
+
+function mapRecordingSegmentRow(r: Record<string, unknown>): RecordingSegment {
+  return {
+    id: String(r.id),
+    sessionId: String(r.session_id),
+    matchId: String(r.match_id),
+    segmentIndex: Number(r.segment_index),
+    filePath: String(r.file_path),
+    durationSeconds: Number(r.duration_seconds ?? 0),
+    sizeBytes: Number(r.size_bytes ?? 0),
+    checksum: r.checksum ? String(r.checksum) : null,
+    status: String(r.status) as RecordingSegment['status'],
+    resolution: r.resolution ? String(r.resolution) : null,
+    fps: r.fps === null || r.fps === undefined ? null : Number(r.fps),
+    codec: r.codec ? String(r.codec) : null,
+    hasAudio: Boolean(r.has_audio),
+    integrityStatus: (r.integrity_status
+      ? String(r.integrity_status)
+      : 'pending') as RecordingIntegrityStatus,
+    startedAt: r.started_at ? String(r.started_at) : null,
+    endedAt: r.ended_at ? String(r.ended_at) : null,
+    createdAt: String(r.created_at),
+  };
+}
+
+function mapMatchSessionRow(
+  r: Record<string, unknown>,
+  segments: RecordingSegment[]
+): MatchSessionWithSegments {
+  return {
+    id: String(r.id),
+    matchId: String(r.match_id),
+    half: String(r.half) as MatchSession['half'],
+    status: String(r.status) as MatchSession['status'],
+    captureSourceId: r.capture_source_id ? String(r.capture_source_id) : null,
+    captureSourceName: r.capture_source_name ? String(r.capture_source_name) : null,
+    resolution: String(r.resolution ?? '1920x1080'),
+    fps: Number(r.fps ?? 30),
+    durationSeconds: Number(r.duration_seconds ?? 0),
+    totalBytes: Number(r.total_bytes ?? 0),
+    encoder: r.encoder ? String(r.encoder) : null,
+    audioEnabled: Boolean(r.audio_enabled),
+    outputDirectory: r.output_directory ? String(r.output_directory) : null,
+    integrityStatus: (r.integrity_status
+      ? String(r.integrity_status)
+      : 'pending') as RecordingIntegrityStatus,
+    recoveryNotes: r.recovery_notes ? String(r.recovery_notes) : null,
+    startedAt: r.started_at ? String(r.started_at) : null,
+    endedAt: r.ended_at ? String(r.ended_at) : null,
+    createdAt: String(r.created_at),
+    updatedAt: r.updated_at ? String(r.updated_at) : null,
+    opponentName: r.opponent_name ? String(r.opponent_name) : undefined,
+    competition: r.competition ? String(r.competition) : undefined,
+    matchDate: r.match_date ? String(r.match_date) : undefined,
+    segments,
+  };
+}
+
+export function listMatchSessions(filters?: {
+  matchId?: string;
+  clubId?: string;
+}): MatchSessionWithSegments[] {
+  const db = getDb();
+  const conditions: string[] = [];
+  const params: unknown[] = [];
+
+  if (filters?.matchId) {
+    conditions.push('ms.match_id = ?');
+    params.push(filters.matchId);
+  }
+  if (filters?.clubId) {
+    conditions.push('m.club_id = ?');
+    params.push(filters.clubId);
+  }
+
+  const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+  const rows = db
+    .prepare(
+      `
+      SELECT ms.*, o.name as opponent_name, m.competition, m.match_date
+      FROM match_sessions ms
+      JOIN matches m ON m.id = ms.match_id
+      JOIN opponents o ON o.id = m.opponent_id
+      ${whereClause}
+      ORDER BY COALESCE(ms.started_at, ms.created_at) DESC
+    `
+    )
+    .all(...params) as Array<Record<string, unknown>>;
+
+  if (rows.length === 0) return [];
+
+  const sessionIds = rows.map((r) => String(r.id));
+  const placeholders = sessionIds.map(() => '?').join(', ');
+  const segRows = db
+    .prepare(
+      `
+      SELECT * FROM recording_segments
+      WHERE session_id IN (${placeholders})
+      ORDER BY segment_index ASC
+    `
+    )
+    .all(...sessionIds) as Array<Record<string, unknown>>;
+
+  const segBySession = new Map<string, RecordingSegment[]>();
+  for (const sr of segRows) {
+    const seg = mapRecordingSegmentRow(sr);
+    const list = segBySession.get(seg.sessionId) ?? [];
+    list.push(seg);
+    segBySession.set(seg.sessionId, list);
+  }
+
+  return rows.map((r) => mapMatchSessionRow(r, segBySession.get(String(r.id)) ?? []));
+}
+
+export function getMatchSessionById(sessionId: string): MatchSessionWithSegments | null {
+  const db = getDb();
+  const row = db
+    .prepare(
+      `
+      SELECT ms.*, o.name as opponent_name, m.competition, m.match_date
+      FROM match_sessions ms
+      JOIN matches m ON m.id = ms.match_id
+      JOIN opponents o ON o.id = m.opponent_id
+      WHERE ms.id = ?
+    `
+    )
+    .get(sessionId) as Record<string, unknown> | undefined;
+
+  if (!row) return null;
+
+  const segRows = db
+    .prepare('SELECT * FROM recording_segments WHERE session_id = ? ORDER BY segment_index ASC')
+    .all(sessionId) as Array<Record<string, unknown>>;
+
+  return mapMatchSessionRow(row, segRows.map(mapRecordingSegmentRow));
+}
+
+export function createOrUpsertMatchSession(input: {
+  id?: string;
+  matchId: string;
+  half: 'first_half' | 'second_half';
+  status: MatchSession['status'];
+  captureSourceId?: string | null;
+  captureSourceName?: string | null;
+  resolution: string;
+  fps: number;
+  durationSeconds?: number;
+  totalBytes?: number;
+  encoder?: string | null;
+  audioEnabled?: boolean;
+  outputDirectory?: string | null;
+  integrityStatus?: RecordingIntegrityStatus;
+  recoveryNotes?: string | null;
+  startedAt?: string | null;
+  endedAt?: string | null;
+}): MatchSessionWithSegments {
+  const db = getDb();
+  const matchRow = db.prepare('SELECT id, status FROM matches WHERE id = ?').get(input.matchId) as
+    | { id: string; status: MatchStatus }
+    | undefined;
+  if (!matchRow) {
+    throw new Error(`Match "${input.matchId}" not found.`);
+  }
+
+  const sessionId = input.id?.trim() || crypto.randomUUID();
+  const now = new Date().toISOString();
+
+  const tx = db.transaction(() => {
+    db.prepare(`
+      INSERT INTO match_sessions (
+        id, match_id, half, status, capture_source_id, capture_source_name,
+        resolution, fps, duration_seconds, total_bytes, encoder, audio_enabled,
+        output_directory, integrity_status, recovery_notes, started_at, ended_at,
+        created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        status = excluded.status,
+        capture_source_id = COALESCE(excluded.capture_source_id, match_sessions.capture_source_id),
+        capture_source_name = COALESCE(excluded.capture_source_name, match_sessions.capture_source_name),
+        resolution = excluded.resolution,
+        fps = excluded.fps,
+        duration_seconds = excluded.duration_seconds,
+        total_bytes = excluded.total_bytes,
+        encoder = COALESCE(excluded.encoder, match_sessions.encoder),
+        audio_enabled = excluded.audio_enabled,
+        output_directory = COALESCE(excluded.output_directory, match_sessions.output_directory),
+        integrity_status = excluded.integrity_status,
+        recovery_notes = COALESCE(excluded.recovery_notes, match_sessions.recovery_notes),
+        started_at = COALESCE(match_sessions.started_at, excluded.started_at),
+        ended_at = COALESCE(excluded.ended_at, match_sessions.ended_at),
+        updated_at = excluded.updated_at
+    `).run(
+      sessionId,
+      input.matchId,
+      input.half,
+      input.status,
+      input.captureSourceId ?? null,
+      input.captureSourceName ?? null,
+      input.resolution,
+      input.fps,
+      Math.max(0, Math.round(input.durationSeconds ?? 0)),
+      Math.max(0, Math.round(input.totalBytes ?? 0)),
+      input.encoder ?? null,
+      input.audioEnabled ? 1 : 0,
+      input.outputDirectory ?? null,
+      input.integrityStatus ?? 'pending',
+      input.recoveryNotes ?? null,
+      input.startedAt ?? now,
+      input.endedAt ?? null,
+      now,
+      now
+    );
+
+    syncMatchStatusForSession(db, input.matchId, input.half, input.status, now);
+  });
+
+  tx();
+  return getMatchSessionById(sessionId)!;
+}
+
+function syncMatchStatusForSession(
+  db: ReturnType<typeof getDb>,
+  matchId: string,
+  half: 'first_half' | 'second_half',
+  sessionStatus: MatchSession['status'],
+  now: string
+): void {
+  if (sessionStatus === 'recording' || sessionStatus === 'paused') {
+    const nextMatchStatus: MatchStatus =
+      half === 'first_half' ? 'first_half_recording' : 'second_half_recording';
+    db.prepare('UPDATE matches SET status = ?, updated_at = ? WHERE id = ?').run(
+      nextMatchStatus,
+      now,
+      matchId
+    );
+    return;
+  }
+
+  if (sessionStatus === 'completed' || sessionStatus === 'recovered') {
+    if (half === 'first_half') {
+      // Advance scheduled / first_half_recording matches to halftime_ready without regressing completed matches
+      db.prepare(
+        `UPDATE matches
+         SET status = CASE WHEN status IN ('scheduled', 'first_half_recording') THEN 'halftime_ready' ELSE status END,
+             updated_at = ?
+         WHERE id = ?`
+      ).run(now, matchId);
+    } else {
+      // Only set has_second_half_recording = 1 after a valid second-half session is finalized/recovered
+      db.prepare(
+        `UPDATE matches
+         SET has_second_half_recording = 1,
+             status = CASE WHEN status = 'second_half_recording' THEN 'completed' ELSE status END,
+             updated_at = ?
+         WHERE id = ?`
+      ).run(now, matchId);
+    }
+    return;
+  }
+
+  if (sessionStatus === 'discarded') {
+    if (half === 'first_half') {
+      const hasValidFirst = db
+        .prepare(
+          `SELECT COUNT(*) as c FROM match_sessions WHERE match_id = ? AND half = 'first_half' AND status IN ('completed', 'recovered')`
+        )
+        .get(matchId) as { c: number };
+      if (hasValidFirst.c === 0) {
+        db.prepare(
+          `UPDATE matches
+           SET status = CASE WHEN status = 'first_half_recording' THEN 'scheduled' ELSE status END,
+               updated_at = ?
+           WHERE id = ?`
+        ).run(now, matchId);
+      }
+    } else {
+      const hasValidSecond = db
+        .prepare(
+          `SELECT COUNT(*) as c FROM match_sessions WHERE match_id = ? AND half = 'second_half' AND status IN ('completed', 'recovered')`
+        )
+        .get(matchId) as { c: number };
+      if (hasValidSecond.c === 0) {
+        db.prepare(
+          `UPDATE matches
+           SET has_second_half_recording = 0,
+               status = CASE WHEN status = 'second_half_recording' THEN 'halftime_ready' ELSE status END,
+               updated_at = ?
+           WHERE id = ?`
+        ).run(now, matchId);
+      }
+    }
+  }
+}
+
+export function updateMatchSession(
+  sessionId: string,
+  input: Partial<{
+    status: MatchSession['status'];
+    resolution: string;
+    fps: number;
+    durationSeconds: number;
+    totalBytes: number;
+    encoder: string | null;
+    audioEnabled: boolean;
+    outputDirectory: string | null;
+    integrityStatus: RecordingIntegrityStatus;
+    recoveryNotes: string | null;
+    endedAt: string | null;
+  }>
+): MatchSessionWithSegments | null {
+  const db = getDb();
+  const existing = db.prepare('SELECT * FROM match_sessions WHERE id = ?').get(sessionId) as
+    | Record<string, unknown>
+    | undefined;
+  if (!existing) return null;
+
+  const now = new Date().toISOString();
+  const nextStatus = input.status ?? (String(existing.status) as MatchSession['status']);
+  const matchId = String(existing.match_id);
+  const half = String(existing.half) as MatchSession['half'];
+
+  const tx = db.transaction(() => {
+    db.prepare(`
+      UPDATE match_sessions
+      SET status = ?,
+          resolution = ?,
+          fps = ?,
+          duration_seconds = ?,
+          total_bytes = ?,
+          encoder = ?,
+          audio_enabled = ?,
+          output_directory = ?,
+          integrity_status = ?,
+          recovery_notes = ?,
+          ended_at = ?,
+          updated_at = ?
+      WHERE id = ?
+    `).run(
+      nextStatus,
+      input.resolution ?? String(existing.resolution),
+      input.fps ?? Number(existing.fps),
+      input.durationSeconds !== undefined
+        ? Math.max(0, Math.round(input.durationSeconds))
+        : Number(existing.duration_seconds),
+      input.totalBytes !== undefined
+        ? Math.max(0, Math.round(input.totalBytes))
+        : Number(existing.total_bytes),
+      input.encoder !== undefined ? input.encoder : existing.encoder,
+      input.audioEnabled !== undefined ? (input.audioEnabled ? 1 : 0) : Number(existing.audio_enabled ?? 0),
+      input.outputDirectory !== undefined ? input.outputDirectory : existing.output_directory,
+      input.integrityStatus ?? String(existing.integrity_status ?? 'pending'),
+      input.recoveryNotes !== undefined ? input.recoveryNotes : existing.recovery_notes,
+      input.endedAt !== undefined ? input.endedAt : existing.ended_at,
+      now,
+      sessionId
+    );
+
+    syncMatchStatusForSession(db, matchId, half, nextStatus, now);
+  });
+
+  tx();
+  return getMatchSessionById(sessionId);
+}
+
+export function upsertRecordingSegment(input: {
+  sessionId: string;
+  matchId: string;
+  segmentIndex: number;
+  filePath: string;
+  durationSeconds: number;
+  sizeBytes: number;
+  checksum?: string | null;
+  status: RecordingSegment['status'];
+  resolution?: string | null;
+  fps?: number | null;
+  codec?: string | null;
+  hasAudio?: boolean;
+  integrityStatus?: RecordingIntegrityStatus;
+  startedAt?: string | null;
+  endedAt?: string | null;
+}): RecordingSegment {
+  const db = getDb();
+  const sessionRow = db
+    .prepare('SELECT id, match_id FROM match_sessions WHERE id = ?')
+    .get(input.sessionId) as { id: string; match_id: string } | undefined;
+  if (!sessionRow) {
+    throw new Error(`Match session "${input.sessionId}" not found.`);
+  }
+  if (sessionRow.match_id !== input.matchId) {
+    throw new Error('Segment matchId does not match parent session matchId.');
+  }
+
+  const now = new Date().toISOString();
+  const id = crypto.randomUUID();
+
+  db.prepare(`
+    INSERT INTO recording_segments (
+      id, session_id, match_id, segment_index, file_path, duration_seconds,
+      size_bytes, checksum, status, resolution, fps, codec, has_audio,
+      integrity_status, started_at, ended_at, created_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(session_id, segment_index) DO UPDATE SET
+      file_path = excluded.file_path,
+      duration_seconds = excluded.duration_seconds,
+      size_bytes = excluded.size_bytes,
+      checksum = COALESCE(excluded.checksum, recording_segments.checksum),
+      status = excluded.status,
+      resolution = COALESCE(excluded.resolution, recording_segments.resolution),
+      fps = COALESCE(excluded.fps, recording_segments.fps),
+      codec = COALESCE(excluded.codec, recording_segments.codec),
+      has_audio = excluded.has_audio,
+      integrity_status = excluded.integrity_status,
+      started_at = COALESCE(recording_segments.started_at, excluded.started_at),
+      ended_at = COALESCE(excluded.ended_at, recording_segments.ended_at)
+  `).run(
+    id,
+    input.sessionId,
+    input.matchId,
+    input.segmentIndex,
+    input.filePath,
+    Math.max(0, Math.round(input.durationSeconds)),
+    Math.max(0, Math.round(input.sizeBytes)),
+    input.checksum ?? null,
+    input.status,
+    input.resolution ?? null,
+    input.fps ?? null,
+    input.codec ?? null,
+    input.hasAudio ? 1 : 0,
+    input.integrityStatus ?? 'pending',
+    input.startedAt ?? now,
+    input.endedAt ?? null,
+    now
+  );
+
+  const row = db
+    .prepare('SELECT * FROM recording_segments WHERE session_id = ? AND segment_index = ?')
+    .get(input.sessionId, input.segmentIndex) as Record<string, unknown>;
+  return mapRecordingSegmentRow(row);
 }

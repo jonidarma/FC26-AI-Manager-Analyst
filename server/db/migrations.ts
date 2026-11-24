@@ -608,6 +608,31 @@ export const MIGRATIONS: Migration[] = [
       addColumnIfMissing(db, 'opponents', 'catalog_club_id', 'TEXT');
     },
   },
+  {
+    version: 3,
+    name: 'recording_session_metadata_v3',
+    sql: `
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_recording_segments_session_index
+      ON recording_segments(session_id, segment_index);
+    `,
+    afterSql: (db: Database.Database) => {
+      // Non-destructively extend match_sessions and recording_segments for Phase 2 native recording telemetry & integrity
+      addColumnIfMissing(db, 'match_sessions', 'encoder', 'TEXT');
+      addColumnIfMissing(db, 'match_sessions', 'audio_enabled', 'INTEGER NOT NULL DEFAULT 0');
+      addColumnIfMissing(db, 'match_sessions', 'output_directory', 'TEXT');
+      addColumnIfMissing(db, 'match_sessions', 'integrity_status', "TEXT NOT NULL DEFAULT 'pending'");
+      addColumnIfMissing(db, 'match_sessions', 'recovery_notes', 'TEXT');
+      addColumnIfMissing(db, 'match_sessions', 'updated_at', 'TEXT');
+
+      addColumnIfMissing(db, 'recording_segments', 'resolution', 'TEXT');
+      addColumnIfMissing(db, 'recording_segments', 'fps', 'REAL');
+      addColumnIfMissing(db, 'recording_segments', 'codec', 'TEXT');
+      addColumnIfMissing(db, 'recording_segments', 'has_audio', 'INTEGER NOT NULL DEFAULT 0');
+      addColumnIfMissing(db, 'recording_segments', 'integrity_status', "TEXT NOT NULL DEFAULT 'pending'");
+      addColumnIfMissing(db, 'recording_segments', 'started_at', 'TEXT');
+      addColumnIfMissing(db, 'recording_segments', 'ended_at', 'TEXT');
+    },
+  },
 ];
 
 export function runMigrations(db: Database.Database): void {
