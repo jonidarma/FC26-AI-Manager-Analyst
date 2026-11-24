@@ -1,0 +1,8 @@
+{
+  "name": "FC26 AI Manager",
+  "description": "Football Tactical Intelligence System for EA SPORTS FC 26 Career Mode — Observe first, analyze at half-time, recommend with evidence, and learn from every match.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

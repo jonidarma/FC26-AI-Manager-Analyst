@@ -1,0 +1,25 @@
+appId: com.fc26aimanager.desktop
+productName: FC26 AI Manager
+copyright: Copyright © 2026 FC26 AI Manager
+directories:
+  output: release
+  buildResources: build
+files:
+  - dist/**/*
+  - dist-electron/**/*
+  - server/**/*
+  - package.json
+win:
+  target:
+    - target: nsis
+      arch:
+        - x64
+  artifactName: "FC26 AI Manager — Windows Setup.${ext}"
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: FC26 AI Manager
+asarUnpack:
+  - "node_modules/better-sqlite3/**"
