@@ -5,6 +5,10 @@ import type {
   PlayerRoleAssignment,
   RoleFocusValidationResult,
 } from '../../src/types/domain.ts';
+import {
+  CANONICAL_FC26_POSITIONS,
+  normalizeFormationSlotPosition,
+} from '../../src/utils/formationPositions.ts';
 import { resolvePlayerDisplayName } from '../../src/utils/playerDisplayName.ts';
 import { getDb } from '../db/database.ts';
 import {
@@ -26,7 +30,19 @@ export function validatePlayerRoleFocus(
   dbArg?: Database.Database
 ): RoleFocusValidationResult {
   const db = resolveDb(dbArg);
-  const pos = positionCode.trim().toUpperCase();
+  const normalized = normalizeFormationSlotPosition(positionCode);
+  if (!normalized.ok) {
+    return {
+      valid: false,
+      reason:
+        normalized.error ??
+        `Position "${positionCode.trim().toUpperCase()}" is not a recognized FC 26 position code. Valid codes: ${CANONICAL_FC26_POSITIONS.join(', ')}.`,
+      allowedRoles: [],
+      allowedFocuses: [],
+    };
+  }
+
+  const pos = normalized.canonicalPosition;
   const role = roleName.trim();
   const focus = focusName.trim();
 
@@ -36,7 +52,7 @@ export function validatePlayerRoleFocus(
   if (rolesForPos.length === 0) {
     return {
       valid: false,
-      reason: `Position "${pos}" is not a recognized FC 26 position code.`,
+      reason: `Position "${pos}" has no configured FC 26 player roles in the tactical catalog.`,
       allowedRoles: [],
       allowedFocuses: [],
     };
@@ -216,7 +232,10 @@ export function buildAiMatchTacticalContext(
   const formationPositions = new Set(
     catalogFormation
       ? catalogFormation.slots.map((s) => s.positionCode)
-      : assignments.map((a) => a.positionCode.toUpperCase())
+      : assignments.map((a) => {
+          const norm = normalizeFormationSlotPosition(a.positionCode);
+          return norm.ok ? norm.canonicalPosition : a.positionCode.toUpperCase();
+        })
   );
 
   const validRolesByPosition: Record<string, Record<string, string[]>> = {};

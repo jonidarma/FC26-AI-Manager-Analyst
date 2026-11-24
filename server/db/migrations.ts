@@ -907,6 +907,124 @@ export const MIGRATIONS: Migration[] = [
       `);
     },
   },
+  {
+    version: 5,
+    name: 'phase_2_2_tactics_eligibility_catalog_v5',
+    sql: `
+      CREATE TABLE IF NOT EXISTS catalog_club_aliases (
+        id TEXT PRIMARY KEY,
+        club_id TEXT NOT NULL,
+        alias_name TEXT NOT NULL,
+        alias_type TEXT NOT NULL DEFAULT 'alternate_name' CHECK (alias_type IN ('unlicensed_name', 'short_name', 'alternate_name', 'datahub_name', 'historical_name')),
+        verification_status TEXT NOT NULL DEFAULT 'verified' CHECK (verification_status IN ('verified', 'unverified')),
+        created_at TEXT NOT NULL,
+        FOREIGN KEY (club_id) REFERENCES catalog_clubs(id) ON DELETE CASCADE,
+        UNIQUE(club_id, alias_name COLLATE NOCASE)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_catalog_club_aliases_club ON catalog_club_aliases(club_id);
+      CREATE INDEX IF NOT EXISTS idx_catalog_club_aliases_name ON catalog_club_aliases(alias_name COLLATE NOCASE);
+    `,
+    afterSql: (db: Database.Database) => {
+      // 1. Formation slot separation: slot_id vs canonical position_code & display position_label
+      addColumnIfMissing(db, 'catalog_formation_slots', 'slot_id', 'TEXT');
+      db.exec(`
+        UPDATE catalog_formation_slots
+        SET
+          slot_id = COALESCE(NULLIF(TRIM(slot_id), ''), NULLIF(TRIM(position_label), ''), position_code),
+          position_label = position_code
+      `);
+
+      // 2. Tactical presets: draft vs match_ready status & normalized slot_id / position_code
+      addColumnIfMissing(db, 'tactical_presets', 'preset_status', "TEXT NOT NULL DEFAULT 'match_ready'");
+      addColumnIfMissing(db, 'tactical_preset_assignments', 'slot_id', 'TEXT');
+
+      const aliasMap: Record<string, string> = {
+        LCB: 'CB',
+        RCB: 'CB',
+        CCB: 'CB',
+        LDM: 'CDM',
+        RDM: 'CDM',
+        LCDM: 'CDM',
+        RCDM: 'CDM',
+        LCM: 'CM',
+        RCM: 'CM',
+        LAM: 'CAM',
+        RAM: 'CAM',
+        LCAM: 'CAM',
+        RCAM: 'CAM',
+        LS: 'ST',
+        RS: 'ST',
+        LST: 'ST',
+        RST: 'ST',
+        LF: 'CF',
+        RF: 'CF',
+      };
+
+      const presetAssignments = db
+        .prepare('SELECT id, slot_order, slot_id, position_code FROM tactical_preset_assignments')
+        .all() as Array<{ id: string; slot_order: number; slot_id: string | null; position_code: string }>;
+      const updatePresetAssignment = db.prepare(
+        'UPDATE tactical_preset_assignments SET slot_id = ?, position_code = ? WHERE id = ?'
+      );
+      for (const row of presetAssignments) {
+        const rawPos = String(row.position_code || '').trim().toUpperCase();
+        const canonical = aliasMap[rawPos] ?? rawPos;
+        const slotId = row.slot_id?.trim() ? row.slot_id.trim() : rawPos || `${canonical}_${row.slot_order}`;
+        updatePresetAssignment.run(slotId, canonical, row.id);
+      }
+
+      // 3. Career Mode squad eligibility: explicit youth academy senior selection authorization
+      addColumnIfMissing(db, 'players', 'senior_selection_authorized', 'INTEGER NOT NULL DEFAULT 0');
+
+      // 4. Expanded FC26 master catalog provenance, aliasing, and external ID reconciliation
+      addColumnIfMissing(db, 'catalog_nations', 'external_nation_id', 'TEXT');
+
+      addColumnIfMissing(db, 'catalog_leagues', 'region', "TEXT NOT NULL DEFAULT ''");
+      addColumnIfMissing(db, 'catalog_leagues', 'mode_availability', "TEXT NOT NULL DEFAULT 'career_mode'");
+      addColumnIfMissing(db, 'catalog_leagues', 'dataset_version', 'TEXT');
+      addColumnIfMissing(db, 'catalog_leagues', 'verification_status', "TEXT NOT NULL DEFAULT 'verified'");
+
+      addColumnIfMissing(db, 'catalog_clubs', 'source_namespace', "TEXT NOT NULL DEFAULT 'baseline'");
+      addColumnIfMissing(db, 'catalog_clubs', 'external_team_id', 'TEXT');
+      addColumnIfMissing(db, 'catalog_clubs', 'canonical_name', 'TEXT');
+      addColumnIfMissing(db, 'catalog_clubs', 'display_name', 'TEXT');
+      addColumnIfMissing(db, 'catalog_clubs', 'aliases_json', "TEXT NOT NULL DEFAULT '[]'");
+      addColumnIfMissing(db, 'catalog_clubs', 'region', "TEXT NOT NULL DEFAULT ''");
+      addColumnIfMissing(db, 'catalog_clubs', 'mode_availability', "TEXT NOT NULL DEFAULT 'career_mode'");
+      addColumnIfMissing(db, 'catalog_clubs', 'source_url', 'TEXT');
+      addColumnIfMissing(db, 'catalog_clubs', 'dataset_version', 'TEXT');
+      addColumnIfMissing(db, 'catalog_clubs', 'imported_at', 'TEXT');
+      addColumnIfMissing(db, 'catalog_clubs', 'verification_status', "TEXT NOT NULL DEFAULT 'verified'");
+
+      db.exec(`
+        UPDATE catalog_clubs
+        SET
+          canonical_name = COALESCE(NULLIF(TRIM(canonical_name), ''), name),
+          display_name = COALESCE(NULLIF(TRIM(display_name), ''), name)
+      `);
+
+      db.exec(`
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_catalog_clubs_source_ext_team
+        ON catalog_clubs(source_namespace, external_team_id)
+        WHERE external_team_id IS NOT NULL AND TRIM(external_team_id) != '';
+        CREATE INDEX IF NOT EXISTS idx_catalog_clubs_external_team ON catalog_clubs(external_team_id);
+        CREATE INDEX IF NOT EXISTS idx_catalog_nations_external_id ON catalog_nations(external_nation_id);
+      `);
+
+      // 5. Phase 3 readiness metadata on match_sessions (no AI video calls in Phase 2.2)
+      addColumnIfMissing(db, 'match_sessions', 'analysis_state', "TEXT NOT NULL DEFAULT 'not_ready'");
+      addColumnIfMissing(db, 'match_sessions', 'footage_classification_json', 'TEXT');
+      db.exec(`
+        UPDATE match_sessions
+        SET analysis_state = CASE
+          WHEN ai_eligible = 1 THEN 'verified_awaiting_phase3'
+          ELSE 'not_ready'
+        END
+        WHERE analysis_state IS NULL OR TRIM(analysis_state) = '' OR analysis_state = 'not_ready'
+      `);
+    },
+  },
 ];
 
 export function runMigrations(db: Database.Database): void {

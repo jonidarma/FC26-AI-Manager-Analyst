@@ -169,6 +169,8 @@ export interface RecordingPipelineDiagnostics {
   ffmpegPid: number | null;
   ffmpegState: 'idle' | 'starting' | 'running' | 'paused' | 'finalizing' | 'stopped' | 'error';
   ffmpegStdinBytesWritten: number;
+  currentProcessStdinBytesWritten?: number;
+  lifetimeSessionStdinBytesWritten?: number;
   ffmpegExitCode: number | null;
   ffmpegExitSignal: string | null;
   queueSizeChunks: number;
@@ -325,6 +327,8 @@ export function createEmptyPipelineDiagnostics(
     ffmpegPid: null,
     ffmpegState: 'idle',
     ffmpegStdinBytesWritten: 0,
+    currentProcessStdinBytesWritten: 0,
+    lifetimeSessionStdinBytesWritten: 0,
     ffmpegExitCode: null,
     ffmpegExitSignal: null,
     queueSizeChunks: 0,

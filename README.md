@@ -2,7 +2,7 @@
 
 A Windows desktop companion for EA SPORTS FC 26 Career Mode, designed for local gameplay capture and half-time tactical analysis.
 
-> **Development status:** Phase 2 — Native Capture Engine. Windows desktop launch has been demonstrated. Live gameplay recording, recovery, installer distribution and AI video analysis are not yet certified.
+> **Development status:** Phase 2.2 (v2.2.0) — Tactical Validation, Centralized Squad Eligibility, Complete FC 26 Club/League Master Database Expansion, and Recording Diagnostics Reliability. Native Windows first-half/second-half H.264 MP4 recording has been demonstrated on Windows 10/11 x64. Phase 3 Gemini video analysis and NSIS installer distribution are not yet certified.
 
 ## Windows Installation Guide
 
@@ -107,9 +107,23 @@ See [FFmpeg licensing and packaging](docs/FFMPEG_LICENSING_AND_PACKAGING.md) bef
 bun run lint
 bun run test:players
 bun run test:capture
+bun run test:phase21
+bun run test:phase22
 ```
 
-Investigate failures before proceeding. The player adapter suite previously passed all 10 tests on Windows. Automated capture tests do not replace live gameplay testing.
+Investigate failures before proceeding. Automated tests run in isolated temp directories and never touch your live SQLite database. Automated capture tests do not replace live gameplay testing.
+
+### 6b. Expand FC 26 Clubs, Leagues & Nations from Imported Players (Optional CLI)
+
+After importing `players.csv` (EAFC26 DataHub) in **FC26 Database Center**, you can expand the master catalog (676 clubs across 56 leagues and 160 nations, including all 20 Premier League clubs and unlicensed Serie A aliases) either from the **Database Center → Overview** UI or via CLI:
+
+```powershell
+bun run catalog:reconcile -- --preview
+bun run catalog:reconcile -- --execute
+bun run catalog:reconcile -- --report
+```
+
+This operation is non-destructive, transaction-safe, idempotent, and preserves all Career Mode clubs, squads, match records, and player UUIDs.
 
 ### 7. Launch Desktop Application
 

@@ -1,13 +1,14 @@
-import { ClipboardCheck, Download } from 'lucide-react';
+import { CheckCircle2, ClipboardCheck, Clock3, Download, ShieldCheck } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { TacticalPitchSVG } from '../components/pitch/TacticalPitchSVG';
 import { useApp } from '../context/AppContext';
 import { desktopBridge } from '../services/desktopBridge';
-import type { HalftimeReportData } from '../types/domain';
+import type { HalftimeReportData, MatchSessionWithSegments } from '../types/domain';
 
 export function HalfTimeBriefingView() {
   const { matches, selectedMatchId, setSelectedMatchId, players, setActiveSection } = useApp();
   const [report, setReport] = useState<HalftimeReportData | null>(null);
+  const [sessions, setSessions] = useState<MatchSessionWithSegments[]>([]);
   const [loadingReport, setLoadingReport] = useState(false);
 
   const selectedMatch = matches.find((m) => m.id === selectedMatchId) ?? matches[0] ?? null;
@@ -17,14 +18,24 @@ export function HalfTimeBriefingView() {
     async function load() {
       if (!selectedMatch) {
         setReport(null);
+        setSessions([]);
         return;
       }
       setLoadingReport(true);
       try {
-        const fetched = await desktopBridge.getHalftimeReport(selectedMatch.id);
-        if (!cancelled) setReport(fetched);
+        const [fetched, matchSessions] = await Promise.all([
+          desktopBridge.getHalftimeReport(selectedMatch.id).catch(() => null),
+          desktopBridge.listRecordingSessions({ matchId: selectedMatch.id }).catch(() => []),
+        ]);
+        if (!cancelled) {
+          setReport(fetched);
+          setSessions(matchSessions);
+        }
       } catch {
-        if (!cancelled) setReport(null);
+        if (!cancelled) {
+          setReport(null);
+          setSessions([]);
+        }
       } finally {
         if (!cancelled) setLoadingReport(false);
       }
@@ -34,6 +45,20 @@ export function HalfTimeBriefingView() {
       cancelled = true;
     };
   }, [selectedMatch?.id]);
+
+  const firstHalfSessions = sessions.filter((s) => s.half === 'first_half');
+  const verifiedFirstHalf = firstHalfSessions.find(
+    (s) => s.integrityStatus === 'verified' && s.segments.some((seg) => seg.integrityStatus === 'verified')
+  );
+  const aiEligibleFirstHalf = firstHalfSessions.find((s) => s.aiEligible);
+  const totalVerifiedBytes = firstHalfSessions.reduce(
+    (acc, s) =>
+      acc +
+      s.segments
+        .filter((seg) => seg.integrityStatus === 'verified')
+        .reduce((segAcc, seg) => segAcc + seg.sizeBytes, 0),
+    0
+  );
 
   function handleExportJson() {
     if (!report || !selectedMatch) return;
@@ -71,7 +96,7 @@ export function HalfTimeBriefingView() {
               {matches.map((m) => (
                 <option key={m.id} value={m.id}>
                   {m.matchDate} · {m.venue === 'home' ? 'vs' : '@'} {m.opponentName}
-                  {m.hasHalftimeReport ? ' (Report Saved)' : ' (Awaiting Analysis)'}
+                  {m.hasHalftimeReport ? ' (Analysis Completed)' : ' (Awaiting Phase 3 Analysis)'}
                 </option>
               ))}
             </select>
@@ -95,21 +120,74 @@ export function HalfTimeBriefingView() {
         </div>
       ) : !report ? (
         <div className="border border-white/[0.08] bg-[#12151B] rounded-lg p-8 space-y-6">
-          <div className="max-w-2xl">
+          <div className="max-w-3xl">
             <div className="text-[12px] text-[#8A94A6]">
               {selectedMatch
                 ? `${selectedMatch.matchDate} · ${selectedMatch.venue === 'home' ? 'vs' : '@'} ${selectedMatch.opponentName} · ${selectedMatch.startingFormation}`
                 : 'No match selected'}
             </div>
             <h2 className="mt-1 text-[20px] font-semibold text-white">
-              No Half-Time Briefing Generated for This Match
+              {aiEligibleFirstHalf
+                ? 'First-Half Recording Verified — Awaiting Analysis (Phase 3)'
+                : 'No Half-Time Briefing Generated for This Match'}
             </h2>
             <p className="mt-2 text-[14px] text-[#9AA4B4] leading-relaxed">
-              Half-time reports are never fabricated from pre-match assumptions. Once a first-half
-              recording is finalized in Phase 2/3 and submitted to the two-stage Gemini analysis
-              pipeline, all 11 tactical briefing sections populate here and persist in SQLite.
+              Half-time reports are never fabricated from pre-match assumptions. Verified local MP4
+              recordings remain strictly on disk until the explicit Phase 3 Gemini video analysis
+              pipeline is implemented and triggered by the manager.
             </p>
           </div>
+
+          {selectedMatch && (
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+              <div className="border border-white/[0.08] bg-[#0E1116] rounded-md p-3.5">
+                <div className="flex items-center gap-1.5 text-[11px] uppercase tracking-wider text-[#8A94A6]">
+                  <ShieldCheck className="w-3.5 h-3.5 text-emerald-400" />
+                  1. Recording Verified
+                </div>
+                <div className="mt-1.5 text-[14px] font-semibold text-white">
+                  {verifiedFirstHalf ? 'Verified Locally' : 'No Verified First-Half Footage'}
+                </div>
+                <div className="mt-0.5 text-[11px] text-[#8A94A6]">
+                  {verifiedFirstHalf
+                    ? `${verifiedFirstHalf.segments.filter((s) => s.integrityStatus === 'verified').length} FFprobe + SHA-256 verified MP4 segment(s) (${(totalVerifiedBytes / (1024 * 1024)).toFixed(1)} MB)`
+                    : 'Record and finalize the first half in Match Capture.'}
+                </div>
+              </div>
+
+              <div className="border border-white/[0.08] bg-[#0E1116] rounded-md p-3.5">
+                <div className="flex items-center gap-1.5 text-[11px] uppercase tracking-wider text-[#8A94A6]">
+                  <CheckCircle2 className="w-3.5 h-3.5 text-sky-400" />
+                  2. Technically AI-Eligible
+                </div>
+                <div className="mt-1.5 text-[14px] font-semibold text-white">
+                  {aiEligibleFirstHalf ? 'Eligible for AI Processing' : 'Not Eligible Yet'}
+                </div>
+                <div className="mt-0.5 text-[11px] text-[#8A94A6]">
+                  {aiEligibleFirstHalf
+                    ? 'H.264 MP4 container, duration, and frozen tactical snapshot verified. Zero files uploaded.'
+                    : 'Requires a verified non-zero first-half recording session.'}
+                </div>
+              </div>
+
+              <div className="border border-white/[0.08] bg-[#0E1116] rounded-md p-3.5">
+                <div className="flex items-center gap-1.5 text-[11px] uppercase tracking-wider text-[#8A94A6]">
+                  <Clock3 className="w-3.5 h-3.5 text-amber-400" />
+                  3. Analysis State
+                </div>
+                <div className="mt-1.5 text-[14px] font-semibold text-white">
+                  {aiEligibleFirstHalf
+                    ? 'Awaiting Analysis (Phase 3)'
+                    : 'Not Ready for Analysis'}
+                </div>
+                <div className="mt-0.5 text-[11px] text-[#8A94A6]">
+                  {aiEligibleFirstHalf
+                    ? 'No Gemini video upload or tactical inference has been run in Phase 2.2.'
+                    : 'Analysis Completed status activates only after Phase 3 report persistence.'}
+                </div>
+              </div>
+            </div>
+          )}
 
           {/* 11-Section Briefing Architecture Overview */}
           <div className="border-t border-white/[0.08] pt-6">

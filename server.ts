@@ -17,6 +17,11 @@ import {
   previewCatalogImport,
   rollbackCatalogImportRun,
 } from './server/services/catalogImporter.ts';
+import {
+  executeCatalogReconciliationFromPlayers,
+  getCatalogCoverageReport,
+  previewCatalogReconciliationFromPlayers,
+} from './server/services/catalogReconciler.ts';
 import * as catalogRepo from './server/services/catalogRepository.ts';
 import { getGeminiStatus } from './server/services/geminiService.ts';
 import * as repo from './server/services/repository.ts';
@@ -175,6 +180,7 @@ const playerSchema = z.object({
   squadNumber: z.number().int().min(1).max(99).nullable().optional(),
   squadStatus: squadStatusEnum.optional(),
   availability: playerAvailabilityEnum.optional(),
+  seniorSelectionAuthorized: z.boolean().optional(),
   injuryStatus: z.string().trim().max(200).nullable().optional(),
   suspensionStatus: z.string().trim().max(200).nullable().optional(),
   membershipStartDate: z.string().trim().max(32).nullable().optional(),
@@ -219,6 +225,7 @@ const importPlayerFromCatalogSchema = z.object({
 
 const tacticalPresetAssignmentSchema = z.object({
   slotOrder: z.number().int().min(0).max(10),
+  slotId: z.string().trim().max(16).optional(),
   positionCode: z.string().trim().min(1).max(12),
   playerId: z.string().uuid().nullable(),
   role: z.string().trim().max(80).default(''),
@@ -233,7 +240,9 @@ const tacticalPresetCreateSchema = z.object({
   defensiveApproach: z.string().trim().min(1).max(80),
   defensiveLineHeight: z.number().int().min(1).max(100),
   isDefault: z.boolean().optional(),
+  presetStatus: z.enum(['draft', 'match_ready']).optional(),
   benchPlayerIds: z.array(z.string().uuid()).max(12).optional(),
+  confirmedDoubtfulPlayerIds: z.array(z.string().uuid()).max(23).optional(),
   notes: z.string().trim().max(1200).optional(),
   assignments: z.array(tacticalPresetAssignmentSchema).max(11).default([]),
 });
@@ -253,6 +262,7 @@ const opponentSchema = z.object({
 
 const roleAssignmentSchema = z.object({
   slotIndex: z.number().int().min(0).max(10),
+  slotId: z.string().trim().max(16).optional(),
   positionCode: z.string().trim().min(1).max(12),
   playerId: z.string().uuid().nullable(),
   playerName: z.string().max(120).nullable(),
@@ -271,6 +281,7 @@ const matchCreateSchema = z.object({
   startingFormation: z.string().trim().min(1).max(60),
   startingXiIds: z.array(z.string().uuid()).max(11).default([]),
   benchIds: z.array(z.string().uuid()).max(12).default([]),
+  confirmedDoubtfulPlayerIds: z.array(z.string().uuid()).max(23).optional(),
   objective: z.string().trim().max(300).default(''),
   preMatchNotes: z.string().trim().max(1500).default(''),
   sourcePresetId: z.string().uuid().nullable().optional(),
@@ -293,6 +304,7 @@ const matchTacticalSnapshotInputSchema = z.object({
   defensiveLineHeight: z.number().int().min(1).max(100),
   playerAssignments: z.array(roleAssignmentSchema).max(11).default([]),
   benchIds: z.array(z.string().uuid()).max(12).optional(),
+  confirmedDoubtfulPlayerIds: z.array(z.string().uuid()).max(23).optional(),
   notes: z.string().trim().max(1500).optional(),
 });
 
@@ -1090,6 +1102,37 @@ async function startServer() {
     return res.json(payload);
   });
 
+  // Phase 2.2 — FC 26 Master Catalog Coverage Report & Club/League Reconciliation
+  app.get('/api/catalog/coverage-report', (_req, res) => {
+    try {
+      return res.json(getCatalogCoverageReport(getDb()));
+    } catch (err) {
+      return res.status(500).json({
+        error: err instanceof Error ? err.message : 'Failed to build catalog coverage report',
+      });
+    }
+  });
+
+  app.post('/api/catalog/reconcile/preview', (_req, res) => {
+    try {
+      return res.json(previewCatalogReconciliationFromPlayers(getDb()));
+    } catch (err) {
+      return res.status(400).json({
+        error: err instanceof Error ? err.message : 'Failed to preview catalog reconciliation',
+      });
+    }
+  });
+
+  app.post('/api/catalog/reconcile/execute', (_req, res) => {
+    try {
+      return res.json(executeCatalogReconciliationFromPlayers(getDb()));
+    } catch (err) {
+      return res.status(400).json({
+        error: err instanceof Error ? err.message : 'Failed to execute catalog reconciliation',
+      });
+    }
+  });
+
   app.get('/api/matches/:id/ai-context', (req, res) => {
     const ctx = buildAiMatchTacticalContext(req.params.id);
     if (!ctx) return res.status(404).json({ error: 'Match not found' });
@@ -1114,6 +1157,8 @@ async function startServer() {
   const integrityStatusEnum = z.enum(['pending', 'verified', 'partial', 'corrupted', 'unverified']);
   const segmentStatusEnum = z.enum(['writing', 'finalized', 'corrupted', 'recovered']);
 
+  const analysisStateEnum = z.enum(['not_ready', 'verified_awaiting_phase3', 'analysis_completed']);
+
   const createRecordingSessionSchema = z.object({
     id: z.string().uuid().optional(),
     matchId: z.string().uuid(),
@@ -1130,6 +1175,7 @@ async function startServer() {
     outputDirectory: z.string().max(500).nullable().optional(),
     integrityStatus: integrityStatusEnum.optional(),
     aiEligible: z.boolean().optional(),
+    analysisState: analysisStateEnum.optional(),
     failureReason: z.string().max(1500).nullable().optional(),
     diagnosticsPath: z.string().max(600).nullable().optional(),
     recoveryNotes: z.string().max(2000).nullable().optional(),
@@ -1148,6 +1194,7 @@ async function startServer() {
     outputDirectory: z.string().max(500).nullable().optional(),
     integrityStatus: integrityStatusEnum.optional(),
     aiEligible: z.boolean().optional(),
+    analysisState: analysisStateEnum.optional(),
     failureReason: z.string().max(1500).nullable().optional(),
     diagnosticsPath: z.string().max(600).nullable().optional(),
     recoveryNotes: z.string().max(2000).nullable().optional(),

@@ -445,14 +445,19 @@ function validateAndNormalizeRows(
           careerModeStatus:
             toStringOrEmpty(getField(raw, 'careerModeStatus', 'career_mode_status')) || 'verified',
           layoutVerified: raw.layoutVerified !== false,
-          slots: slots.map((s, idx) => ({
-            slotOrder: Number(s.slotOrder ?? idx),
-            positionCode: toStringOrEmpty(s.positionCode).toUpperCase(),
-            positionLabel: toStringOrEmpty(s.positionLabel) || toStringOrEmpty(s.positionCode).toUpperCase(),
-            x: Math.max(0, Math.min(100, Number(s.x ?? 50))),
-            y: Math.max(0, Math.min(100, Number(s.y ?? 50))),
-            tacticalLine: toStringOrEmpty(s.tacticalLine).toUpperCase() || 'MID',
-          })),
+          slots: slots.map((s, idx) => {
+            const posCode = toStringOrEmpty(s.positionCode).toUpperCase();
+            const rawSlotId = toStringOrEmpty(s.slotId) || toStringOrEmpty(s.positionLabel) || posCode;
+            return {
+              slotOrder: Number(s.slotOrder ?? idx),
+              slotId: rawSlotId.toUpperCase(),
+              positionCode: posCode,
+              positionLabel: posCode,
+              x: Math.max(0, Math.min(100, Number(s.x ?? 50))),
+              y: Math.max(0, Math.min(100, Number(s.y ?? 50))),
+              tacticalLine: toStringOrEmpty(s.tacticalLine).toUpperCase() || 'MID',
+            };
+          }),
         },
       });
       continue;
@@ -1103,8 +1108,8 @@ export function executeCatalogImport(
       const deleteSlots = db.prepare('DELETE FROM catalog_formation_slots WHERE formation_id = ?');
       const insertSlot = db.prepare(`
         INSERT INTO catalog_formation_slots (
-          id, formation_id, slot_order, position_code, position_label, x, y, tactical_line, is_user_adjusted
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)
+          id, formation_id, slot_order, slot_id, position_code, position_label, x, y, tactical_line, is_user_adjusted
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
       `);
 
       for (const row of validRows) {
@@ -1137,6 +1142,7 @@ export function executeCatalogImport(
           deleteSlots.run(formationId);
           for (const slot of d.slots as Array<{
             slotOrder: number;
+            slotId?: string;
             positionCode: string;
             positionLabel: string;
             x: number;
@@ -1147,8 +1153,9 @@ export function executeCatalogImport(
               crypto.randomUUID(),
               formationId,
               slot.slotOrder,
+              slot.slotId ?? slot.positionCode,
               slot.positionCode,
-              slot.positionLabel,
+              slot.positionCode,
               slot.x,
               slot.y,
               slot.tacticalLine

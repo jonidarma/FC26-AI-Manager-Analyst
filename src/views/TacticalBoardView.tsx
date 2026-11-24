@@ -4,6 +4,11 @@ import { TacticalPitchSVG } from '../components/pitch/TacticalPitchSVG';
 import { useApp } from '../context/AppContext';
 import { desktopBridge } from '../services/desktopBridge';
 import type { CatalogFormation, CatalogFormationSlot, CatalogRole } from '../types/domain';
+import {
+  getDisplayPositionLabel,
+  getSlotSideHint,
+  toCanonicalFc26Position,
+} from '../utils/formationPositions';
 
 export function TacticalBoardView() {
   const {
@@ -93,7 +98,10 @@ export function TacticalBoardView() {
 
   const eligibleRolesForSelectedSlot = useMemo(() => {
     if (!selectedSlot) return [];
-    return catalogRoles.filter((r) => r.eligiblePositions.includes(selectedSlot.positionCode));
+    const canonical =
+      toCanonicalFc26Position(selectedSlot.positionCode) ??
+      selectedSlot.positionCode.toUpperCase();
+    return catalogRoles.filter((r) => r.eligiblePositions.includes(canonical));
   }, [selectedSlot, catalogRoles]);
 
   const assignments = selectedMatch?.tacticalConfiguration?.playerAssignments ?? [];
@@ -364,8 +372,12 @@ export function TacticalBoardView() {
             {selectedSlot ? (
               <div className="grid grid-cols-1 md:grid-cols-3 gap-4 items-center">
                 <div className="text-[13px] text-white font-mono">
-                  Slot #{selectedSlot.slotOrder} · {selectedSlot.positionLabel} (
-                  {selectedSlot.positionCode}) · {selectedSlot.tacticalLine}
+                  Slot #{selectedSlot.slotOrder} ·{' '}
+                  {getDisplayPositionLabel(selectedSlot.positionCode)}
+                  {getSlotSideHint(selectedSlot.slotId, selectedSlot.positionCode)
+                    ? ` (${getSlotSideHint(selectedSlot.slotId, selectedSlot.positionCode)})`
+                    : ''}{' '}
+                  · {selectedSlot.tacticalLine}
                 </div>
                 <div>
                   <div className="flex justify-between text-[11px] text-[#9AA4B4] mb-1">
@@ -475,8 +487,11 @@ export function TacticalBoardView() {
           <div className="flex flex-wrap items-center justify-between gap-2 border-b border-white/[0.06] pb-3">
             <div>
               <h2 className="text-[15px] font-semibold text-white">
-                Verified FC 26 Role &amp; Focus Compatibility — {selectedSlot.positionLabel} (
-                {selectedSlot.positionCode})
+                Verified FC 26 Role &amp; Focus Compatibility —{' '}
+                {getDisplayPositionLabel(selectedSlot.positionCode)}
+                {getSlotSideHint(selectedSlot.slotId, selectedSlot.positionCode)
+                  ? ` (${getSlotSideHint(selectedSlot.slotId, selectedSlot.positionCode)})`
+                  : ''}
               </h2>
               <p className="text-[12px] text-[#8A94A6]">
                 Slot #{selectedSlot.slotOrder} in {currentFormation} · Tactical Line:{' '}
@@ -494,7 +509,10 @@ export function TacticalBoardView() {
 
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
             {eligibleRolesForSelectedSlot.map((role) => {
-              const focuses = role.compatibleFocusesByPosition[selectedSlot.positionCode] ?? [];
+              const canonical =
+                toCanonicalFc26Position(selectedSlot.positionCode) ??
+                selectedSlot.positionCode.toUpperCase();
+              const focuses = role.compatibleFocusesByPosition[canonical] ?? [];
               return (
                 <div
                   key={role.id}
@@ -508,7 +526,7 @@ export function TacticalBoardView() {
                   </div>
                   <p className="text-[12px] text-[#8A94A6] leading-relaxed">{role.description}</p>
                   <div className="pt-1.5 border-t border-white/[0.06] text-[11px] text-[#C5CCD7]">
-                    <span className="text-[#7D8798]">Focuses at {selectedSlot.positionCode}: </span>
+                    <span className="text-[#7D8798]">Focuses at {canonical}: </span>
                     <span className="font-mono">{focuses.join(' · ') || 'None'}</span>
                   </div>
                 </div>

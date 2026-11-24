@@ -1,7 +1,10 @@
 import {
   AlertTriangle,
   ArrowRight,
+  Eye,
+  EyeOff,
   Lock,
+  ShieldAlert,
   SlidersHorizontal,
   Target,
 } from 'lucide-react';
@@ -18,7 +21,18 @@ import type {
   PlayerRoleAssignment,
   TacticalPreset,
 } from '../types/domain';
+import {
+  deriveStableSlotId,
+  getDisplayPositionLabel,
+  getSlotSideHint,
+  toCanonicalFc26Position,
+} from '../utils/formationPositions';
 import { resolvePlayerDisplayName } from '../utils/playerDisplayName';
+import {
+  evaluatePlayerEligibility,
+  suggestEligibleReplacements,
+  validateLineupEligibility,
+} from '../utils/squadEligibility';
 
 export function MatchPrepView() {
   const {
@@ -71,6 +85,8 @@ export function MatchPrepView() {
   // Preset selection + optional match-only override state (NEVER mutates saved club preset)
   const [selectedPresetId, setSelectedPresetId] = useState<string>(defaultPreset?.id ?? '');
   const [overrideEnabled, setOverrideEnabled] = useState(false);
+  const [showUnavailablePlayers, setShowUnavailablePlayers] = useState(false);
+  const [confirmDoubtful, setConfirmDoubtful] = useState(false);
 
   const [formation, setFormation] = useState(
     defaultPreset?.formationName ?? activeClub?.profile.primaryFormation ?? '4-3-3 Holding'
@@ -105,15 +121,18 @@ export function MatchPrepView() {
   );
 
   const getValidRolesForPosition = useCallback(
-    (positionCode: string): CatalogRole[] =>
-      catalogRoles.filter((r) => r.eligiblePositions.includes(positionCode)),
+    (positionCode: string): CatalogRole[] => {
+      const canonical = toCanonicalFc26Position(positionCode) ?? positionCode.toUpperCase();
+      return catalogRoles.filter((r) => r.eligiblePositions.includes(canonical));
+    },
     [catalogRoles]
   );
 
   const getValidFocusesForRole = useCallback(
     (roleName: string, positionCode: string): string[] => {
+      const canonical = toCanonicalFc26Position(positionCode) ?? positionCode.toUpperCase();
       const roleObj = catalogRoles.find((r) => r.name === roleName);
-      return roleObj?.compatibleFocusesByPosition[positionCode] ?? [];
+      return roleObj?.compatibleFocusesByPosition[canonical] ?? [];
     },
     [catalogRoles]
   );
@@ -129,27 +148,47 @@ export function MatchPrepView() {
         setBenchIds([]);
         const base = getFormationPositions(fallbackForm).map((s) => ({
           slotIndex: s.slotIndex,
-          positionCode: s.positionCode,
+          slotId:
+            s.slotId ||
+            deriveStableSlotId({
+              positionCode: s.positionCode,
+              positionLabel: s.positionLabel,
+              slotOrder: s.slotIndex,
+              x: s.x,
+            }),
+          positionCode: toCanonicalFc26Position(s.positionCode) ?? s.positionCode.toUpperCase(),
           playerId: null,
           playerName: null,
           role: s.defaultRole,
           focus: s.defaultFocus,
         }));
         setAssignments(base);
+        setConfirmDoubtful(false);
         return;
       }
 
+      const fallbackNodes = getFormationPositions(preset.formationName);
       setFormation(preset.formationName);
       setBuildUpStyle(preset.buildUpStyle);
       setDefensiveApproach(preset.defensiveApproach);
       setDefensiveLineHeight(preset.defensiveLineHeight);
       setBenchIds([...preset.benchPlayerIds]);
+      setConfirmDoubtful(false);
       setAssignments(
         preset.assignments.map((a) => {
           const p = a.playerId ? playerById.get(a.playerId) : undefined;
+          const fallbackSlot = fallbackNodes.find((s) => s.slotIndex === a.slotOrder);
           return {
             slotIndex: a.slotOrder,
-            positionCode: a.positionCode,
+            slotId:
+              a.slotId ||
+              fallbackSlot?.slotId ||
+              deriveStableSlotId({
+                positionCode: a.positionCode,
+                slotOrder: a.slotOrder,
+                x: fallbackSlot?.x,
+              }),
+            positionCode: toCanonicalFc26Position(a.positionCode) ?? a.positionCode.toUpperCase(),
             playerId: p ? p.id : a.playerId,
             playerName: p ? resolvePlayerDisplayName(p) : (a.playerDisplayName ?? null),
             role: a.role,
@@ -213,25 +252,45 @@ export function MatchPrepView() {
     [catalogFormations, formation]
   );
 
-  const availabilityWarnings = useMemo(() => {
-    const warnings: string[] = [];
+  const assignedIds = useMemo(
+    () => new Set(assignments.map((a) => a.playerId).filter((id): id is string => Boolean(id))),
+    [assignments]
+  );
+
+  const selectedDoubtfulIds = useMemo(() => {
+    const ids = new Set<string>();
     for (const a of assignments) {
       if (!a.playerId) continue;
       const p = playerById.get(a.playerId);
-      if (
-        p &&
-        (p.availability !== 'available' ||
-          p.squadStatus === 'loaned_out' ||
-          p.squadStatus === 'transferred_out' ||
-          p.squadStatus === 'released')
-      ) {
-        warnings.push(
-          `${resolvePlayerDisplayName(p)} (${a.positionCode}: ${p.availability !== 'available' ? p.availability : p.squadStatus.replace(/_/g, ' ')})`
-        );
-      }
+      if (p && evaluatePlayerEligibility(p).requiresConfirmation) ids.add(p.id);
     }
-    return warnings;
-  }, [assignments, playerById]);
+    for (const bId of benchIds) {
+      const p = playerById.get(bId);
+      if (p && evaluatePlayerEligibility(p).requiresConfirmation) ids.add(p.id);
+    }
+    return [...ids];
+  }, [assignments, benchIds, playerById]);
+
+  const confirmedDoubtfulIds = useMemo(
+    () => (confirmDoubtful ? selectedDoubtfulIds : []),
+    [confirmDoubtful, selectedDoubtfulIds]
+  );
+
+  const eligibilityReport = useMemo(
+    () =>
+      validateLineupEligibility({
+        clubPlayers: players,
+        assignments: assignments.map((a) => ({
+          slotOrder: a.slotIndex,
+          slotId: a.slotId,
+          positionCode: toCanonicalFc26Position(a.positionCode) ?? a.positionCode.toUpperCase(),
+          playerId: a.playerId,
+        })),
+        benchPlayerIds: benchIds,
+        confirmedDoubtfulPlayerIds: confirmedDoubtfulIds,
+      }),
+    [assignments, benchIds, confirmedDoubtfulIds, players]
+  );
 
   if (!activeClub) {
     return (
@@ -266,13 +325,29 @@ export function MatchPrepView() {
       catForm && catForm.slots.length === 11
         ? catForm.slots.map((s) => ({
             slotIndex: s.slotOrder,
-            positionCode: s.positionCode,
+            slotId:
+              s.slotId ||
+              deriveStableSlotId({
+                positionCode: s.positionCode,
+                positionLabel: s.positionLabel,
+                slotOrder: s.slotOrder,
+                x: s.x,
+              }),
+            positionCode: toCanonicalFc26Position(s.positionCode) ?? s.positionCode.toUpperCase(),
             defaultRole: '',
             defaultFocus: '',
           }))
         : getFormationPositions(nextFormation).map((s) => ({
             slotIndex: s.slotIndex,
-            positionCode: s.positionCode,
+            slotId:
+              s.slotId ||
+              deriveStableSlotId({
+                positionCode: s.positionCode,
+                positionLabel: s.positionLabel,
+                slotOrder: s.slotIndex,
+                x: s.x,
+              }),
+            positionCode: toCanonicalFc26Position(s.positionCode) ?? s.positionCode.toUpperCase(),
             defaultRole: s.defaultRole,
             defaultFocus: s.defaultFocus,
           }));
@@ -294,6 +369,7 @@ export function MatchPrepView() {
         }
         return {
           slotIndex: slot.slotIndex,
+          slotId: slot.slotId,
           positionCode: slot.positionCode,
           playerId: existing?.playerId ?? null,
           playerName: existing?.playerName ?? null,
@@ -305,9 +381,23 @@ export function MatchPrepView() {
   }
 
   function handleOverrideSlotPlayer(slotIndex: number, playerId: string) {
-    if (playerId && assignments.some((a) => a.slotIndex !== slotIndex && a.playerId === playerId)) {
-      notify('error', 'Player is already assigned in another Starting XI slot.');
-      return;
+    if (playerId) {
+      const p = playerById.get(playerId);
+      if (p) {
+        const evalRes = evaluatePlayerEligibility(p);
+        if (!evalRes.eligible) {
+          notify(
+            'error',
+            `${resolvePlayerDisplayName(p)} cannot be selected: ${evalRes.reasons.join(' ')}`
+          );
+          return;
+        }
+      }
+      if (assignments.some((a) => a.slotIndex !== slotIndex && a.playerId === playerId)) {
+        notify('error', 'Player is already assigned in another Starting XI slot.');
+        return;
+      }
+      setBenchIds((prev) => prev.filter((id) => id !== playerId));
     }
     const p = playerId ? playerById.get(playerId) : undefined;
     setAssignments((prev) =>
@@ -323,6 +413,11 @@ export function MatchPrepView() {
     );
   }
 
+  function handleRemoveIneligibleBenchPlayer(playerId: string) {
+    setOverrideEnabled(true);
+    setBenchIds((prev) => prev.filter((id) => id !== playerId));
+  }
+
   async function handleCreateMatch(e: React.FormEvent) {
     e.preventDefault();
     if (!activeClub) return;
@@ -333,6 +428,22 @@ export function MatchPrepView() {
     }
     if (opponentMode === 'existing' && !selectedOpponentId) {
       notify('error', 'Select an opponent or switch to entering a new opponent.');
+      return;
+    }
+
+    if (eligibilityReport.hasBlockingIssues) {
+      const first = eligibilityReport.issues[0];
+      notify(
+        'error',
+        `Match preparation blocked: ${first.playerDisplayName} (${first.reason}). Enable Match-Only Overrides to replace them.`
+      );
+      return;
+    }
+    if (eligibilityReport.hasUnconfirmedDoubtful) {
+      notify(
+        'error',
+        'Confirm doubtful player(s) using the confirmation checkbox before confirming the match.'
+      );
       return;
     }
 
@@ -353,6 +464,7 @@ export function MatchPrepView() {
         startingFormation: formation,
         startingXiIds,
         benchIds,
+        confirmedDoubtfulPlayerIds: confirmedDoubtfulIds,
         objective,
         preMatchNotes,
         sourcePresetId: selectedPreset?.id ?? null,
@@ -361,7 +473,10 @@ export function MatchPrepView() {
           buildUpStyle,
           defensiveApproach,
           defensiveLineHeight,
-          playerAssignments: assignments,
+          playerAssignments: assignments.map((a) => ({
+            ...a,
+            positionCode: toCanonicalFc26Position(a.positionCode) ?? a.positionCode.toUpperCase(),
+          })),
         },
       });
 
@@ -379,22 +494,32 @@ export function MatchPrepView() {
     }
   }
 
+  const canConfirmMatch =
+    !saving && !eligibilityReport.hasBlockingIssues && !eligibilityReport.hasUnconfirmedDoubtful;
+
   return (
     <form onSubmit={(e) => void handleCreateMatch(e)} className="space-y-6">
       <div className="flex flex-wrap items-end justify-between gap-4 border-b border-white/[0.08] pb-5">
         <div>
           <h1 className="text-[24px] font-bold text-white tracking-tight">Match Preparation</h1>
           <p className="mt-1 text-[14px] text-[#9AA4B4]">
-            Configure fixture details and select a saved Tactical Preset for {activeClub.name}.
-            Confirming creates an immutable Match Tactical Snapshot that locks when recording
+            Configure fixture details and select a validated Tactical Preset for {activeClub.name}.
+            Confirming freezes an immutable Match Tactical Snapshot that locks when recording
             starts.
           </p>
         </div>
 
         <button
           type="submit"
-          disabled={saving}
-          className="inline-flex items-center gap-1.5 px-4 py-2 rounded-md bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white text-[13px] font-medium transition-colors"
+          disabled={!canConfirmMatch}
+          title={
+            eligibilityReport.hasBlockingIssues
+              ? 'Resolve ineligible player(s) in the lineup before confirming this match'
+              : eligibilityReport.hasUnconfirmedDoubtful
+                ? 'Confirm doubtful player(s) before confirming this match'
+                : 'Confirm fixture and open Match Capture'
+          }
+          className="inline-flex items-center gap-1.5 px-4 py-2 rounded-md bg-emerald-600 hover:bg-emerald-500 disabled:opacity-45 text-white text-[13px] font-medium transition-colors"
         >
           Confirm Match &amp; Open Capture
           <ArrowRight className="w-4 h-4" />
@@ -613,14 +738,80 @@ export function MatchPrepView() {
               </div>
             )}
 
-            {availabilityWarnings.length > 0 && (
-              <div className="rounded-md border border-amber-500/35 bg-amber-500/[0.06] p-3 text-[12px] text-amber-100 flex items-start gap-2.5">
-                <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
-                <div>
-                  <span className="font-semibold">Unavailable Players in Lineup:</span>{' '}
-                  {availabilityWarnings.join(' · ')}. Enable match-only overrides below to swap
-                  replacements for this fixture without modifying your saved preset.
+            {/* Blocking Ineligible Players Error */}
+            {eligibilityReport.hasBlockingIssues && (
+              <div className="rounded-md border border-red-500/45 bg-red-500/[0.07] p-3.5 text-[12px] text-red-100 space-y-2">
+                <div className="flex items-start gap-2">
+                  <ShieldAlert className="w-4 h-4 text-red-400 shrink-0 mt-0.5" />
+                  <div>
+                    <span className="font-semibold">
+                      Match Preparation Blocked — Ineligible Player(s) in Lineup:
+                    </span>{' '}
+                    Replace them using Match-Only Overrides below (without altering your saved
+                    preset) or fix your preset in Tactical Setup.
+                  </div>
                 </div>
+                <ul className="space-y-1 pl-6">
+                  {eligibilityReport.issues.map((issue) => (
+                    <li
+                      key={`${issue.scope}-${issue.slotOrder ?? issue.playerId}`}
+                      className="flex flex-wrap items-center justify-between gap-2"
+                    >
+                      <span>
+                        <span className="font-mono text-red-300 mr-1.5">
+                          {issue.scope === 'starting_xi'
+                            ? getDisplayPositionLabel(issue.positionCode ?? '')
+                            : 'BENCH'}
+                        </span>
+                        <strong className="text-white">{issue.playerDisplayName}</strong> — {issue.reason}
+                      </span>
+                      {issue.scope === 'bench' ? (
+                        <button
+                          type="button"
+                          onClick={() => handleRemoveIneligibleBenchPlayer(issue.playerId)}
+                          className="px-2 py-0.5 rounded bg-red-500/20 hover:bg-red-500/35 text-red-200 text-[11px]"
+                        >
+                          Remove from Match Bench
+                        </button>
+                      ) : !overrideEnabled ? (
+                        <button
+                          type="button"
+                          onClick={() => setOverrideEnabled(true)}
+                          className="px-2 py-0.5 rounded bg-white/[0.1] hover:bg-white/[0.18] text-white text-[11px]"
+                        >
+                          Enable Override to Replace
+                        </button>
+                      ) : null}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+
+            {/* Doubtful Player Explicit Confirmation */}
+            {selectedDoubtfulIds.length > 0 && (
+              <div className="rounded-md border border-amber-500/40 bg-amber-500/[0.07] p-3.5 text-[12px] text-amber-100 space-y-2">
+                <div className="flex items-start gap-2">
+                  <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
+                  <div>
+                    <span className="font-semibold">Doubtful Player(s) in Matchday Squad:</span>{' '}
+                    {selectedDoubtfulIds
+                      .map((id) => {
+                        const p = playerById.get(id);
+                        return p ? `${resolvePlayerDisplayName(p)} (${p.position})` : id;
+                      })
+                      .join(' · ')}
+                  </div>
+                </div>
+                <label className="inline-flex items-center gap-2 pl-6 cursor-pointer font-medium">
+                  <input
+                    type="checkbox"
+                    checked={confirmDoubtful}
+                    onChange={(e) => setConfirmDoubtful(e.target.checked)}
+                    className="w-4 h-4 accent-amber-500"
+                  />
+                  Confirm doubtful player(s) for this match
+                </label>
               </div>
             )}
 
@@ -712,44 +903,138 @@ export function MatchPrepView() {
                     />
                   </div>
 
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-[11px] text-[#8A94A6]">
+                      Eligible squad players only · Canonical FC26 positions
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => setShowUnavailablePlayers((v) => !v)}
+                      className={`inline-flex items-center gap-1.5 px-2 py-1 rounded border text-[11px] ${
+                        showUnavailablePlayers
+                          ? 'border-amber-500/50 bg-amber-500/10 text-amber-200'
+                          : 'border-white/[0.12] bg-[#12151B] text-[#9AA4B4] hover:text-white'
+                      }`}
+                    >
+                      {showUnavailablePlayers ? (
+                        <Eye className="w-3 h-3" />
+                      ) : (
+                        <EyeOff className="w-3 h-3" />
+                      )}
+                      {showUnavailablePlayers ? 'Showing Unavailable' : 'Show Unavailable Players'}
+                    </button>
+                  </div>
+
                   <div className="overflow-x-auto">
                     <table className="w-full text-left text-[12px]">
                       <thead>
                         <tr className="border-b border-white/[0.08] text-[#7D8798]">
-                          <th className="py-1.5 pr-2">Slot</th>
+                          <th className="py-1.5 pr-2">Position</th>
                           <th className="py-1.5 pr-2">Player</th>
                           <th className="py-1.5">Role / Focus</th>
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-white/[0.06]">
-                        {assignments.map((slot) => (
-                          <tr key={slot.slotIndex}>
-                            <td className="py-1.5 pr-2 font-mono text-white">
-                              {slot.positionCode}
-                            </td>
-                            <td className="py-1.5 pr-2">
-                              <select
-                                value={slot.playerId ?? ''}
-                                onChange={(e) =>
-                                  handleOverrideSlotPlayer(slot.slotIndex, e.target.value)
-                                }
-                                className="w-full bg-[#12151B] border border-white/[0.1] rounded px-2 py-1 text-[12px] text-white"
-                              >
-                                <option value="">Unassigned</option>
-                                {players.map((p) => (
-                                  <option key={p.id} value={p.id}>
-                                    {resolvePlayerDisplayName(p)} ({p.position}
-                                    {p.overallRating ? ` · ${p.overallRating}` : ''})
-                                  </option>
-                                ))}
-                              </select>
-                            </td>
-                            <td className="py-1.5 text-[#9AA4B4]">
-                              {slot.role || 'Default'}
-                              {slot.focus ? ` (${slot.focus})` : ''}
-                            </td>
-                          </tr>
-                        ))}
+                        {assignments.map((slot) => {
+                          const canonicalPos =
+                            toCanonicalFc26Position(slot.positionCode) ??
+                            slot.positionCode.toUpperCase();
+                          const sideHint = getSlotSideHint(slot.slotId, canonicalPos);
+                          const currentPlayer = slot.playerId
+                            ? playerById.get(slot.playerId)
+                            : undefined;
+                          const currentEval = currentPlayer
+                            ? evaluatePlayerEligibility(currentPlayer)
+                            : null;
+                          const visibleOptions = players.filter((p) => {
+                            if (p.id === slot.playerId) return true;
+                            if (showUnavailablePlayers) return true;
+                            return evaluatePlayerEligibility(p).eligible;
+                          });
+                          const replacements =
+                            currentEval && !currentEval.eligible
+                              ? suggestEligibleReplacements(canonicalPos, players, assignedIds, 3)
+                              : [];
+
+                          return (
+                            <tr
+                              key={slot.slotIndex}
+                              className={
+                                currentEval && !currentEval.eligible
+                                  ? 'bg-red-500/[0.06]'
+                                  : undefined
+                              }
+                            >
+                              <td className="py-1.5 pr-2 align-top">
+                                <div className="font-mono text-white">
+                                  {getDisplayPositionLabel(canonicalPos)}
+                                </div>
+                                {sideHint && (
+                                  <div className="text-[10px] text-[#7D8798]">{sideHint}</div>
+                                )}
+                              </td>
+                              <td className="py-1.5 pr-2 align-top space-y-1">
+                                <select
+                                  value={slot.playerId ?? ''}
+                                  onChange={(e) =>
+                                    handleOverrideSlotPlayer(slot.slotIndex, e.target.value)
+                                  }
+                                  className={`w-full bg-[#12151B] border rounded px-2 py-1 text-[12px] text-white ${
+                                    currentEval && !currentEval.eligible
+                                      ? 'border-red-500/70'
+                                      : 'border-white/[0.1]'
+                                  }`}
+                                >
+                                  <option value="">Unassigned</option>
+                                  {visibleOptions.map((p) => {
+                                    const evalRes = evaluatePlayerEligibility(p);
+                                    const usedElsewhere =
+                                      assignedIds.has(p.id) && slot.playerId !== p.id;
+                                    const blocked = !evalRes.eligible && slot.playerId !== p.id;
+                                    return (
+                                      <option
+                                        key={p.id}
+                                        value={p.id}
+                                        disabled={usedElsewhere || blocked}
+                                      >
+                                        {resolvePlayerDisplayName(p)} ({p.position}
+                                        {p.overallRating ? ` · ${p.overallRating}` : ''})
+                                        {!evalRes.eligible
+                                          ? ` · [${evalRes.shortBadge.toUpperCase()}]`
+                                          : evalRes.requiresConfirmation
+                                            ? ' · [DOUBTFUL]'
+                                            : ''}
+                                        {usedElsewhere ? ' — In XI' : ''}
+                                      </option>
+                                    );
+                                  })}
+                                </select>
+                                {currentEval && !currentEval.eligible && replacements.length > 0 && (
+                                  <div className="flex flex-wrap items-center gap-1">
+                                    <span className="text-[10px] text-[#8A94A6]">Replace:</span>
+                                    {replacements.map((rep) => (
+                                      <button
+                                        key={rep.playerId}
+                                        type="button"
+                                        onClick={() =>
+                                          handleOverrideSlotPlayer(slot.slotIndex, rep.playerId)
+                                        }
+                                        className="px-1.5 py-0.5 rounded border border-emerald-500/40 bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-200 text-[10px]"
+                                      >
+                                        {rep.displayName} ({rep.position}
+                                        {rep.overallRating ? ` ${rep.overallRating}` : ''})
+                                      </button>
+                                    ))}
+                                  </div>
+                                )}
+                              </td>
+                              <td className="py-1.5 align-top text-[#9AA4B4]">
+                                {slot.role || 'Default'}
+                                {slot.focus ? ` (${slot.focus})` : ''}
+                              </td>
+                            </tr>
+                          );
+                        })}
                       </tbody>
                     </table>
                   </div>
@@ -765,21 +1050,42 @@ export function MatchPrepView() {
                   assigned)
                 </div>
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5 text-[12px]">
-                  {assignments.map((slot) => (
-                    <div
-                      key={slot.slotIndex}
-                      className="flex items-center justify-between px-2.5 py-1.5 rounded bg-[#0C0F14] border border-white/[0.06]"
-                    >
-                      <span className="font-mono text-[#8A94A6] w-10">{slot.positionCode}</span>
-                      <span className="text-white font-medium truncate flex-1">
-                        {slot.playerName || 'Unassigned'}
-                      </span>
-                      <span className="text-[11px] text-[#7D8798] truncate ml-2">
-                        {slot.role}
-                        {slot.focus ? ` · ${slot.focus}` : ''}
-                      </span>
-                    </div>
-                  ))}
+                  {assignments.map((slot) => {
+                    const p = slot.playerId ? playerById.get(slot.playerId) : undefined;
+                    const evalRes = p ? evaluatePlayerEligibility(p) : null;
+                    const canonicalPos =
+                      toCanonicalFc26Position(slot.positionCode) ??
+                      slot.positionCode.toUpperCase();
+                    const sideHint = getSlotSideHint(slot.slotId, canonicalPos);
+                    return (
+                      <div
+                        key={slot.slotIndex}
+                        className={`flex items-center justify-between px-2.5 py-1.5 rounded bg-[#0C0F14] border ${
+                          evalRes && !evalRes.eligible
+                            ? 'border-red-500/60'
+                            : evalRes?.requiresConfirmation
+                              ? 'border-amber-500/45'
+                              : 'border-white/[0.06]'
+                        }`}
+                      >
+                        <span className="font-mono text-[#8A94A6] w-14 shrink-0">
+                          {getDisplayPositionLabel(canonicalPos)}
+                          {sideHint ? (
+                            <span className="text-[9px] text-[#647082] ml-1">
+                              {sideHint.charAt(0)}
+                            </span>
+                          ) : null}
+                        </span>
+                        <span className="text-white font-medium truncate flex-1">
+                          {slot.playerName || 'Unassigned'}
+                        </span>
+                        <span className="text-[11px] text-[#7D8798] truncate ml-2">
+                          {slot.role}
+                          {slot.focus ? ` · ${slot.focus}` : ''}
+                        </span>
+                      </div>
+                    );
+                  })}
                 </div>
               </div>
             )}

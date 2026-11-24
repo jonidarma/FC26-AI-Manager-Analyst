@@ -93,6 +93,7 @@ export interface Player {
   secondaryPositions: string[];
   squadNumber: number | null;
   squadStatus: SquadStatus;
+  seniorSelectionAuthorized?: boolean;
   availability: PlayerAvailability;
   injuryStatus: string | null;
   suspensionStatus: string | null;
@@ -143,9 +144,43 @@ export interface DefaultRosterImportResult {
   message: string;
 }
 
+export type PlayerEligibilityStatus = 'eligible' | 'conditional_doubtful' | 'ineligible';
+
+export interface PlayerEligibilityEvaluation {
+  eligible: boolean;
+  status: PlayerEligibilityStatus;
+  requiresConfirmation: boolean;
+  reasons: string[];
+  shortBadge: string;
+}
+
+export interface LineupEligibilityIssue {
+  scope: 'starting_xi' | 'bench';
+  slotOrder: number | null;
+  slotId: string | null;
+  positionCode: string | null;
+  playerId: string;
+  playerDisplayName: string;
+  code: 'ineligible_player' | 'doubtful_player' | 'duplicate_assignment' | 'foreign_or_missing_player';
+  reason: string;
+}
+
+export interface LineupEligibilityReport {
+  validForMatchReady: boolean;
+  hasBlockingIssues: boolean;
+  hasUnconfirmedDoubtful: boolean;
+  assignedStartersCount: number;
+  issues: LineupEligibilityIssue[];
+  doubtfulUnconfirmed: LineupEligibilityIssue[];
+  doubtfulConfirmed: LineupEligibilityIssue[];
+}
+
+export type TacticalPresetStatus = 'draft' | 'match_ready';
+
 export interface TacticalPresetAssignment {
   id?: string;
   slotOrder: number;
+  slotId?: string | null;
   positionCode: string;
   playerId: string | null;
   playerDisplayName?: string | null;
@@ -157,6 +192,7 @@ export interface TacticalPreset {
   id: string;
   clubId: string;
   name: string;
+  presetStatus?: TacticalPresetStatus;
   formationId: string | null;
   formationName: string;
   buildUpStyle: string;
@@ -172,6 +208,7 @@ export interface TacticalPreset {
 
 export interface MatchTacticalSnapshotAssignment {
   slotOrder: number;
+  slotId?: string | null;
   positionCode: string;
   playerId: string | null;
   playerDisplayName: string | null;
@@ -225,6 +262,7 @@ export interface Opponent {
 
 export interface PlayerRoleAssignment {
   slotIndex: number;
+  slotId?: string | null;
   positionCode: string;
   playerId: string | null;
   playerName: string | null;
@@ -282,6 +320,27 @@ export type RecordingIntegrityStatus =
   | 'corrupted'
   | 'unverified';
 
+export type RecordingAnalysisState =
+  | 'not_ready'
+  | 'verified_awaiting_phase3'
+  | 'queued_for_analysis'
+  | 'analysis_completed';
+
+export type FootageSegmentCategory =
+  | 'live_gameplay'
+  | 'tactical_setup_screen'
+  | 'match_stats_screen'
+  | 'replay'
+  | 'cutscene'
+  | 'pause_menu'
+  | 'non_gameplay';
+
+export interface FootageClassificationPlaceholder {
+  status: 'unclassified_phase3_pending';
+  supportedCategories: FootageSegmentCategory[];
+  classifiedAt: string | null;
+}
+
 export interface MatchSession {
   id: string;
   matchId: string;
@@ -306,7 +365,9 @@ export interface MatchSession {
   audioEnabled?: boolean;
   outputDirectory?: string | null;
   integrityStatus?: RecordingIntegrityStatus;
+  /** True ONLY when media files passed FFprobe/size integrity checks; does NOT mean AI analysis completed. */
   aiEligible?: boolean;
+  analysisState?: RecordingAnalysisState;
   failureReason?: string | null;
   diagnosticsPath?: string | null;
   recoveryNotes?: string | null;
@@ -665,7 +726,12 @@ export interface RecordingPipelineDiagnostics {
   bytesReceivedMain: number;
   ffmpegPid: number | null;
   ffmpegState: 'idle' | 'starting' | 'running' | 'paused' | 'finalizing' | 'stopped' | 'error';
+  /** Cumulative FFmpeg stdin bytes written across the entire session (preserved across pause/resume & stop). */
   ffmpegStdinBytesWritten: number;
+  /** Current active FFmpeg child process stdin bytes (0 when paused or stopped). */
+  currentProcessStdinBytesWritten?: number;
+  /** Lifetime FFmpeg stdin bytes across all spawned FFmpeg processes in this session. */
+  lifetimeSessionStdinBytesWritten?: number;
   ffmpegExitCode: number | null;
   ffmpegExitSignal: string | null;
   queueSizeChunks: number;
@@ -826,6 +892,7 @@ export interface RecoveryExecutionResult {
 
 export interface PitchNodePosition {
   slotIndex: number;
+  slotId?: string;
   positionCode: string;
   positionLabel?: string;
   x: number; // 0 to 100 (left to right across pitch width)
@@ -902,8 +969,12 @@ export interface CatalogLeague {
   name: string;
   countryId: string | null;
   countryName: string;
+  region?: string;
   tier: number | null;
   category: 'mens' | 'womens' | 'mixed';
+  modeAvailability?: string;
+  datasetVersion?: string | null;
+  verificationStatus?: string;
   clubCount?: number;
   playerCount?: number;
 }
@@ -911,13 +982,24 @@ export interface CatalogLeague {
 export interface CatalogClub {
   id: string;
   externalSourceId: string;
+  sourceNamespace?: string;
+  externalTeamId?: string | null;
   name: string;
+  canonicalName?: string;
+  displayName?: string;
   shortName: string;
+  aliases?: string[];
   leagueId: string | null;
   leagueName: string | null;
   nationId: string | null;
   nationName: string | null;
+  region?: string;
   teamCategory: 'mens' | 'womens';
+  modeAvailability?: string;
+  sourceUrl?: string | null;
+  datasetVersion?: string | null;
+  importedAt?: string | null;
+  verificationStatus?: string;
   playerCount?: number;
 }
 
@@ -969,6 +1051,7 @@ export interface CatalogFormationSlot {
   id: string;
   formationId: string;
   slotOrder: number;
+  slotId?: string;
   positionCode: string;
   positionLabel: string;
   x: number;
@@ -1163,3 +1246,117 @@ export interface AiMatchTacticalContext {
   }>;
   validRolesByPosition: Record<string, Record<string, string[]>>;
 }
+
+export interface CatalogCoverageReport {
+  generatedAt: string;
+  datasetVersion: string | null;
+  counts: {
+    nations: number;
+    leagues: number;
+    mensLeagues: number;
+    womensLeagues: number;
+    clubs: number;
+    mensClubs: number;
+    womensClubs: number;
+    clubAliases: number;
+    players: number;
+    linkedPlayersToClub: number;
+    linkedPlayersToLeague: number;
+    linkedPlayersToNation: number;
+    freeAgentPlayers: number;
+    unresolvedClubPlayers: number;
+    unresolvedLeaguePlayers: number;
+    unresolvedNationPlayers: number;
+  };
+  premierLeagueVerification: {
+    leagueId: string | null;
+    leagueName: string | null;
+    clubCount: number;
+    expectedClubCount: number;
+    complete20Of20: boolean;
+    evertonPresent: boolean;
+    evertonClubId: string | null;
+    evertonPlayerCount: number;
+    clubs: Array<{
+      id: string;
+      name: string;
+      externalTeamId: string | null;
+      playerCount: number;
+    }>;
+  };
+  coverageByRegion: Array<{
+    region: string;
+    leagueCount: number;
+    clubCount: number;
+    playerCount: number;
+  }>;
+  leagueBreakdown: Array<{
+    leagueId: string;
+    externalSourceId: string;
+    name: string;
+    countryName: string;
+    region: string;
+    category: 'mens' | 'womens' | 'mixed';
+    tier: number | null;
+    clubCount: number;
+    playerCount: number;
+  }>;
+  unresolvedClubMappings: Array<{
+    clubTeamId: string | null;
+    clubNameRaw: string;
+    leagueIdRaw: string | null;
+    leagueNameRaw: string;
+    playerCount: number;
+  }>;
+  duplicateClubChecks: Array<{
+    name: string;
+    leagueName: string | null;
+    count: number;
+  }>;
+  sourceCoverageNotices: string[];
+}
+
+export interface CatalogReconcilePreview {
+  sourcePlayerCount: number;
+  distinctNationsInPlayers: number;
+  distinctLeaguesInPlayers: number;
+  distinctClubsInPlayers: number;
+  freeAgentPlayers: number;
+  nationsToInsert: number;
+  nationsToUpdate: number;
+  leaguesToInsert: number;
+  leaguesToUpdate: number;
+  clubsToInsert: number;
+  clubsToUpdate: number;
+  clubAliasesToInsert: number;
+  playersToRelinkClub: number;
+  playersToRelinkLeague: number;
+  playersToRelinkNation: number;
+  premierLeagueClubsAfter: number;
+  evertonFoundInSource: boolean;
+  sampleNewClubs: Array<{
+    externalTeamId: string;
+    name: string;
+    leagueName: string;
+    playerCount: number;
+  }>;
+  warnings: string[];
+}
+
+export interface CatalogReconcileResult {
+  runId: string;
+  executedAt: string;
+  nationsInserted: number;
+  nationsUpdated: number;
+  leaguesInserted: number;
+  leaguesUpdated: number;
+  clubsInserted: number;
+  clubsUpdated: number;
+  clubAliasesInserted: number;
+  playersRelinkedClub: number;
+  playersRelinkedLeague: number;
+  playersRelinkedNation: number;
+  playersPreservedCount: number;
+  coverageAfter: CatalogCoverageReport;
+}
+

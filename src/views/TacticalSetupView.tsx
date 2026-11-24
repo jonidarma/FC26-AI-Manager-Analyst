@@ -1,10 +1,14 @@
 import {
   AlertTriangle,
+  CheckCircle2,
   Copy,
+  Eye,
+  EyeOff,
   Plus,
   RotateCcw,
   Save,
   Search,
+  ShieldAlert,
   Star,
   Trash2,
 } from 'lucide-react';
@@ -16,11 +20,23 @@ import { desktopBridge } from '../services/desktopBridge';
 import type {
   CatalogFormation,
   CatalogRole,
-  Player,
   PlayerRoleAssignment,
   TacticalPreset,
+  TacticalPresetStatus,
 } from '../types/domain';
+import {
+  deriveStableSlotId,
+  getDisplayPositionLabel,
+  getSlotSideHint,
+  toCanonicalFc26Position,
+} from '../utils/formationPositions';
 import { resolvePlayerDisplayName } from '../utils/playerDisplayName';
+import {
+  evaluatePlayerEligibility,
+  suggestEligibleReplacements,
+  summarizeSquadEligibility,
+  validateLineupEligibility,
+} from '../utils/squadEligibility';
 
 interface PresetDraft {
   id: string | null; // null when creating a brand-new unsaved preset
@@ -31,6 +47,7 @@ interface PresetDraft {
   defensiveApproach: string;
   defensiveLineHeight: number;
   isDefault: boolean;
+  presetStatus: TacticalPresetStatus;
   benchPlayerIds: string[];
   notes: string;
   assignments: PlayerRoleAssignment[];
@@ -43,25 +60,18 @@ function serializeDraft(d: PresetDraft): string {
     buildUpStyle: d.buildUpStyle,
     defensiveApproach: d.defensiveApproach,
     defensiveLineHeight: d.defensiveLineHeight,
+    presetStatus: d.presetStatus,
     benchPlayerIds: [...d.benchPlayerIds],
     notes: d.notes.trim(),
     assignments: d.assignments.map((a) => ({
       slotIndex: a.slotIndex,
-      positionCode: a.positionCode,
+      slotId: a.slotId ?? '',
+      positionCode: toCanonicalFc26Position(a.positionCode),
       playerId: a.playerId,
       role: a.role,
       focus: a.focus,
     })),
   });
-}
-
-function isPlayerMatchdayUnavailable(p: Player): boolean {
-  return (
-    p.availability !== 'available' ||
-    p.squadStatus === 'loaned_out' ||
-    p.squadStatus === 'transferred_out' ||
-    p.squadStatus === 'released'
-  );
 }
 
 export function TacticalSetupView() {
@@ -82,6 +92,8 @@ export function TacticalSetupView() {
   const [draft, setDraft] = useState<PresetDraft | null>(null);
   const [savedSignature, setSavedSignature] = useState<string>('');
   const [squadFilter, setSquadFilter] = useState('');
+  const [showUnavailablePlayers, setShowUnavailablePlayers] = useState(false);
+  const [confirmDoubtful, setConfirmDoubtful] = useState(false);
   const [saving, setSaving] = useState(false);
   const [confirmReset, setConfirmReset] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<TacticalPreset | null>(null);
@@ -123,17 +135,21 @@ export function TacticalSetupView() {
   );
 
   const playerById = useMemo(() => new Map(players.map((p) => [p.id, p])), [players]);
+  const squadEligibilitySummary = useMemo(() => summarizeSquadEligibility(players), [players]);
 
   const getValidRolesForPosition = useCallback(
-    (positionCode: string): CatalogRole[] =>
-      catalogRoles.filter((r) => r.eligiblePositions.includes(positionCode)),
+    (positionCode: string): CatalogRole[] => {
+      const canonical = toCanonicalFc26Position(positionCode) ?? positionCode.toUpperCase();
+      return catalogRoles.filter((r) => r.eligiblePositions.includes(canonical));
+    },
     [catalogRoles]
   );
 
   const getValidFocusesForRole = useCallback(
     (roleName: string, positionCode: string): string[] => {
+      const canonical = toCanonicalFc26Position(positionCode) ?? positionCode.toUpperCase();
       const roleObj = catalogRoles.find((r) => r.name === roleName);
-      return roleObj?.compatibleFocusesByPosition[positionCode] ?? [];
+      return roleObj?.compatibleFocusesByPosition[canonical] ?? [];
     },
     [catalogRoles]
   );
@@ -145,13 +161,29 @@ export function TacticalSetupView() {
         catForm && catForm.slots.length === 11
           ? catForm.slots.map((s) => ({
               slotIndex: s.slotOrder,
-              positionCode: s.positionCode,
+              slotId:
+                s.slotId ||
+                deriveStableSlotId({
+                  positionCode: s.positionCode,
+                  positionLabel: s.positionLabel,
+                  slotOrder: s.slotOrder,
+                  x: s.x,
+                }),
+              positionCode: toCanonicalFc26Position(s.positionCode) ?? s.positionCode.toUpperCase(),
               defaultRole: '',
               defaultFocus: '',
             }))
           : getFormationPositions(formationName).map((s) => ({
               slotIndex: s.slotIndex,
-              positionCode: s.positionCode,
+              slotId:
+                s.slotId ||
+                deriveStableSlotId({
+                  positionCode: s.positionCode,
+                  positionLabel: s.positionLabel,
+                  slotOrder: s.slotIndex,
+                  x: s.x,
+                }),
+              positionCode: toCanonicalFc26Position(s.positionCode) ?? s.positionCode.toUpperCase(),
               defaultRole: s.defaultRole,
               defaultFocus: s.defaultFocus,
             }));
@@ -173,6 +205,7 @@ export function TacticalSetupView() {
         const assignedPlayer = prev?.playerId ? playerById.get(prev.playerId) : undefined;
         return {
           slotIndex: slot.slotIndex,
+          slotId: slot.slotId,
           positionCode: slot.positionCode,
           playerId: assignedPlayer ? assignedPlayer.id : null,
           playerName: assignedPlayer ? resolvePlayerDisplayName(assignedPlayer) : null,
@@ -186,11 +219,27 @@ export function TacticalSetupView() {
 
   const presetToDraft = useCallback(
     (preset: TacticalPreset): PresetDraft => {
+      const catForm = catalogFormations.find((f) => f.name === preset.formationName);
+      const fallbackNodes = getFormationPositions(preset.formationName);
       const mappedAssignments: PlayerRoleAssignment[] = preset.assignments.map((a) => {
         const p = a.playerId ? playerById.get(a.playerId) : undefined;
+        const catSlot = catForm?.slots.find((s) => s.slotOrder === a.slotOrder);
+        const fallbackSlot = fallbackNodes.find((s) => s.slotIndex === a.slotOrder);
+        const canonicalPos =
+          toCanonicalFc26Position(a.positionCode) ?? a.positionCode.toUpperCase();
+        const slotId =
+          a.slotId ||
+          catSlot?.slotId ||
+          fallbackSlot?.slotId ||
+          deriveStableSlotId({
+            positionCode: a.positionCode,
+            slotOrder: a.slotOrder,
+            x: catSlot?.x ?? fallbackSlot?.x,
+          });
         return {
           slotIndex: a.slotOrder,
-          positionCode: a.positionCode,
+          slotId,
+          positionCode: canonicalPos,
           playerId: p ? p.id : null,
           playerName: p ? resolvePlayerDisplayName(p) : (a.playerDisplayName ?? null),
           role: a.role,
@@ -210,12 +259,13 @@ export function TacticalSetupView() {
         defensiveApproach: preset.defensiveApproach,
         defensiveLineHeight: preset.defensiveLineHeight,
         isDefault: preset.isDefault,
+        presetStatus: preset.presetStatus ?? 'match_ready',
         benchPlayerIds: preset.benchPlayerIds.filter((id) => playerById.has(id)),
         notes: preset.notes,
         assignments: completeAssignments,
       };
     },
-    [buildSlotsForFormation, playerById]
+    [buildSlotsForFormation, catalogFormations, playerById]
   );
 
   const buildBlankDraft = useCallback((): PresetDraft => {
@@ -223,13 +273,17 @@ export function TacticalSetupView() {
     const catForm = catalogFormations.find((f) => f.name === formationName);
     return {
       id: null,
-      name: tacticalPresets.length === 0 ? 'Primary Matchday Setup' : `Tactical Setup #${tacticalPresets.length + 1}`,
+      name:
+        tacticalPresets.length === 0
+          ? 'Primary Matchday Setup'
+          : `Tactical Setup #${tacticalPresets.length + 1}`,
       formationId: catForm?.id ?? null,
       formationName,
       buildUpStyle: activeClub?.profile.preferredAttackingStyle || 'Balanced',
       defensiveApproach: activeClub?.profile.preferredDefensiveStyle || 'Balanced',
       defensiveLineHeight: 55,
       isDefault: tacticalPresets.length === 0,
+      presetStatus: 'match_ready',
       benchPlayerIds: [],
       notes: '',
       assignments: buildSlotsForFormation(formationName),
@@ -242,6 +296,7 @@ export function TacticalSetupView() {
       setSelectedPresetId(null);
       setDraft(null);
       setSavedSignature('');
+      setConfirmDoubtful(false);
       return;
     }
 
@@ -255,86 +310,180 @@ export function TacticalSetupView() {
         setSelectedPresetId(target.id);
         setDraft(nextDraft);
         setSavedSignature(serializeDraft(nextDraft));
+        setConfirmDoubtful(false);
       }
     } else if (!draft) {
       const blank = buildBlankDraft();
       setSelectedPresetId(null);
       setDraft(blank);
       setSavedSignature(serializeDraft(blank));
+      setConfirmDoubtful(false);
     }
   }, [activeClub?.id, tacticalPresets]);
+
+  const assignedIds = useMemo(
+    () =>
+      new Set(
+        (draft?.assignments ?? []).map((a) => a.playerId).filter((id): id is string => Boolean(id))
+      ),
+    [draft?.assignments]
+  );
+
+  const selectedDoubtfulIds = useMemo(() => {
+    if (!draft) return [];
+    const ids = new Set<string>();
+    for (const a of draft.assignments) {
+      if (!a.playerId) continue;
+      const p = playerById.get(a.playerId);
+      if (p && evaluatePlayerEligibility(p).requiresConfirmation) ids.add(p.id);
+    }
+    for (const bId of draft.benchPlayerIds) {
+      const p = playerById.get(bId);
+      if (p && evaluatePlayerEligibility(p).requiresConfirmation) ids.add(p.id);
+    }
+    return [...ids];
+  }, [draft, playerById]);
+
+  const confirmedDoubtfulIds = useMemo(
+    () => (confirmDoubtful ? selectedDoubtfulIds : []),
+    [confirmDoubtful, selectedDoubtfulIds]
+  );
+
+  const eligibilityReport = useMemo(() => {
+    if (!draft) return null;
+    return validateLineupEligibility({
+      clubPlayers: players,
+      assignments: draft.assignments.map((a) => ({
+        slotOrder: a.slotIndex,
+        slotId: a.slotId,
+        positionCode: toCanonicalFc26Position(a.positionCode) ?? a.positionCode.toUpperCase(),
+        playerId: a.playerId,
+      })),
+      benchPlayerIds: draft.benchPlayerIds,
+      confirmedDoubtfulPlayerIds: confirmedDoubtfulIds,
+    });
+  }, [draft, players, confirmedDoubtfulIds]);
 
   const isDirty = useMemo(() => {
     if (!draft) return false;
     if (draft.id === null) {
-      return serializeDraft(draft) !== savedSignature || draft.assignments.some((a) => a.playerId !== null);
+      return (
+        serializeDraft(draft) !== savedSignature ||
+        draft.assignments.some((a) => a.playerId !== null)
+      );
     }
     return serializeDraft(draft) !== savedSignature;
   }, [draft, savedSignature]);
 
-  const handleSaveDraft = useCallback(async (): Promise<boolean> => {
-    if (!activeClub || !draft) return false;
-    if (!draft.name.trim()) {
-      notify('error', 'Tactical preset name is required.');
-      return false;
-    }
+  const handleSaveDraft = useCallback(
+    async (requestedStatus: TacticalPresetStatus = 'match_ready'): Promise<boolean> => {
+      if (!activeClub || !draft) return false;
+      if (!draft.name.trim()) {
+        notify('error', 'Tactical preset name is required.');
+        return false;
+      }
 
-    // Prevent duplicate players in Starting XI
-    const seen = new Set<string>();
-    for (const a of draft.assignments) {
-      if (a.playerId) {
-        if (seen.has(a.playerId)) {
-          notify('error', 'Duplicate player detected in Starting XI. Each player can occupy only one slot.');
+      // Prevent duplicate players in Starting XI
+      const seen = new Set<string>();
+      for (const a of draft.assignments) {
+        if (a.playerId) {
+          if (seen.has(a.playerId)) {
+            notify(
+              'error',
+              'Duplicate player detected in Starting XI. Each player can occupy only one slot.'
+            );
+            return false;
+          }
+          seen.add(a.playerId);
+        }
+      }
+
+      if (requestedStatus === 'match_ready' && eligibilityReport) {
+        if (eligibilityReport.hasBlockingIssues) {
+          const first = eligibilityReport.issues[0];
+          notify(
+            'error',
+            `Cannot confirm match-ready setup: ${first.playerDisplayName} (${first.reason}). Replace ineligible players or save as Draft.`
+          );
           return false;
         }
-        seen.add(a.playerId);
-      }
-    }
-
-    setSaving(true);
-    try {
-      const payload = {
-        name: draft.name.trim(),
-        formationId:
-          catalogFormations.find((f) => f.name === draft.formationName)?.id ?? draft.formationId,
-        formationName: draft.formationName,
-        buildUpStyle: draft.buildUpStyle,
-        defensiveApproach: draft.defensiveApproach,
-        defensiveLineHeight: draft.defensiveLineHeight,
-        isDefault: draft.isDefault,
-        benchPlayerIds: draft.benchPlayerIds.filter((id) => !seen.has(id)),
-        notes: draft.notes,
-        assignments: draft.assignments.map((a) => ({
-          slotOrder: a.slotIndex,
-          positionCode: a.positionCode,
-          playerId: a.playerId,
-          role: a.role,
-          focus: a.focus,
-        })),
-      };
-
-      let saved: TacticalPreset;
-      if (draft.id) {
-        saved = await desktopBridge.updateTacticalPreset(draft.id, payload);
-        notify('success', `Saved tactical preset "${saved.name}".`);
-      } else {
-        saved = await desktopBridge.createTacticalPreset(activeClub.id, payload);
-        notify('success', `Created tactical preset "${saved.name}".`);
+        if (eligibilityReport.hasUnconfirmedDoubtful) {
+          notify(
+            'error',
+            'Confirm doubtful player(s) using the confirmation checkbox before saving as Match-Ready.'
+          );
+          return false;
+        }
       }
 
-      const nextDraft = presetToDraft(saved);
-      setSelectedPresetId(saved.id);
-      setDraft(nextDraft);
-      setSavedSignature(serializeDraft(nextDraft));
-      await refreshAll();
-      return true;
-    } catch (err) {
-      notify('error', err instanceof Error ? err.message : 'Failed to save tactical preset');
-      return false;
-    } finally {
-      setSaving(false);
-    }
-  }, [activeClub, catalogFormations, draft, notify, presetToDraft, refreshAll]);
+      setSaving(true);
+      try {
+        const payload = {
+          name: draft.name.trim(),
+          formationId:
+            catalogFormations.find((f) => f.name === draft.formationName)?.id ?? draft.formationId,
+          formationName: draft.formationName,
+          buildUpStyle: draft.buildUpStyle,
+          defensiveApproach: draft.defensiveApproach,
+          defensiveLineHeight: draft.defensiveLineHeight,
+          isDefault: draft.isDefault,
+          presetStatus: requestedStatus,
+          benchPlayerIds: draft.benchPlayerIds.filter((id) => !seen.has(id)),
+          confirmedDoubtfulPlayerIds: confirmedDoubtfulIds,
+          notes: draft.notes,
+          assignments: draft.assignments.map((a) => ({
+            slotOrder: a.slotIndex,
+            slotId: a.slotId,
+            positionCode: toCanonicalFc26Position(a.positionCode) ?? a.positionCode.toUpperCase(),
+            playerId: a.playerId,
+            role: a.role,
+            focus: a.focus,
+          })),
+        };
+
+        let saved: TacticalPreset;
+        if (draft.id) {
+          saved = await desktopBridge.updateTacticalPreset(draft.id, payload);
+          notify(
+            'success',
+            requestedStatus === 'draft'
+              ? `Saved draft tactical preset "${saved.name}".`
+              : `Saved match-ready tactical preset "${saved.name}".`
+          );
+        } else {
+          saved = await desktopBridge.createTacticalPreset(activeClub.id, payload);
+          notify(
+            'success',
+            requestedStatus === 'draft'
+              ? `Created draft tactical preset "${saved.name}".`
+              : `Created match-ready tactical preset "${saved.name}".`
+          );
+        }
+
+        const nextDraft = presetToDraft(saved);
+        setSelectedPresetId(saved.id);
+        setDraft(nextDraft);
+        setSavedSignature(serializeDraft(nextDraft));
+        await refreshAll();
+        return true;
+      } catch (err) {
+        notify('error', err instanceof Error ? err.message : 'Failed to save tactical preset');
+        return false;
+      } finally {
+        setSaving(false);
+      }
+    },
+    [
+      activeClub,
+      catalogFormations,
+      confirmedDoubtfulIds,
+      draft,
+      eligibilityReport,
+      notify,
+      presetToDraft,
+      refreshAll,
+    ]
+  );
 
   const handleDiscardChanges = useCallback(() => {
     if (selectedPresetId) {
@@ -343,12 +492,14 @@ export function TacticalSetupView() {
         const restored = presetToDraft(savedPreset);
         setDraft(restored);
         setSavedSignature(serializeDraft(restored));
+        setConfirmDoubtful(false);
         return;
       }
     }
     const blank = buildBlankDraft();
     setDraft(blank);
     setSavedSignature(serializeDraft(blank));
+    setConfirmDoubtful(false);
   }, [buildBlankDraft, presetToDraft, selectedPresetId, tacticalPresets]);
 
   // Register global dirty-state navigation guard with AppContext
@@ -363,28 +514,14 @@ export function TacticalSetupView() {
         ? {
             isDirty: true,
             label: `Tactical Setup (${draft?.name || 'Unsaved Preset'})`,
-            onSave: () => saveRef.current(),
+            onSave: () =>
+              saveRef.current(eligibilityReport?.hasBlockingIssues ? 'draft' : 'match_ready'),
             onDiscard: () => discardRef.current(),
           }
         : null
     );
     return () => registerDirtyGuard(null);
-  }, [isDirty, draft?.name, registerDirtyGuard]);
-
-  const unavailableWarnings = useMemo(() => {
-    if (!draft) return [];
-    const warnings: string[] = [];
-    for (const a of draft.assignments) {
-      if (!a.playerId) continue;
-      const p = playerById.get(a.playerId);
-      if (p && isPlayerMatchdayUnavailable(p)) {
-        warnings.push(
-          `${resolvePlayerDisplayName(p)} (${a.positionCode}): ${p.availability !== 'available' ? p.availability : p.squadStatus.replace(/_/g, ' ')}`
-        );
-      }
-    }
-    return warnings;
-  }, [draft, playerById]);
+  }, [isDirty, draft?.name, eligibilityReport?.hasBlockingIssues, registerDirtyGuard]);
 
   const selectedCatalogFormation = useMemo(
     () => (draft ? catalogFormations.find((f) => f.name === draft.formationName) ?? null : null),
@@ -393,14 +530,20 @@ export function TacticalSetupView() {
 
   const filteredSquadPlayers = useMemo(() => {
     const q = squadFilter.trim().toLowerCase();
-    if (!q) return players;
-    return players.filter(
-      (p) =>
-        p.displayName.toLowerCase().includes(q) ||
-        p.fullName.toLowerCase().includes(q) ||
-        p.position.toLowerCase().includes(q)
-    );
-  }, [players, squadFilter]);
+    return players.filter((p) => {
+      if (q) {
+        const matches =
+          p.displayName.toLowerCase().includes(q) ||
+          p.fullName.toLowerCase().includes(q) ||
+          p.position.toLowerCase().includes(q);
+        if (!matches) return false;
+      }
+      if (!showUnavailablePlayers) {
+        return evaluatePlayerEligibility(p).eligible;
+      }
+      return true;
+    });
+  }, [players, squadFilter, showUnavailablePlayers]);
 
   if (!activeClub) {
     return (
@@ -429,6 +572,7 @@ export function TacticalSetupView() {
     setSelectedPresetId(preset.id);
     setDraft(nextDraft);
     setSavedSignature(serializeDraft(nextDraft));
+    setConfirmDoubtful(false);
   }
 
   function handleNewPreset() {
@@ -440,6 +584,7 @@ export function TacticalSetupView() {
     setSelectedPresetId(null);
     setDraft(blank);
     setSavedSignature(serializeDraft(blank));
+    setConfirmDoubtful(false);
   }
 
   async function handleDuplicatePreset(preset: TacticalPreset) {
@@ -450,6 +595,7 @@ export function TacticalSetupView() {
       setSelectedPresetId(dup.id);
       setDraft(nextDraft);
       setSavedSignature(serializeDraft(nextDraft));
+      setConfirmDoubtful(false);
       notify('success', `Duplicated preset as "${dup.name}".`);
     } catch (err) {
       notify('error', err instanceof Error ? err.message : 'Failed to duplicate preset');
@@ -521,6 +667,18 @@ export function TacticalSetupView() {
       return;
     }
 
+    const found = playerById.get(playerId);
+    if (!found) return;
+
+    const evalRes = evaluatePlayerEligibility(found);
+    if (!evalRes.eligible) {
+      notify(
+        'error',
+        `${resolvePlayerDisplayName(found)} cannot be assigned: ${evalRes.reasons.join(' ')}`
+      );
+      return;
+    }
+
     // Prevent duplicate assignment across slots
     const existingSlot = draft.assignments.find(
       (a) => a.slotIndex !== slot.slotIndex && a.playerId === playerId
@@ -528,20 +686,22 @@ export function TacticalSetupView() {
     if (existingSlot) {
       notify(
         'error',
-        `Player is already assigned to ${existingSlot.positionCode}. Remove them from that slot first.`
+        `Player is already assigned to ${getDisplayPositionLabel(existingSlot.positionCode)}. Remove them from that slot first.`
       );
       return;
     }
 
-    const found = playerById.get(playerId);
-    if (!found) return;
-
-    const validRoles = getValidRolesForPosition(slot.positionCode);
+    const canonicalPos =
+      toCanonicalFc26Position(slot.positionCode) ?? slot.positionCode.toUpperCase();
+    const validRoles = getValidRolesForPosition(canonicalPos);
     let nextRole = slot.role;
     let nextFocus = slot.focus;
-    if (found.playerRole && (validRoles.length === 0 || validRoles.some((r) => r.name === found.playerRole))) {
+    if (
+      found.playerRole &&
+      (validRoles.length === 0 || validRoles.some((r) => r.name === found.playerRole))
+    ) {
       nextRole = found.playerRole;
-      const validFocuses = getValidFocusesForRole(nextRole, slot.positionCode);
+      const validFocuses = getValidFocusesForRole(nextRole, canonicalPos);
       if (validFocuses.length > 0) {
         nextFocus =
           found.playerFocus && validFocuses.includes(found.playerFocus)
@@ -557,6 +717,7 @@ export function TacticalSetupView() {
         a.slotIndex === slot.slotIndex
           ? {
               ...a,
+              positionCode: canonicalPos,
               playerId: found.id,
               playerName: resolvePlayerDisplayName(found),
               role: nextRole,
@@ -580,16 +741,34 @@ export function TacticalSetupView() {
 
   function toggleBenchPlayer(playerId: string) {
     if (!draft) return;
+    if (draft.benchPlayerIds.includes(playerId)) {
+      setDraft({
+        ...draft,
+        benchPlayerIds: draft.benchPlayerIds.filter((id) => id !== playerId),
+      });
+      return;
+    }
+    const found = playerById.get(playerId);
+    if (!found) return;
+    const evalRes = evaluatePlayerEligibility(found);
+    if (!evalRes.eligible) {
+      notify(
+        'error',
+        `${resolvePlayerDisplayName(found)} cannot be added to the bench: ${evalRes.reasons.join(' ')}`
+      );
+      return;
+    }
     setDraft({
       ...draft,
-      benchPlayerIds: draft.benchPlayerIds.includes(playerId)
-        ? draft.benchPlayerIds.filter((id) => id !== playerId)
-        : [...draft.benchPlayerIds, playerId].slice(0, 9),
+      benchPlayerIds: [...draft.benchPlayerIds, playerId].slice(0, 9),
     });
   }
 
-  const assignedIds = new Set(
-    (draft?.assignments ?? []).map((a) => a.playerId).filter((id): id is string => Boolean(id))
+  const canSaveMatchReady = Boolean(
+    draft &&
+      !saving &&
+      (!eligibilityReport ||
+        (!eligibilityReport.hasBlockingIssues && !eligibilityReport.hasUnconfirmedDoubtful))
   );
 
   return (
@@ -597,7 +776,7 @@ export function TacticalSetupView() {
       {/* Header */}
       <div className="flex flex-wrap items-end justify-between gap-4 border-b border-white/[0.08] pb-5">
         <div>
-          <div className="flex items-center gap-3">
+          <div className="flex items-center gap-3 flex-wrap">
             <h1 className="text-[24px] font-bold text-white tracking-tight">
               Tactical Setup — {activeClub.name}
             </h1>
@@ -606,11 +785,20 @@ export function TacticalSetupView() {
                 Unsaved Changes
               </span>
             )}
+            {draft && eligibilityReport?.hasBlockingIssues && (
+              <span className="px-2 py-0.5 rounded border border-red-500/45 bg-red-500/10 text-[11px] font-medium text-red-300">
+                Ineligible Player(s) in Lineup
+              </span>
+            )}
+            {draft && !eligibilityReport?.hasBlockingIssues && draft.presetStatus === 'draft' && (
+              <span className="px-2 py-0.5 rounded border border-white/[0.18] bg-white/[0.05] text-[11px] font-medium text-[#C5CCD7]">
+                Draft
+              </span>
+            )}
           </div>
           <p className="mt-1 text-[14px] text-[#9AA4B4]">
-            Create and maintain persistent club Tactical Presets with FC26-validated formations,
-            Starting XI assignments, and FC IQ roles &amp; focuses. Match Preparation loads your
-            default preset automatically.
+            Maintain persistent club Tactical Presets with canonical EA SPORTS FC 26 positions,
+            FC IQ roles &amp; focuses, and centralized squad matchday eligibility validation.
           </p>
         </div>
 
@@ -632,10 +820,28 @@ export function TacticalSetupView() {
             <RotateCcw className="w-3.5 h-3.5" />
             Reset
           </button>
+          {eligibilityReport?.hasBlockingIssues && (
+            <button
+              type="button"
+              disabled={saving || !draft}
+              onClick={() => void handleSaveDraft('draft')}
+              className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-md border border-amber-500/50 bg-amber-500/10 hover:bg-amber-500/20 disabled:opacity-45 text-amber-200 text-[13px] font-medium"
+            >
+              <Save className="w-4 h-4" />
+              Save as Draft
+            </button>
+          )}
           <button
             type="button"
-            disabled={saving || !draft}
-            onClick={() => void handleSaveDraft()}
+            disabled={!canSaveMatchReady}
+            onClick={() => void handleSaveDraft('match_ready')}
+            title={
+              eligibilityReport?.hasBlockingIssues
+                ? 'Replace or remove ineligible players before confirming as Match-Ready'
+                : eligibilityReport?.hasUnconfirmedDoubtful
+                  ? 'Confirm doubtful player(s) below before saving as Match-Ready'
+                  : 'Save validated match-ready tactical preset'
+            }
             className="inline-flex items-center gap-1.5 px-4 py-2 rounded-md bg-emerald-600 hover:bg-emerald-500 disabled:opacity-45 text-white text-[13px] font-medium"
           >
             <Save className="w-4 h-4" />
@@ -646,13 +852,21 @@ export function TacticalSetupView() {
 
       {/* Saved Tactical Presets Strip */}
       <section className="border border-white/[0.08] bg-[#12151B] rounded-lg p-4 space-y-3">
-        <div className="flex items-center justify-between text-[12px]">
+        <div className="flex flex-wrap items-center justify-between gap-2 text-[12px]">
           <span className="font-semibold text-white">
             Saved Club Tactical Presets ({tacticalPresets.length})
           </span>
-          <span className="text-[#8A94A6]">
-            Select a preset to edit, duplicate, or set as matchday default
-          </span>
+          <div className="flex flex-wrap items-center gap-3 text-[11px] font-mono tabular-nums">
+            <span className="text-emerald-400">
+              {squadEligibilitySummary.eligibleCount} Eligible
+            </span>
+            <span className="text-amber-300">
+              {squadEligibilitySummary.doubtfulCount} Doubtful
+            </span>
+            <span className="text-red-300">
+              {squadEligibilitySummary.ineligibleCount} Unavailable / Out
+            </span>
+          </div>
         </div>
 
         {tacticalPresets.length > 0 ? (
@@ -660,6 +874,18 @@ export function TacticalSetupView() {
             {tacticalPresets.map((preset) => {
               const isSelected = draft?.id === preset.id;
               const filledSlots = preset.assignments.filter((a) => Boolean(a.playerId)).length;
+              const presetValidation = validateLineupEligibility({
+                clubPlayers: players,
+                assignments: preset.assignments.map((a) => ({
+                  slotOrder: a.slotOrder,
+                  slotId: a.slotId,
+                  positionCode:
+                    toCanonicalFc26Position(a.positionCode) ?? a.positionCode.toUpperCase(),
+                  playerId: a.playerId,
+                })),
+                benchPlayerIds: preset.benchPlayerIds,
+                confirmedDoubtfulPlayerIds: players.map((p) => p.id),
+              });
               return (
                 <div
                   key={preset.id}
@@ -667,7 +893,9 @@ export function TacticalSetupView() {
                   className={`cursor-pointer rounded-md border p-3.5 transition-colors space-y-2 ${
                     isSelected
                       ? 'border-emerald-500 bg-emerald-500/[0.08]'
-                      : 'border-white/[0.08] bg-[#0C0F14] hover:border-white/[0.2]'
+                      : presetValidation.hasBlockingIssues
+                        ? 'border-red-500/40 bg-red-500/[0.04] hover:border-red-500/60'
+                        : 'border-white/[0.08] bg-[#0C0F14] hover:border-white/[0.2]'
                   }`}
                 >
                   <div className="flex items-start justify-between gap-2">
@@ -679,9 +907,19 @@ export function TacticalSetupView() {
                             Default
                           </span>
                         )}
+                        {presetValidation.hasBlockingIssues ? (
+                          <span className="text-[10px] font-mono uppercase text-red-400">
+                            Squad Fix Needed
+                          </span>
+                        ) : preset.presetStatus === 'draft' ? (
+                          <span className="text-[10px] font-mono uppercase text-amber-300">
+                            Draft
+                          </span>
+                        ) : null}
                       </div>
                       <div className="text-[11px] font-mono tabular-nums text-[#8A94A6] mt-0.5">
-                        {preset.formationName} · {filledSlots}/11 XI · Line {preset.defensiveLineHeight}
+                        {preset.formationName} · {filledSlots}/11 XI · Line{' '}
+                        {preset.defensiveLineHeight}
                       </div>
                     </div>
                     <div
@@ -731,17 +969,81 @@ export function TacticalSetupView() {
         )}
       </section>
 
-      {/* Unavailable Player Warning Banner */}
-      {unavailableWarnings.length > 0 && (
-        <div className="border border-amber-500/35 bg-amber-500/[0.06] rounded-lg p-4 flex items-start gap-3 text-[13px] text-amber-100">
-          <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
-          <div>
-            <div className="font-semibold">Lineup Availability Warning</div>
-            <p className="text-[12px] text-amber-200/85 mt-0.5">
-              One or more players assigned in this tactical preset are currently injured, suspended,
-              loaned out, or transferred out: {unavailableWarnings.join(' · ')}.
-            </p>
+      {/* Blocking Ineligible Players Banner (Preserves existing invalid references & offers replacements) */}
+      {eligibilityReport && eligibilityReport.hasBlockingIssues && (
+        <div className="border border-red-500/45 bg-red-500/[0.07] rounded-lg p-4 space-y-2.5 text-[13px] text-red-100">
+          <div className="flex items-start gap-2.5">
+            <ShieldAlert className="w-4 h-4 text-red-400 shrink-0 mt-0.5" />
+            <div>
+              <div className="font-semibold">
+                Matchday Eligibility Blocked ({eligibilityReport.issues.length}{' '}
+                {eligibilityReport.issues.length === 1 ? 'player' : 'players'})
+              </div>
+              <p className="text-[12px] text-red-200/85 mt-0.5">
+                The following assigned player(s) are ineligible for matchday selection. Replace or
+                remove them before confirming this setup as Match-Ready (you may still click{' '}
+                <strong className="text-white">Save as Draft</strong> to preserve work in progress):
+              </p>
+            </div>
           </div>
+          <ul className="space-y-1.5 pl-6 text-[12px]">
+            {eligibilityReport.issues.map((issue) => (
+              <li
+                key={`${issue.scope}-${issue.slotOrder ?? issue.playerId}`}
+                className="flex flex-wrap items-center justify-between gap-2 bg-black/25 border border-red-500/25 rounded px-2.5 py-1.5"
+              >
+                <span>
+                  <span className="font-mono text-red-300 mr-1.5">
+                    {issue.scope === 'starting_xi'
+                      ? `${getDisplayPositionLabel(issue.positionCode ?? '')} #${(issue.slotOrder ?? 0) + 1}`
+                      : 'BENCH'}
+                  </span>
+                  <strong className="text-white">{issue.playerDisplayName}</strong> — {issue.reason}
+                </span>
+                {issue.scope === 'bench' && (
+                  <button
+                    type="button"
+                    onClick={() => toggleBenchPlayer(issue.playerId)}
+                    className="px-2 py-0.5 rounded bg-red-500/20 hover:bg-red-500/35 text-red-200 text-[11px]"
+                  >
+                    Remove from Bench
+                  </button>
+                )}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {/* Doubtful Player Explicit Confirmation Banner */}
+      {selectedDoubtfulIds.length > 0 && (
+        <div className="border border-amber-500/40 bg-amber-500/[0.07] rounded-lg p-4 space-y-2 text-[13px] text-amber-100">
+          <div className="flex items-start gap-2.5">
+            <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
+            <div>
+              <div className="font-semibold">
+                Doubtful Player(s) Selected ({selectedDoubtfulIds.length})
+              </div>
+              <p className="text-[12px] text-amber-200/85 mt-0.5">
+                {selectedDoubtfulIds
+                  .map((id) => {
+                    const p = playerById.get(id);
+                    return p ? `${resolvePlayerDisplayName(p)} (${p.position})` : id;
+                  })
+                  .join(' · ')}{' '}
+                — flagged as fitness doubtful. Confirm selection explicitly to save as Match-Ready.
+              </p>
+            </div>
+          </div>
+          <label className="inline-flex items-center gap-2 pl-6 cursor-pointer text-[12px] text-amber-100 font-medium">
+            <input
+              type="checkbox"
+              checked={confirmDoubtful}
+              onChange={(e) => setConfirmDoubtful(e.target.checked)}
+              className="w-4 h-4 accent-amber-500"
+            />
+            Confirm doubtful player(s) for matchday selection
+          </label>
         </div>
       )}
 
@@ -853,19 +1155,37 @@ export function TacticalSetupView() {
                       Starting XI Assignments &amp; FC IQ Roles
                     </h2>
                     <p className="text-[11px] text-[#7D8798]">
-                      Validated against {activeClub.name}&apos;s Career Mode squad · Duplicate
-                      players prevented
+                      Canonical EA SPORTS FC 26 positions · Eligible squad players only · Duplicates
+                      prevented
                     </p>
                   </div>
-                  <div className="relative w-52">
-                    <Search className="w-3.5 h-3.5 text-[#7D8798] absolute left-2.5 top-1/2 -translate-y-1/2" />
-                    <input
-                      type="text"
-                      value={squadFilter}
-                      onChange={(e) => setSquadFilter(e.target.value)}
-                      placeholder="Filter squad..."
-                      className="w-full bg-[#0C0F14] border border-white/[0.1] rounded pl-7 pr-2 py-1 text-[12px] text-white"
-                    />
+                  <div className="flex flex-wrap items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setShowUnavailablePlayers((v) => !v)}
+                      className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded border text-[11px] font-medium transition-colors ${
+                        showUnavailablePlayers
+                          ? 'border-amber-500/50 bg-amber-500/10 text-amber-200'
+                          : 'border-white/[0.12] bg-[#0C0F14] text-[#9AA4B4] hover:text-white'
+                      }`}
+                    >
+                      {showUnavailablePlayers ? (
+                        <Eye className="w-3.5 h-3.5" />
+                      ) : (
+                        <EyeOff className="w-3.5 h-3.5" />
+                      )}
+                      {showUnavailablePlayers ? 'Showing Unavailable' : 'Show Unavailable Players'}
+                    </button>
+                    <div className="relative w-44">
+                      <Search className="w-3.5 h-3.5 text-[#7D8798] absolute left-2.5 top-1/2 -translate-y-1/2" />
+                      <input
+                        type="text"
+                        value={squadFilter}
+                        onChange={(e) => setSquadFilter(e.target.value)}
+                        placeholder="Filter squad..."
+                        className="w-full bg-[#0C0F14] border border-white/[0.1] rounded pl-7 pr-2 py-1 text-[12px] text-white"
+                      />
+                    </div>
                   </div>
                 </div>
 
@@ -889,7 +1209,7 @@ export function TacticalSetupView() {
                   <table className="w-full text-left text-[12px]">
                     <thead>
                       <tr className="border-b border-white/[0.08] text-[#7D8798]">
-                        <th className="py-2 pr-2 font-medium">Slot</th>
+                        <th className="py-2 pr-2 font-medium">Position</th>
                         <th className="py-2 pr-2 font-medium">Assigned Player</th>
                         <th className="py-2 pr-2 font-medium">FC IQ Role</th>
                         <th className="py-2 font-medium">Compatible Focus</th>
@@ -897,52 +1217,86 @@ export function TacticalSetupView() {
                     </thead>
                     <tbody className="divide-y divide-white/[0.06]">
                       {draft.assignments.map((slot) => {
-                        const validRoles = getValidRolesForPosition(slot.positionCode);
-                        const validFocuses = getValidFocusesForRole(slot.role, slot.positionCode);
+                        const canonicalPos =
+                          toCanonicalFc26Position(slot.positionCode) ??
+                          slot.positionCode.toUpperCase();
+                        const sideHint = getSlotSideHint(slot.slotId, canonicalPos);
+                        const validRoles = getValidRolesForPosition(canonicalPos);
+                        const validFocuses = getValidFocusesForRole(slot.role, canonicalPos);
                         const roleOptions =
                           validRoles.length > 0 ? validRoles.map((r) => r.name) : fallbackRoleOptions;
                         const focusOptions =
                           validFocuses.length > 0 ? validFocuses : fallbackFocusOptions;
 
-                        const selectOptions =
-                          slot.playerId && !filteredSquadPlayers.some((p) => p.id === slot.playerId)
-                            ? [
-                                ...players.filter((p) => p.id === slot.playerId),
-                                ...filteredSquadPlayers,
-                              ]
-                            : filteredSquadPlayers;
-
                         const currentPlayer = slot.playerId
                           ? playerById.get(slot.playerId)
                           : undefined;
-                        const slotHasWarning =
-                          currentPlayer && isPlayerMatchdayUnavailable(currentPlayer);
+                        const currentEval = currentPlayer
+                          ? evaluatePlayerEligibility(currentPlayer)
+                          : null;
+
+                        const selectOptions =
+                          currentPlayer &&
+                          !filteredSquadPlayers.some((p) => p.id === currentPlayer.id)
+                            ? [currentPlayer, ...filteredSquadPlayers]
+                            : filteredSquadPlayers;
+
+                        const replacements =
+                          currentEval && !currentEval.eligible
+                            ? suggestEligibleReplacements(
+                                canonicalPos,
+                                players,
+                                assignedIds,
+                                3
+                              )
+                            : [];
 
                         return (
-                          <tr key={slot.slotIndex}>
-                            <td className="py-2 pr-2 font-mono text-white">{slot.positionCode}</td>
-                            <td className="py-2 pr-2">
+                          <tr
+                            key={slot.slotIndex}
+                            className={
+                              currentEval && !currentEval.eligible ? 'bg-red-500/[0.05]' : undefined
+                            }
+                          >
+                            <td className="py-2 pr-2 align-top">
+                              <div className="font-mono font-semibold text-white">
+                                {getDisplayPositionLabel(canonicalPos)}
+                              </div>
+                              {sideHint && (
+                                <div className="text-[10px] text-[#7D8798] leading-tight">
+                                  {sideHint}
+                                </div>
+                              )}
+                            </td>
+                            <td className="py-2 pr-2 align-top space-y-1">
                               <select
                                 value={slot.playerId ?? ''}
                                 onChange={(e) => handleAssignPlayer(slot, e.target.value)}
                                 className={`w-full bg-[#0C0F14] border rounded px-2 py-1 text-[12px] text-white ${
-                                  slotHasWarning
-                                    ? 'border-amber-500/60'
-                                    : 'border-white/[0.1]'
+                                  currentEval && !currentEval.eligible
+                                    ? 'border-red-500/70'
+                                    : currentEval?.requiresConfirmation
+                                      ? 'border-amber-500/60'
+                                      : 'border-white/[0.1]'
                                 }`}
                               >
                                 <option value="">Unassigned slot</option>
                                 {selectOptions.map((p) => {
+                                  const evalRes = evaluatePlayerEligibility(p);
                                   const usedElsewhere =
                                     assignedIds.has(p.id) && slot.playerId !== p.id;
-                                  const statusSuffix = isPlayerMatchdayUnavailable(p)
-                                    ? ` · [${p.availability !== 'available' ? p.availability.toUpperCase() : p.squadStatus.replace(/_/g, ' ').toUpperCase()}]`
-                                    : '';
+                                  const isBlockedOption =
+                                    !evalRes.eligible && slot.playerId !== p.id;
+                                  const statusSuffix = !evalRes.eligible
+                                    ? ` · [${evalRes.shortBadge.toUpperCase()}]`
+                                    : evalRes.requiresConfirmation
+                                      ? ' · [DOUBTFUL]'
+                                      : '';
                                   return (
                                     <option
                                       key={p.id}
                                       value={p.id}
-                                      disabled={usedElsewhere}
+                                      disabled={usedElsewhere || isBlockedOption}
                                     >
                                       {resolvePlayerDisplayName(p)} ({p.position}
                                       {p.overallRating ? ` · ${p.overallRating}` : ''})
@@ -952,8 +1306,29 @@ export function TacticalSetupView() {
                                   );
                                 })}
                               </select>
+                              {currentEval && !currentEval.eligible && (
+                                <div className="text-[11px] text-red-300 space-y-1">
+                                  <div>Invalid: {currentEval.reasons.join(' ')}</div>
+                                  {replacements.length > 0 && (
+                                    <div className="flex flex-wrap items-center gap-1">
+                                      <span className="text-[#8A94A6]">Replace:</span>
+                                      {replacements.map((rep) => (
+                                        <button
+                                          key={rep.playerId}
+                                          type="button"
+                                          onClick={() => handleAssignPlayer(slot, rep.playerId)}
+                                          className="px-1.5 py-0.5 rounded border border-emerald-500/40 bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-200 text-[10px]"
+                                        >
+                                          {rep.displayName} ({rep.position}
+                                          {rep.overallRating ? ` ${rep.overallRating}` : ''})
+                                        </button>
+                                      ))}
+                                    </div>
+                                  )}
+                                </div>
+                              )}
                             </td>
-                            <td className="py-2 pr-2">
+                            <td className="py-2 pr-2 align-top">
                               <select
                                 value={slot.role}
                                 onChange={(e) => handleRoleChange(slot, e.target.value)}
@@ -966,7 +1341,7 @@ export function TacticalSetupView() {
                                 ))}
                               </select>
                             </td>
-                            <td className="py-2">
+                            <td className="py-2 align-top">
                               <select
                                 value={slot.focus}
                                 onChange={(e) => updateSlot(slot.slotIndex, { focus: e.target.value })}
@@ -990,27 +1365,52 @@ export function TacticalSetupView() {
               {/* Bench Selection */}
               {players.length > 0 && (
                 <div className="pt-4 border-t border-white/[0.08]">
-                  <div className="text-[13px] font-medium text-white mb-2">
-                    Substitutes Bench ({draft.benchPlayerIds.length}/9 selected)
+                  <div className="flex items-center justify-between gap-2 mb-2">
+                    <div className="text-[13px] font-medium text-white">
+                      Substitutes Bench ({draft.benchPlayerIds.length}/9 selected)
+                    </div>
+                    <div className="text-[11px] text-[#7D8798]">
+                      Eligible &amp; doubtful squad players only
+                    </div>
                   </div>
                   <div className="flex flex-wrap gap-1.5">
                     {players
                       .filter((p) => !assignedIds.has(p.id))
+                      .filter((p) => {
+                        const evalRes = evaluatePlayerEligibility(p);
+                        const selected = draft.benchPlayerIds.includes(p.id);
+                        return evalRes.eligible || selected || showUnavailablePlayers;
+                      })
                       .map((p) => {
                         const selected = draft.benchPlayerIds.includes(p.id);
+                        const evalRes = evaluatePlayerEligibility(p);
+                        const disabled = !evalRes.eligible && !selected;
                         return (
                           <button
                             key={p.id}
                             type="button"
+                            disabled={disabled}
                             onClick={() => toggleBenchPlayer(p.id)}
+                            title={evalRes.reasons.join(' ')}
                             className={`px-2.5 py-1 rounded-md text-[12px] border transition-colors ${
-                              selected
-                                ? 'bg-emerald-600/20 border-emerald-500 text-emerald-200'
-                                : 'bg-[#0C0F14] border-white/[0.1] text-[#9AA4B4] hover:text-white'
+                              selected && !evalRes.eligible
+                                ? 'bg-red-500/15 border-red-500/70 text-red-200'
+                                : selected
+                                  ? 'bg-emerald-600/20 border-emerald-500 text-emerald-200'
+                                  : disabled
+                                    ? 'bg-[#0C0F14]/50 border-white/[0.06] text-[#647082] cursor-not-allowed'
+                                    : evalRes.requiresConfirmation
+                                      ? 'bg-[#0C0F14] border-amber-500/40 text-amber-200 hover:border-amber-400'
+                                      : 'bg-[#0C0F14] border-white/[0.1] text-[#9AA4B4] hover:text-white'
                             }`}
                           >
                             {resolvePlayerDisplayName(p)} ({p.position}
                             {p.overallRating ? ` · ${p.overallRating}` : ''})
+                            {!evalRes.eligible
+                              ? ` · ${evalRes.shortBadge}`
+                              : evalRes.requiresConfirmation
+                                ? ' · Doubtful'
+                                : ''}
                           </button>
                         );
                       })}
@@ -1043,6 +1443,23 @@ export function TacticalSetupView() {
               <div>
                 <div className="text-[#7D8798]">Defensive Approach</div>
                 <div className="text-white font-medium mt-0.5">{draft.defensiveApproach}</div>
+              </div>
+              <div className="col-span-2 flex items-center gap-2 pt-2 border-t border-white/[0.06] text-[11px]">
+                {eligibilityReport && !eligibilityReport.hasBlockingIssues ? (
+                  <>
+                    <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                    <span className="text-emerald-300">
+                      Canonical FC26 positions &amp; squad eligibility verified
+                    </span>
+                  </>
+                ) : (
+                  <>
+                    <ShieldAlert className="w-3.5 h-3.5 text-red-400 shrink-0" />
+                    <span className="text-red-300">
+                      Resolve ineligible player(s) before matchday confirmation
+                    </span>
+                  </>
+                )}
               </div>
             </div>
           </div>

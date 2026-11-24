@@ -337,7 +337,7 @@ export function ClubsView() {
                 type="text"
                 value={clubSearchQuery}
                 onChange={(e) => setClubSearchQuery(e.target.value)}
-                placeholder="Search FC26 clubs by name (e.g. Arsenal, Real Madrid, Lyon)..."
+                placeholder="Search all FC26 clubs by name or alias (e.g. Everton, Arsenal, Lombardia FC, Real Madrid)..."
                 className="w-full bg-[#12151B] border border-white/[0.1] rounded-md pl-8 pr-3 py-1.5 text-[12px] text-white focus:outline-none focus:border-emerald-500"
               />
             </div>
@@ -382,7 +382,7 @@ export function ClubsView() {
             <div className="rounded-md border border-emerald-500/30 bg-[#0D1412] p-4 space-y-3 text-[12px]">
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <div className="font-semibold text-white">
-                  Default Career Squad Initialization
+                  Default Career Squad Initialization (Imported FC26 Dataset Snapshot)
                 </div>
                 {rosterPreviewLoading && (
                   <span className="text-[#8A94A6]">Checking FC26 catalog players...</span>

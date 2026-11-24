@@ -1130,10 +1130,21 @@ export function MatchCaptureView() {
                       </div>
                     </div>
                     <div>
-                      <div className="text-[#7D8798]">FFmpeg PID / Stdin Bytes</div>
+                      <div className="text-[#7D8798]">FFmpeg PID / Lifetime Stdin</div>
                       <div className="text-white mt-0.5 tabular-nums">
                         PID {pipelineDiag?.ffmpegPid ?? '—'} ·{' '}
-                        {formatBytes(pipelineDiag?.ffmpegStdinBytesWritten ?? 0)}
+                        {formatBytes(
+                          pipelineDiag?.lifetimeSessionStdinBytesWritten ??
+                            pipelineDiag?.ffmpegStdinBytesWritten ??
+                            0
+                        )}
+                        {pipelineDiag?.ffmpegState === 'running' &&
+                        pipelineDiag.currentProcessStdinBytesWritten !== undefined &&
+                        pipelineDiag.currentProcessStdinBytesWritten !==
+                          (pipelineDiag.lifetimeSessionStdinBytesWritten ??
+                            pipelineDiag.ffmpegStdinBytesWritten)
+                          ? ` (proc ${formatBytes(pipelineDiag.currentProcessStdinBytesWritten)})`
+                          : ''}
                       </div>
                     </div>
                     <div>
@@ -1209,11 +1220,18 @@ export function MatchCaptureView() {
                                 {sess.status}
                               </span>
                             </span>
-                            {sess.status === 'failed' && (
+                            {sess.status === 'failed' ? (
                               <span className="text-[11px] font-mono text-red-300">
                                 NOT AI-ELIGIBLE
                               </span>
-                            )}
+                            ) : sess.aiEligible !== false &&
+                              sess.integrityStatus === 'verified' ? (
+                              <span className="text-[11px] font-mono text-sky-300">
+                                {sess.analysisState === 'analysis_completed'
+                                  ? 'ANALYSIS COMPLETED'
+                                  : 'AWAITING ANALYSIS (PHASE 3)'}
+                              </span>
+                            ) : null}
                           </div>
                           <div className="mt-0.5 font-mono tabular-nums text-[#8A94A6]">
                             {formatDuration(sess.durationSeconds)} · {finalizedSegs.length} valid
@@ -1338,9 +1356,15 @@ export function MatchCaptureView() {
                         sess.aiEligible !== false &&
                         finalizedSegs.some((s) => s.sizeBytes > 0 && s.durationSeconds > 0) ? (
                         <div className="text-[11px] text-[#8A94A6] pt-1 border-t border-white/[0.06]">
-                          Verified local segments are stored for Phase 3 Half-Time AI Analysis
-                          (Gemini video upload &amp; tactical briefing will activate in Phase 3 —
-                          zero frames have been uploaded).
+                          <strong className="text-emerald-300">Recording Verified</strong> ·{' '}
+                          <strong className="text-white">Technically AI-Eligible</strong> ·{' '}
+                          <strong className="text-sky-300">
+                            {sess.analysisState === 'analysis_completed'
+                              ? 'Analysis Completed'
+                              : 'Awaiting Analysis (Phase 3)'}
+                          </strong>{' '}
+                          — Local MP4 segments are stored safely on disk. Zero frames have been
+                          uploaded to Gemini.
                         </div>
                       ) : null}
                     </div>

@@ -138,6 +138,12 @@ interface ActiveRecordingState {
   lastFfmpegExitCode: number | null;
   lastFfmpegExitSignal: string | null;
   hadPipelineErrors: boolean;
+  // Phase 2.2 Lifetime FFmpeg metric accumulators (preserved across pause/resume & termination)
+  cumulativeFfmpegStdinBytesWritten: number;
+  cumulativeBackpressureEvents: number;
+  cumulativeDroppedChunks: number;
+  lastFfmpegPid: number | null;
+  lastKnownOutputFileBytes: number;
   rendererDiagnostics: RendererCaptureDiagnostics;
 }
 
@@ -216,6 +222,33 @@ function getActiveDurationSeconds(state: ActiveRecordingState): number {
   return Math.floor((state.accumulatedActiveMs + runningDeltaMs) / 1000);
 }
 
+function foldFfmpegMetricsIntoSession(state: ActiveRecordingState): void {
+  if (!state.ffmpeg) return;
+  const metrics = state.ffmpeg.getMetrics();
+  state.cumulativeFfmpegStdinBytesWritten += Math.max(0, metrics.totalBytesWritten);
+  state.cumulativeBackpressureEvents += Math.max(0, metrics.backpressureEvents);
+  state.cumulativeDroppedChunks += Math.max(0, metrics.droppedChunks);
+  if (state.ffmpeg.pid !== null) {
+    state.lastFfmpegPid = state.ffmpeg.pid;
+  }
+  state.lastKnownOutputFileBytes = Math.max(
+    state.lastKnownOutputFileBytes,
+    metrics.currentOutputFileBytes
+  );
+  if (metrics.exitCode !== null) {
+    state.lastFfmpegExitCode = metrics.exitCode;
+  }
+  if (metrics.exitSignal !== null) {
+    state.lastFfmpegExitSignal = metrics.exitSignal;
+  }
+  if (metrics.stderrTail.length > 0) {
+    state.lastFfmpegStderrTail = metrics.stderrTail.join('\n');
+  }
+  if (metrics.lastError) {
+    state.lastFfmpegError = metrics.lastError;
+  }
+}
+
 function buildPipelineDiagnostics(state: ActiveRecordingState): RecordingPipelineDiagnostics {
   const queueMetrics = state.ffmpeg?.getMetrics() ?? {
     queuedChunks: 0,
@@ -235,6 +268,17 @@ function buildPipelineDiagnostics(state: ActiveRecordingState): RecordingPipelin
     spawnedArgs: state.lastFfmpegArgs,
   };
 
+  const currentProcessStdinBytesWritten = state.ffmpeg ? Math.max(0, queueMetrics.totalBytesWritten) : 0;
+  const lifetimeSessionStdinBytesWritten =
+    state.cumulativeFfmpegStdinBytesWritten + currentProcessStdinBytesWritten;
+  const totalBackpressureEvents =
+    state.cumulativeBackpressureEvents + (state.ffmpeg ? queueMetrics.backpressureEvents : 0);
+  const totalDroppedChunks =
+    state.cumulativeDroppedChunks + (state.ffmpeg ? queueMetrics.droppedChunks : 0);
+  const effectiveOutputBytes = state.ffmpeg
+    ? Math.max(queueMetrics.currentOutputFileBytes, state.manifest.totalBytes)
+    : Math.max(state.manifest.totalBytes, state.lastKnownOutputFileBytes);
+
   const completedCount = state.manifest.segments.filter(
     (s) =>
       (s.finalized || s.status === 'finalized' || s.status === 'recovered') &&
@@ -249,16 +293,18 @@ function buildPipelineDiagnostics(state: ActiveRecordingState): RecordingPipelin
     transportPortReadyAck: state.transportPortReadyAck,
     chunksReceivedMain: state.chunksReceivedMain,
     bytesReceivedMain: state.bytesReceivedMain,
-    ffmpegPid: state.ffmpeg?.pid ?? null,
+    ffmpegPid: state.ffmpeg?.pid ?? state.lastFfmpegPid,
     ffmpegState: state.ffmpegStatus,
-    ffmpegStdinBytesWritten: queueMetrics.totalBytesWritten,
+    ffmpegStdinBytesWritten: lifetimeSessionStdinBytesWritten,
+    currentProcessStdinBytesWritten,
+    lifetimeSessionStdinBytesWritten,
     ffmpegExitCode: queueMetrics.exitCode ?? state.lastFfmpegExitCode,
     ffmpegExitSignal: queueMetrics.exitSignal ?? state.lastFfmpegExitSignal,
     queueSizeChunks: queueMetrics.queuedChunks,
     queueSizeBytes: queueMetrics.queuedBytes,
-    backpressureEvents: queueMetrics.backpressureEvents,
-    droppedChunks: queueMetrics.droppedChunks,
-    currentOutputFileBytes: queueMetrics.currentOutputFileBytes,
+    backpressureEvents: totalBackpressureEvents,
+    droppedChunks: totalDroppedChunks,
+    currentOutputFileBytes: effectiveOutputBytes,
     completedSegmentsCount: completedCount,
     lastChunkReceivedAt: state.lastChunkReceivedAtIso,
     startupWatchdogState: state.startupWatchdogState,
@@ -1071,6 +1117,7 @@ async function failActiveSessionDueToWatchdog(
   if (state.ffmpeg) {
     state.expectedFfmpegClose = true;
     await state.ffmpeg.stopGracefully(4000);
+    foldFfmpegMetricsIntoSession(state);
     state.ffmpeg = null;
   }
   detachTransportPort(state);
@@ -1284,12 +1331,7 @@ async function finalizeActiveSession(
       state.lastFfmpegStderrTail = metricsBeforeStop.stderrTail.join('\n');
     }
     await state.ffmpeg.stopGracefully(gracefulTimeoutMs);
-    const metricsAfterStop = state.ffmpeg.getMetrics();
-    state.lastFfmpegExitCode = metricsAfterStop.exitCode;
-    state.lastFfmpegExitSignal = metricsAfterStop.exitSignal;
-    if (metricsAfterStop.stderrTail.length > 0) {
-      state.lastFfmpegStderrTail = metricsAfterStop.stderrTail.join('\n');
-    }
+    foldFfmpegMetricsIntoSession(state);
     state.ffmpeg = null;
   }
 
@@ -1799,6 +1841,11 @@ function registerIpcHandlers(): void {
         lastFfmpegExitCode: null,
         lastFfmpegExitSignal: null,
         hadPipelineErrors: false,
+        cumulativeFfmpegStdinBytesWritten: 0,
+        cumulativeBackpressureEvents: 0,
+        cumulativeDroppedChunks: 0,
+        lastFfmpegPid: null,
+        lastKnownOutputFileBytes: 0,
         rendererDiagnostics: { ...EMPTY_RENDERER_DIAGNOSTICS },
       };
 
@@ -1869,6 +1916,7 @@ function registerIpcHandlers(): void {
     if (state.ffmpeg) {
       state.expectedFfmpegClose = true;
       await state.ffmpeg.stopGracefully(6000);
+      foldFfmpegMetricsIntoSession(state);
       state.ffmpeg = null;
     }
     detachTransportPort(state);

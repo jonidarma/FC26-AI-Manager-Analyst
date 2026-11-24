@@ -1,4 +1,5 @@
 import { getFormationPositions } from '../../data/tacticalCatalog';
+import { getDisplayPositionLabel, getSlotSideHint } from '../../utils/formationPositions';
 import {
   hasDistinctFullName,
   resolvePlayerDisplayName,
@@ -52,8 +53,9 @@ export function TacticalPitchSVG({
     formationSlots && formationSlots.length === 11
       ? formationSlots.map((slot) => ({
           slotIndex: slot.slotOrder,
-          positionCode: slot.positionCode,
-          positionLabel: slot.positionLabel,
+          slotId: slot.slotId,
+          positionCode: getDisplayPositionLabel(slot.positionCode),
+          positionLabel: getDisplayPositionLabel(slot.positionCode),
           x: slot.x,
           y: slot.y,
           defaultRole: '',
@@ -288,13 +290,20 @@ export function TacticalPitchSVG({
                 onClick={onSelectSlot ? () => onSelectSlot(node.slotIndex) : undefined}
                 className={onSelectSlot ? 'cursor-pointer' : undefined}
               >
-                {displayName && fullName && (
-                  <title>
-                    {hasDistinctFullName(displayName, fullName)
-                      ? `${displayName} (${fullName}) · ${node.positionCode}${roleLabel ? ` · ${roleLabel}` : ''}`
-                      : `${displayName} · ${node.positionCode}${roleLabel ? ` · ${roleLabel}` : ''}`}
-                  </title>
-                )}
+                {(() => {
+                  const canonicalPos = getDisplayPositionLabel(node.positionCode);
+                  const sideHint = getSlotSideHint(node.slotId, canonicalPos);
+                  const posTitle = sideHint ? `${canonicalPos} (${sideHint})` : canonicalPos;
+                  return displayName && fullName ? (
+                    <title>
+                      {hasDistinctFullName(displayName, fullName)
+                        ? `${displayName} (${fullName}) · ${posTitle}${roleLabel ? ` · ${roleLabel}` : ''}`
+                        : `${displayName} · ${posTitle}${roleLabel ? ` · ${roleLabel}` : ''}`}
+                    </title>
+                  ) : (
+                    <title>{`${posTitle} · Unassigned`}</title>
+                  );
+                })()}
 
                 {hasForwardRun && (
                   <line
@@ -339,7 +348,7 @@ export function TacticalPitchSVG({
                   fontWeight="600"
                   fontFamily="JetBrains Mono, monospace"
                 >
-                  {node.positionLabel || node.positionCode}
+                  {getDisplayPositionLabel(node.positionCode)}
                 </text>
 
                 <text

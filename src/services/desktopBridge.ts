@@ -6,6 +6,7 @@ import type {
   CaptureSourceInfo,
   CatalogClub,
   CatalogCompatibilityRow,
+  CatalogCoverageReport,
   CatalogDatasetType,
   CatalogFocus,
   CatalogFormation,
@@ -15,6 +16,8 @@ import type {
   CatalogOverview,
   CatalogPlayer,
   CatalogPosition,
+  CatalogReconcilePreview,
+  CatalogReconcileResult,
   CatalogRole,
   CatalogSource,
   ClubWithProfile,
@@ -53,6 +56,7 @@ import type {
   TacticalMemoryEntry,
   TacticalPreset,
   TacticalPresetAssignment,
+  TacticalPresetStatus,
 } from '../types/domain';
 
 interface ElectronBackendConnection {
@@ -650,6 +654,7 @@ class DesktopBridgeService {
     squadNumber?: number | null;
     squadStatus?: SquadStatus;
     availability?: PlayerAvailability;
+    seniorSelectionAuthorized?: boolean;
     injuryStatus?: string | null;
     suspensionStatus?: string | null;
     membershipStartDate?: string | null;
@@ -731,7 +736,9 @@ class DesktopBridgeService {
       defensiveApproach: string;
       defensiveLineHeight: number;
       isDefault?: boolean;
+      presetStatus?: TacticalPresetStatus;
       benchPlayerIds?: string[];
+      confirmedDoubtfulPlayerIds?: string[];
       notes?: string;
       assignments: TacticalPresetAssignment[];
     }
@@ -752,7 +759,9 @@ class DesktopBridgeService {
       defensiveApproach: string;
       defensiveLineHeight: number;
       isDefault: boolean;
+      presetStatus: TacticalPresetStatus;
       benchPlayerIds: string[];
+      confirmedDoubtfulPlayerIds: string[];
       notes: string;
       assignments: TacticalPresetAssignment[];
     }>
@@ -840,6 +849,7 @@ class DesktopBridgeService {
     startingFormation: string;
     startingXiIds: string[];
     benchIds: string[];
+    confirmedDoubtfulPlayerIds?: string[];
     objective: string;
     preMatchNotes: string;
     tacticalSetup: {
@@ -873,6 +883,7 @@ class DesktopBridgeService {
       defensiveLineHeight: number;
       playerAssignments: PlayerRoleAssignment[];
       benchIds?: string[];
+      confirmedDoubtfulPlayerIds?: string[];
       notes?: string;
     }
   ): Promise<MatchTacticalSnapshot> {
@@ -895,6 +906,7 @@ class DesktopBridgeService {
       defensiveLineHeight: number;
       playerAssignments: PlayerRoleAssignment[];
       benchIds?: string[];
+      confirmedDoubtfulPlayerIds?: string[];
       notes?: string;
     }
   ): Promise<MatchTacticalSnapshot> {
@@ -1272,6 +1284,22 @@ class DesktopBridgeService {
     const res = await this.authorizedFetch(`/api/catalog/export/${datasetType}`, { method: 'GET' });
     if (!res.ok) throw new Error(`Failed to export ${datasetType} catalog`);
     return res.blob();
+  }
+
+  public getCatalogCoverageReport(): Promise<CatalogCoverageReport> {
+    return this.apiFetch<CatalogCoverageReport>('/api/catalog/coverage-report');
+  }
+
+  public previewCatalogReconciliation(): Promise<CatalogReconcilePreview> {
+    return this.apiFetch<CatalogReconcilePreview>('/api/catalog/reconcile/preview', {
+      method: 'POST',
+    });
+  }
+
+  public executeCatalogReconciliation(): Promise<CatalogReconcileResult> {
+    return this.apiFetch<CatalogReconcileResult>('/api/catalog/reconcile/execute', {
+      method: 'POST',
+    });
   }
 
   public getMatchAiContext(matchId: string): Promise<AiMatchTacticalContext> {

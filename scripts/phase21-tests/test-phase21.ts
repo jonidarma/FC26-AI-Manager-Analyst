@@ -281,6 +281,9 @@ async function main(): Promise<void> {
     const squad = repo.listPlayers(club.id);
     assert.ok(squad.length >= 3);
 
+    // Restore squad[0] to available after test 3's injury check (Phase 2.2 blocks injured starters in match_ready presets)
+    repo.updatePlayer(squad[0].id, { availability: 'available', injuryStatus: null });
+
     // Duplicate player in Starting XI must be rejected
     assert.throws(() =>
       repo.createTacticalPreset(club.id, {

@@ -135,7 +135,7 @@ export function getCatalogOverview(dbArg?: Database.Database): CatalogOverview {
   }
 
   return {
-    schemaVersion: schemaRow?.version ?? 4,
+    schemaVersion: schemaRow?.version ?? 5,
     counts: {
       players,
       clubs,
@@ -257,8 +257,12 @@ export function listCatalogLeagues(
     name: String(r.name),
     countryId: r.country_id ? String(r.country_id) : null,
     countryName: String(r.country_name),
+    region: r.region ? String(r.region) : '',
     tier: r.tier === null ? null : Number(r.tier),
     category: String(r.category) as CatalogLeague['category'],
+    modeAvailability: r.mode_availability ? String(r.mode_availability) : 'career_mode',
+    datasetVersion: r.dataset_version ? String(r.dataset_version) : null,
+    verificationStatus: r.verification_status ? String(r.verification_status) : 'verified',
     clubCount: Number(r.club_count ?? 0),
     playerCount: Number(r.player_count ?? 0),
   }));
@@ -297,9 +301,11 @@ export function searchCatalogClubs(
   const params: unknown[] = [];
 
   if (filters.q?.trim()) {
-    conditions.push('(c.name LIKE ? OR c.short_name LIKE ?)');
+    conditions.push(
+      '(c.name LIKE ? OR c.short_name LIKE ? OR COALESCE(c.canonical_name, \'\') LIKE ? OR COALESCE(c.display_name, \'\') LIKE ? OR EXISTS (SELECT 1 FROM catalog_club_aliases ca WHERE ca.club_id = c.id AND ca.alias_name LIKE ?))'
+    );
     const pattern = `%${filters.q.trim()}%`;
-    params.push(pattern, pattern);
+    params.push(pattern, pattern, pattern, pattern, pattern);
   }
   if (filters.leagueId?.trim()) {
     conditions.push('c.league_id = ?');
@@ -337,19 +343,50 @@ export function searchCatalogClubs(
     `)
     .all(...params, pageSize, offset) as Array<Record<string, unknown>>;
 
+  const clubIds = rows.map((r) => String(r.id));
+  const aliasMap = new Map<string, string[]>();
+  if (clubIds.length > 0) {
+    const placeholders = clubIds.map(() => '?').join(', ');
+    const aliasRows = db
+      .prepare(`SELECT club_id, alias_name FROM catalog_club_aliases WHERE club_id IN (${placeholders}) ORDER BY alias_name ASC`)
+      .all(...clubIds) as Array<{ club_id: string; alias_name: string }>;
+    for (const ar of aliasRows) {
+      const list = aliasMap.get(ar.club_id) ?? [];
+      list.push(ar.alias_name);
+      aliasMap.set(ar.club_id, list);
+    }
+  }
+
   return {
-    items: rows.map((r) => ({
-      id: String(r.id),
-      externalSourceId: String(r.external_source_id),
-      name: String(r.name),
-      shortName: String(r.short_name),
-      leagueId: r.league_id ? String(r.league_id) : null,
-      leagueName: r.league_name ? String(r.league_name) : null,
-      nationId: r.nation_id ? String(r.nation_id) : null,
-      nationName: r.nation_name ? String(r.nation_name) : null,
-      teamCategory: String(r.team_category) as 'mens' | 'womens',
-      playerCount: Number(r.player_count ?? 0),
-    })),
+    items: rows.map((r) => {
+      const id = String(r.id);
+      const storedAliases = safeJson<string[]>(r.aliases_json, []);
+      const tableAliases = aliasMap.get(id) ?? [];
+      const mergedAliases = Array.from(new Set([...storedAliases, ...tableAliases]));
+      return {
+        id,
+        externalSourceId: String(r.external_source_id),
+        sourceNamespace: r.source_namespace ? String(r.source_namespace) : 'baseline',
+        externalTeamId: r.external_team_id ? String(r.external_team_id) : null,
+        name: String(r.name),
+        canonicalName: r.canonical_name ? String(r.canonical_name) : String(r.name),
+        displayName: r.display_name ? String(r.display_name) : String(r.name),
+        shortName: String(r.short_name),
+        aliases: mergedAliases,
+        leagueId: r.league_id ? String(r.league_id) : null,
+        leagueName: r.league_name ? String(r.league_name) : null,
+        nationId: r.nation_id ? String(r.nation_id) : null,
+        nationName: r.nation_name ? String(r.nation_name) : null,
+        region: r.region ? String(r.region) : '',
+        teamCategory: String(r.team_category) as 'mens' | 'womens',
+        modeAvailability: r.mode_availability ? String(r.mode_availability) : 'career_mode',
+        sourceUrl: r.source_url ? String(r.source_url) : null,
+        datasetVersion: r.dataset_version ? String(r.dataset_version) : null,
+        importedAt: r.imported_at ? String(r.imported_at) : null,
+        verificationStatus: r.verification_status ? String(r.verification_status) : 'verified',
+        playerCount: Number(r.player_count ?? 0),
+      };
+    }),
     total,
     page,
     pageSize,
@@ -618,12 +655,14 @@ export function listCatalogFormations(
   for (const s of allSlots) {
     const fId = String(s.formation_id);
     const list = slotMap.get(fId) ?? [];
+    const posCode = String(s.position_code);
     list.push({
       id: String(s.id),
       formationId: fId,
       slotOrder: Number(s.slot_order),
-      positionCode: String(s.position_code),
-      positionLabel: String(s.position_label),
+      slotId: s.slot_id ? String(s.slot_id) : posCode,
+      positionCode: posCode,
+      positionLabel: posCode,
       x: Number(s.x),
       y: Number(s.y),
       tacticalLine: String(s.tactical_line) as CatalogFormationSlot['tacticalLine'],

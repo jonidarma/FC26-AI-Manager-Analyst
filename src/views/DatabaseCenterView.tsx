@@ -20,6 +20,7 @@ import { hasDistinctFullName, resolvePlayerDisplayName } from '../utils/playerDi
 import type {
   CatalogClub,
   CatalogCompatibilityRow,
+  CatalogCoverageReport,
   CatalogDatasetType,
   CatalogFocus,
   CatalogFormation,
@@ -29,6 +30,8 @@ import type {
   CatalogOverview,
   CatalogPlayer,
   CatalogPosition,
+  CatalogReconcilePreview,
+  CatalogReconcileResult,
   CatalogRole,
   DatasetCompleteness,
   ImportPreviewResult,
@@ -222,10 +225,18 @@ export function DatabaseCenterView() {
   const [importPreview, setImportPreview] = useState<ImportPreviewResult | null>(null);
   const [importing, setImporting] = useState(false);
 
+  // Phase 2.2 Club & League Reconciliation + Coverage Report state
+  const [coverageReport, setCoverageReport] = useState<CatalogCoverageReport | null>(null);
+  const [reconcilePreview, setReconcilePreview] = useState<CatalogReconcilePreview | null>(null);
+  const [reconciling, setReconciling] = useState(false);
+  const [lastReconcileResult, setLastReconcileResult] = useState<CatalogReconcileResult | null>(
+    null
+  );
+
   const loadCoreCatalogs = useCallback(async () => {
     setLoadingOverview(true);
     try {
-      const [ov, nat, lgs, pos, forms, rls, fcs, compat, runs] = await Promise.all([
+      const [ov, nat, lgs, pos, forms, rls, fcs, compat, runs, cov] = await Promise.all([
         desktopBridge.getCatalogOverview(),
         desktopBridge.listCatalogNations(),
         desktopBridge.listCatalogLeagues(),
@@ -235,6 +246,7 @@ export function DatabaseCenterView() {
         desktopBridge.listCatalogFocuses(),
         desktopBridge.getRoleFocusCompatibility(),
         desktopBridge.listCatalogImportRuns(),
+        desktopBridge.getCatalogCoverageReport().catch(() => null),
       ]);
       setOverview(ov);
       setNations(nat);
@@ -245,6 +257,7 @@ export function DatabaseCenterView() {
       setFocuses(fcs);
       setCompatMatrix(compat);
       setImportRuns(runs);
+      setCoverageReport(cov);
       if (forms.length > 0) {
         setSelectedFormationId((prev) => prev || forms[0].id);
       }
@@ -258,6 +271,41 @@ export function DatabaseCenterView() {
   useEffect(() => {
     void loadCoreCatalogs();
   }, [loadCoreCatalogs]);
+
+  async function handlePreviewReconciliation() {
+    setReconciling(true);
+    try {
+      const preview = await desktopBridge.previewCatalogReconciliation();
+      setReconcilePreview(preview);
+      notify(
+        'info',
+        `Reconciliation preview ready: ${preview.clubsToInsert} new clubs, ${preview.clubsToUpdate} club updates, ${preview.playersToRelinkClub.toLocaleString()} players to link.`
+      );
+    } catch (err) {
+      notify('error', err instanceof Error ? err.message : 'Failed to preview reconciliation');
+    } finally {
+      setReconciling(false);
+    }
+  }
+
+  async function handleExecuteReconciliation() {
+    setReconciling(true);
+    try {
+      const result = await desktopBridge.executeCatalogReconciliation();
+      setLastReconcileResult(result);
+      setReconcilePreview(null);
+      await loadCoreCatalogs();
+      await refreshAll();
+      notify(
+        'success',
+        `Catalog reconciled: ${result.coverageAfter.counts.clubs} clubs, ${result.coverageAfter.counts.leagues} leagues, ${result.coverageAfter.counts.nations} nations, ${result.playersRelinkedClub.toLocaleString()} players linked.`
+      );
+    } catch (err) {
+      notify('error', err instanceof Error ? err.message : 'Catalog reconciliation failed');
+    } finally {
+      setReconciling(false);
+    }
+  }
 
   const loadPlayers = useCallback(async () => {
     setLoadingPlayers(true);
@@ -875,6 +923,194 @@ export function DatabaseCenterView() {
               </table>
             </div>
           </div>
+
+          {/* Phase 2.2 FC26 Master Club & League Expansion / Player Relinking */}
+          {coverageReport && (
+            <div className="bg-[#12151B] border border-white/[0.08] rounded-lg overflow-hidden">
+              <div className="px-5 py-4 border-b border-white/[0.08] flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <h2 className="text-[14px] font-semibold text-white">
+                    FC 26 Club, League &amp; Nation Coverage &amp; Reconciliation
+                  </h2>
+                  <p className="text-[12px] text-[#8A94A6] mt-0.5">
+                    Expands clubs, leagues, nations, and aliases from imported{' '}
+                    <span className="font-mono text-[#C5CCD7]">catalog_players</span> without
+                    duplicating records or overwriting Career Mode history.
+                  </p>
+                </div>
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    disabled={reconciling || coverageReport.counts.players === 0}
+                    onClick={() => void handlePreviewReconciliation()}
+                    className="px-3 py-1.5 rounded-md border border-white/[0.14] hover:border-emerald-500/60 disabled:opacity-45 text-[12px] text-[#E5E9F0] font-medium"
+                  >
+                    {reconciling ? 'Inspecting...' : 'Preview Reconciliation'}
+                  </button>
+                  <button
+                    type="button"
+                    disabled={reconciling || coverageReport.counts.players === 0}
+                    onClick={() => void handleExecuteReconciliation()}
+                    className="px-3.5 py-1.5 rounded-md bg-emerald-600 hover:bg-emerald-500 disabled:opacity-45 text-white text-[12px] font-medium"
+                  >
+                    {reconciling ? 'Reconciling...' : 'Reconcile Clubs & Leagues'}
+                  </button>
+                </div>
+              </div>
+
+              <div className="p-5 space-y-4">
+                <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-6 gap-3 text-[12px]">
+                  <div className="rounded border border-white/[0.07] bg-[#0C0F14] p-3">
+                    <div className="text-[#7D8798]">Clubs (Aliases)</div>
+                    <div className="font-mono tabular-nums text-[16px] font-bold text-white mt-0.5">
+                      {coverageReport.counts.clubs}{' '}
+                      <span className="text-[11px] font-normal text-[#8A94A6]">
+                        ({coverageReport.counts.clubAliases} aliases)
+                      </span>
+                    </div>
+                  </div>
+                  <div className="rounded border border-white/[0.07] bg-[#0C0F14] p-3">
+                    <div className="text-[#7D8798]">Leagues (M / W)</div>
+                    <div className="font-mono tabular-nums text-[16px] font-bold text-white mt-0.5">
+                      {coverageReport.counts.leagues}{' '}
+                      <span className="text-[11px] font-normal text-[#8A94A6]">
+                        ({coverageReport.counts.mensLeagues}M / {coverageReport.counts.womensLeagues}W)
+                      </span>
+                    </div>
+                  </div>
+                  <div className="rounded border border-white/[0.07] bg-[#0C0F14] p-3">
+                    <div className="text-[#7D8798]">Nations</div>
+                    <div className="font-mono tabular-nums text-[16px] font-bold text-white mt-0.5">
+                      {coverageReport.counts.nations}
+                    </div>
+                  </div>
+                  <div className="rounded border border-white/[0.07] bg-[#0C0F14] p-3">
+                    <div className="text-[#7D8798]">Linked Players</div>
+                    <div className="font-mono tabular-nums text-[16px] font-bold text-emerald-400 mt-0.5">
+                      {coverageReport.counts.linkedPlayersToClub.toLocaleString()}
+                    </div>
+                    <div className="text-[10px] text-[#8A94A6] font-mono">
+                      {coverageReport.counts.freeAgentPlayers} free agents ·{' '}
+                      {coverageReport.counts.unresolvedClubPlayers} unresolved
+                    </div>
+                  </div>
+                  <div className="rounded border border-white/[0.07] bg-[#0C0F14] p-3">
+                    <div className="text-[#7D8798]">Premier League</div>
+                    <div
+                      className={`font-mono tabular-nums text-[16px] font-bold mt-0.5 ${
+                        coverageReport.premierLeagueVerification.clubCount >= 20 &&
+                        coverageReport.premierLeagueVerification.evertonPresent
+                          ? 'text-emerald-400'
+                          : 'text-amber-300'
+                      }`}
+                    >
+                      {coverageReport.premierLeagueVerification.clubCount} / 20
+                    </div>
+                    <div className="text-[10px] text-[#8A94A6]">
+                      Everton:{' '}
+                      {coverageReport.premierLeagueVerification.evertonPresent
+                        ? `Verified (${coverageReport.premierLeagueVerification.evertonPlayerCount} players)`
+                        : 'Pending'}
+                    </div>
+                  </div>
+                  <div className="rounded border border-white/[0.07] bg-[#0C0F14] p-3">
+                    <div className="text-[#7D8798]">Duplicate Check</div>
+                    <div
+                      className={`font-mono tabular-nums text-[16px] font-bold mt-0.5 ${
+                        coverageReport.duplicateClubChecks.length === 0
+                          ? 'text-emerald-400'
+                          : 'text-red-400'
+                      }`}
+                    >
+                      {coverageReport.duplicateClubChecks.length} dupes
+                    </div>
+                    <div className="text-[10px] text-[#8A94A6]">Stable EA Team IDs</div>
+                  </div>
+                </div>
+
+                {/* Reconciliation Dry-Run Preview */}
+                {reconcilePreview && (
+                  <div className="rounded-md border border-emerald-500/35 bg-emerald-500/[0.05] p-4 space-y-2 text-[12px]">
+                    <div className="font-semibold text-emerald-200">
+                      Reconciliation Dry-Run Preview (Non-Destructive)
+                    </div>
+                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 font-mono tabular-nums text-[#D7DDE7]">
+                      <div>
+                        Nations: +{reconcilePreview.nationsToInsert} / ~
+                        {reconcilePreview.nationsToUpdate}
+                      </div>
+                      <div>
+                        Leagues: +{reconcilePreview.leaguesToInsert} / ~
+                        {reconcilePreview.leaguesToUpdate}
+                      </div>
+                      <div>
+                        Clubs: +{reconcilePreview.clubsToInsert} / ~{reconcilePreview.clubsToUpdate}
+                      </div>
+                      <div>
+                        Players to link: {reconcilePreview.playersToRelinkClub.toLocaleString()}
+                      </div>
+                    </div>
+                    <div className="text-[11px] text-[#9AA4B4]">
+                      Aliases to register: {reconcilePreview.clubAliasesToInsert} · Free Agents:{' '}
+                      {reconcilePreview.freeAgentPlayers} · Premier League after:{' '}
+                      {reconcilePreview.premierLeagueClubsAfter}/20 (Everton:{' '}
+                      {reconcilePreview.evertonFoundInSource ? 'Found' : 'Not in source'})
+                    </div>
+                  </div>
+                )}
+
+                {/* Execution Result Summary */}
+                {lastReconcileResult && (
+                  <div className="rounded-md border border-emerald-500/40 bg-[#0D1613] p-4 space-y-1.5 text-[12px]">
+                    <div className="flex items-center gap-2 font-semibold text-emerald-300">
+                      <CheckCircle2 className="w-4 h-4" />
+                      Reconciliation Completed ({lastReconcileResult.playersPreservedCount.toLocaleString()} players preserved)
+                    </div>
+                    <div className="font-mono tabular-nums text-[#D7DDE7]">
+                      Clubs: +{lastReconcileResult.clubsInserted} / ~{lastReconcileResult.clubsUpdated} (Total{' '}
+                      {lastReconcileResult.coverageAfter.counts.clubs}) · Leagues: +
+                      {lastReconcileResult.leaguesInserted} / ~{lastReconcileResult.leaguesUpdated} (Total{' '}
+                      {lastReconcileResult.coverageAfter.counts.leagues}) · Nations: +
+                      {lastReconcileResult.nationsInserted} / ~{lastReconcileResult.nationsUpdated} (Total{' '}
+                      {lastReconcileResult.coverageAfter.counts.nations}) · Linked Players:{' '}
+                      {lastReconcileResult.coverageAfter.counts.linkedPlayersToClub.toLocaleString()} /{' '}
+                      {lastReconcileResult.coverageAfter.counts.players.toLocaleString()}
+                    </div>
+                  </div>
+                )}
+
+                {/* Coverage by Region */}
+                {coverageReport.coverageByRegion.length > 0 && (
+                  <div>
+                    <div className="text-[11px] uppercase tracking-wider text-[#7D8798] mb-2">
+                      Coverage by Region
+                    </div>
+                    <div className="flex flex-wrap gap-2 text-[11px] font-mono tabular-nums">
+                      {coverageReport.coverageByRegion.map((reg) => (
+                        <span
+                          key={reg.region}
+                          className="px-2.5 py-1 rounded border border-white/[0.08] bg-[#0C0F14] text-[#C5CCD7]"
+                        >
+                          {reg.region}: {reg.clubCount} clubs · {reg.leagueCount} leagues ·{' '}
+                          {reg.playerCount.toLocaleString()} players
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* Source Coverage & Licensing Notice */}
+                <div className="rounded border border-white/[0.07] bg-[#0C0F14] p-3 text-[11px] text-[#9AA4B4] space-y-1">
+                  <div className="font-medium text-[#D7DDE7]">
+                    Source Coverage &amp; Licensing Notes
+                  </div>
+                  {coverageReport.sourceCoverageNotices.map((note, idx) => (
+                    <div key={idx}>• {note}</div>
+                  ))}
+                </div>
+              </div>
+            </div>
+          )}
 
           {/* Authoritative Data Sources */}
           <div className="bg-[#12151B] border border-white/[0.08] rounded-lg overflow-hidden">

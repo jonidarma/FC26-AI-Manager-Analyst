@@ -29,6 +29,7 @@ import {
   resolvePlayerDisplayName,
   resolvePlayerFullName,
 } from '../utils/playerDisplayName';
+import { evaluatePlayerEligibility, summarizeSquadEligibility } from '../utils/squadEligibility';
 
 type SquadSortKey =
   | 'squadNumber'
@@ -77,6 +78,7 @@ const EMPTY_PLAYER_FORM = {
   squadNumber: '',
   squadStatus: 'active' as SquadStatus,
   availability: 'available' as PlayerAvailability,
+  seniorSelectionAuthorized: false,
   injuryStatus: '',
   suspensionStatus: '',
   membershipStartDate: new Date().toISOString().slice(0, 10),
@@ -235,16 +237,9 @@ export function SquadManagementView() {
   });
 
   const stats = useMemo(() => {
+    const eligibility = summarizeSquadEligibility(players);
     const activeCount = players.filter(
       (p) => p.squadStatus === 'active' || p.squadStatus === 'loaned_in' || p.squadStatus === 'youth_academy'
-    ).length;
-    const availableCount = players.filter(
-      (p) =>
-        (p.squadStatus === 'active' || p.squadStatus === 'loaned_in' || p.squadStatus === 'youth_academy') &&
-        p.availability === 'available'
-    ).length;
-    const unavailableCount = players.filter(
-      (p) => p.availability === 'injured' || p.availability === 'suspended' || p.availability === 'unavailable'
     ).length;
     const loanedOrOut = players.filter(
       (p) => p.squadStatus === 'loaned_out' || p.squadStatus === 'transferred_out' || p.squadStatus === 'released'
@@ -254,7 +249,14 @@ export function SquadManagementView() {
       rated.length > 0
         ? (rated.reduce((sum, p) => sum + (p.overallRating ?? 0), 0) / rated.length).toFixed(1)
         : '—';
-    return { activeCount, availableCount, unavailableCount, loanedOrOut, avgOvr };
+    return {
+      activeCount,
+      availableCount: eligibility.eligibleCount,
+      doubtfulCount: eligibility.doubtfulCount,
+      unavailableCount: eligibility.ineligibleCount,
+      loanedOrOut,
+      avgOvr,
+    };
   }, [players]);
 
   const validRolesForPosition = useMemo(
@@ -364,6 +366,7 @@ export function SquadManagementView() {
       squadNumber: p.squadNumber !== null ? String(p.squadNumber) : '',
       squadStatus: p.squadStatus,
       availability: p.availability,
+      seniorSelectionAuthorized: Boolean(p.seniorSelectionAuthorized),
       injuryStatus: p.injuryStatus ?? '',
       suspensionStatus: p.suspensionStatus ?? '',
       membershipStartDate: p.membershipStartDate ?? '',
@@ -422,6 +425,10 @@ export function SquadManagementView() {
           squadNumber,
           squadStatus: playerForm.squadStatus,
           availability: playerForm.availability,
+          seniorSelectionAuthorized:
+            playerForm.squadStatus === 'youth_academy'
+              ? playerForm.seniorSelectionAuthorized
+              : false,
           injuryStatus: playerForm.injuryStatus.trim() || null,
           suspensionStatus: playerForm.suspensionStatus.trim() || null,
           membershipStartDate: playerForm.membershipStartDate.trim() || null,
@@ -451,6 +458,10 @@ export function SquadManagementView() {
           squadNumber,
           squadStatus: playerForm.squadStatus,
           availability: playerForm.availability,
+          seniorSelectionAuthorized:
+            playerForm.squadStatus === 'youth_academy'
+              ? playerForm.seniorSelectionAuthorized
+              : false,
           injuryStatus: playerForm.injuryStatus.trim() || null,
           suspensionStatus: playerForm.suspensionStatus.trim() || null,
           membershipStartDate: playerForm.membershipStartDate.trim() || null,
@@ -591,13 +602,18 @@ export function SquadManagementView() {
           </div>
         </div>
         <div className="border border-white/[0.08] bg-[#12151B] rounded-lg p-4">
-          <div className="text-[12px] text-[#8A94A6]">Matchday Available</div>
+          <div className="text-[12px] text-[#8A94A6]">Matchday Eligible</div>
           <div className="mt-1 text-[22px] font-bold font-mono tabular-nums text-emerald-400">
             {stats.availableCount}
+            {stats.doubtfulCount > 0 && (
+              <span className="ml-2 text-[12px] font-normal text-amber-300">
+                ({stats.doubtfulCount} doubtful)
+              </span>
+            )}
           </div>
         </div>
         <div className="border border-white/[0.08] bg-[#12151B] rounded-lg p-4">
-          <div className="text-[12px] text-[#8A94A6]">Injured / Suspended</div>
+          <div className="text-[12px] text-[#8A94A6]">Ineligible / Unavailable</div>
           <div className="mt-1 text-[22px] font-bold font-mono tabular-nums text-amber-300">
             {stats.unavailableCount}
           </div>
@@ -943,11 +959,8 @@ export function SquadManagementView() {
                 {sortedPlayers.map((p) => {
                   const displayName = resolvePlayerDisplayName(p);
                   const fullName = resolvePlayerFullName(p);
-                  const isUnavailable =
-                    p.availability !== 'available' ||
-                    p.squadStatus === 'loaned_out' ||
-                    p.squadStatus === 'transferred_out' ||
-                    p.squadStatus === 'released';
+                  const eligibility = evaluatePlayerEligibility(p);
+                  const isUnavailable = !eligibility.eligible;
                   return (
                     <tr
                       key={p.id}
@@ -998,6 +1011,13 @@ export function SquadManagementView() {
                         >
                           {SQUAD_STATUS_LABELS[p.squadStatus]}
                         </span>
+                        {p.squadStatus === 'youth_academy' && (
+                          <div className="text-[10px] text-[#8A94A6]">
+                            {p.seniorSelectionAuthorized
+                              ? 'Senior Selection Authorized'
+                              : 'Not Promoted (Ineligible)'}
+                          </div>
+                        )}
                       </td>
                       <td className="py-2.5 pr-3 text-[12px]">
                         <div
@@ -1098,6 +1118,24 @@ export function SquadManagementView() {
                             >
                               Recall
                             </button>
+                          ) : p.squadStatus === 'youth_academy' ? (
+                            <button
+                              type="button"
+                              onClick={() =>
+                                void handleQuickLifecycleUpdate(
+                                  p,
+                                  {
+                                    squadStatus: 'active',
+                                    availability: 'available',
+                                  },
+                                  'Promoted to Senior Squad'
+                                )
+                              }
+                              title="Promote from Youth Academy to Senior Squad"
+                              className="px-2 py-1 rounded border border-emerald-500/40 text-[11px] text-emerald-300 hover:bg-emerald-500/10"
+                            >
+                              Promote
+                            </button>
                           ) : null}
 
                           <button
@@ -1164,9 +1202,15 @@ export function SquadManagementView() {
         <div className="fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-4">
           <div className="w-full max-w-2xl border border-white/[0.12] bg-[#12151B] rounded-lg p-6 space-y-4 shadow-2xl">
             <div className="flex items-center justify-between">
-              <h2 className="text-[17px] font-semibold text-white">
-                Import Default FC26 Club Roster — {activeClub.name}
-              </h2>
+              <div>
+                <h2 className="text-[17px] font-semibold text-white">
+                  Import Missing Default FC26 Players — {activeClub.name}
+                </h2>
+                <p className="text-[11px] text-[#8A94A6] mt-0.5">
+                  Source: Imported FC26 Dataset Snapshot · Never overwrites Career Mode transfers or
+                  reactivates loaned-out/released players.
+                </p>
+              </div>
               <button
                 type="button"
                 onClick={() => setShowDefaultRosterModal(false)}
@@ -1192,9 +1236,9 @@ export function SquadManagementView() {
                   <div className="font-medium">{defaultRosterPreview.message}</div>
                   {defaultRosterPreview.status === 'linked_with_players' && (
                     <div className="mt-1.5 text-[12px] font-mono tabular-nums text-[#C8D1DD]">
-                      Matched Catalog Players: {defaultRosterPreview.totalMatchedPlayers} · New to
-                      Import: {defaultRosterPreview.newToImportCount} · Already in Squad (Preserved):{' '}
-                      {defaultRosterPreview.alreadyInSquadCount}
+                      Matched Catalog Players: {defaultRosterPreview.totalMatchedPlayers} · Missing
+                      to Import: {defaultRosterPreview.newToImportCount} · Already Tracked
+                      (Preserved): {defaultRosterPreview.alreadyInSquadCount}
                     </div>
                   )}
                 </div>
@@ -1202,7 +1246,8 @@ export function SquadManagementView() {
                 {defaultRosterPreview.samplePlayers.length > 0 && (
                   <div className="space-y-1.5">
                     <div className="text-[12px] text-[#8A94A6]">
-                      Preview (Top {defaultRosterPreview.samplePlayers.length} by OVR):
+                      Dataset Snapshot Preview (Top {defaultRosterPreview.samplePlayers.length} by
+                      OVR):
                     </div>
                     <div className="max-h-56 overflow-y-auto border border-white/[0.08] rounded-md divide-y divide-white/[0.06] bg-[#0C0F14]">
                       {defaultRosterPreview.samplePlayers.map((sp) => (
@@ -1244,7 +1289,7 @@ export function SquadManagementView() {
                       >
                         {importingDefaultRoster
                           ? 'Importing...'
-                          : `Import ${defaultRosterPreview.newToImportCount} Player(s)`}
+                          : `Import ${defaultRosterPreview.newToImportCount} Missing Player(s)`}
                       </button>
                     )}
                 </div>
@@ -1455,6 +1500,29 @@ export function SquadManagementView() {
                   <option value="Both">Both</option>
                 </select>
               </div>
+
+              {playerForm.squadStatus === 'youth_academy' && (
+                <div className="md:col-span-3 rounded-md border border-sky-500/30 bg-sky-500/[0.06] px-3.5 py-2.5">
+                  <label className="inline-flex items-start gap-2.5 cursor-pointer text-[12px] text-sky-100">
+                    <input
+                      type="checkbox"
+                      checked={playerForm.seniorSelectionAuthorized}
+                      onChange={(e) =>
+                        setPlayerForm({
+                          ...playerForm,
+                          seniorSelectionAuthorized: e.target.checked,
+                        })
+                      }
+                      className="mt-0.5 w-4 h-4 accent-sky-500"
+                    />
+                    <span>
+                      <strong className="text-white">Authorize Senior Matchday Selection</strong> —
+                      By default, Youth Academy players cannot be selected in Starting XI or Bench
+                      until promoted to Active. Check this to authorize temporary senior selection.
+                    </span>
+                  </label>
+                </div>
+              )}
 
               <div>
                 <label className="block text-[12px] text-[#9AA4B4] mb-1">

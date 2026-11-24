@@ -158,6 +158,7 @@ const MASTER_CATALOG_TABLES = [
   'catalog_nations',
   'catalog_leagues',
   'catalog_clubs',
+  'catalog_club_aliases',
   'catalog_positions',
   'catalog_players',
   'catalog_player_positions',
@@ -198,7 +199,7 @@ export function getDatabaseMetadata(): {
     storageMode,
     dbDirectory: dataDir,
     sizeBytes,
-    schemaVersion: versionRow?.version ?? 4,
+    schemaVersion: versionRow?.version ?? 5,
     tableCounts,
   };
 }
@@ -214,9 +215,9 @@ export function exportDatabaseBackup(): Record<string, unknown> {
     .get() as { version: number | null };
 
   return {
-    format: 'fc26-ai-manager-backup-v4',
+    format: 'fc26-ai-manager-backup-v5',
     exportedAt: new Date().toISOString(),
-    schemaVersion: versionRow?.version ?? 4,
+    schemaVersion: versionRow?.version ?? 5,
     tables: data,
   };
 }
@@ -229,11 +230,12 @@ export function restoreDatabaseBackup(payload: {
   const isFullBackup =
     payload.format === 'fc26-ai-manager-backup-v2' ||
     payload.format === 'fc26-ai-manager-backup-v3' ||
-    payload.format === 'fc26-ai-manager-backup-v4';
+    payload.format === 'fc26-ai-manager-backup-v4' ||
+    payload.format === 'fc26-ai-manager-backup-v5';
 
   if ((!isV1 && !isFullBackup) || !payload.tables) {
     throw new Error(
-      'Invalid backup format. Expected fc26-ai-manager-backup-v4 (or legacy v1/v2/v3).'
+      'Invalid backup format. Expected fc26-ai-manager-backup-v5 (or legacy v1/v2/v3/v4).'
     );
   }
 

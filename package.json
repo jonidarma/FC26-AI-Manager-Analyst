@@ -1,7 +1,7 @@
 {
   "name": "fc26-ai-manager",
   "private": true,
-  "version": "2.1.0",
+  "version": "2.2.0",
   "description": "FC26 AI Manager — Football Tactical Intelligence System for EA SPORTS FC 26 Career Mode",
   "author": "FC26 AI Manager",
   "type": "module",
@@ -20,7 +20,9 @@
     "test:capture": "tsx scripts/capture-tests/test-capture-engine.ts",
     "test:players": "tsx scripts/data-import/test-player-adapters.ts",
     "test:phase21": "tsx scripts/phase21-tests/test-phase21.ts",
+    "test:phase22": "tsx scripts/phase22-tests/test-phase22.ts",
     "import:fc26": "tsx scripts/data-import/import-all.ts",
+    "catalog:reconcile": "tsx scripts/data-import/reconcile-catalog.ts",
     "preview": "vite preview",
     "clean": "rm -rf dist dist-server dist-electron release server.js",
     "lint": "tsc --noEmit && tsc -p electron/tsconfig.json --noEmit"

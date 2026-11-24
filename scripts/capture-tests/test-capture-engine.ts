@@ -718,7 +718,7 @@ async function main(): Promise<void> {
     const repo = await import('../../server/services/repository');
 
     const meta = dbMod.getDatabaseMetadata();
-    assert.equal(meta.schemaVersion, 4, 'Expected SQLite schema version 4');
+    assert.ok(meta.schemaVersion >= 4, `Expected SQLite schema version >= 4, got ${meta.schemaVersion}`);
 
     const club = repo.createClub({
       name: 'Test Tactical FC',

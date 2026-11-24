@@ -1,5 +1,5 @@
 {
-  "datasetVersion": "fc26-formations-1.0.0",
+  "datasetVersion": "fc26-formations-1.1.0",
   "sourceKey": "fifplay_fc26_formations",
   "completeness": "verified_complete",
   "records": [
@@ -11,21 +11,113 @@
       "defensiveShape": "3-5-2 / 5-3-2",
       "attackingShape": "3-1-4-2",
       "tacticalSummary": "Three centre-backs anchored by a single CDM, twin central midfielders, wide midfielders, and a strike pair.",
-      "gameModes": ["Career Mode", "Kick Off", "Ultimate Team"],
+      "gameModes": [
+        "Career Mode",
+        "Kick Off",
+        "Ultimate Team"
+      ],
       "careerModeStatus": "verified",
       "layoutVerified": true,
       "slots": [
-        { "slotOrder": 0, "positionCode": "GK", "positionLabel": "GK", "x": 50, "y": 90, "tacticalLine": "GK" },
-        { "slotOrder": 1, "positionCode": "CB", "positionLabel": "LCB", "x": 26, "y": 76, "tacticalLine": "DEF" },
-        { "slotOrder": 2, "positionCode": "CB", "positionLabel": "CB", "x": 50, "y": 78, "tacticalLine": "DEF" },
-        { "slotOrder": 3, "positionCode": "CB", "positionLabel": "RCB", "x": 74, "y": 76, "tacticalLine": "DEF" },
-        { "slotOrder": 4, "positionCode": "CDM", "positionLabel": "CDM", "x": 50, "y": 62, "tacticalLine": "MID" },
-        { "slotOrder": 5, "positionCode": "LM", "positionLabel": "LM", "x": 14, "y": 48, "tacticalLine": "MID" },
-        { "slotOrder": 6, "positionCode": "CM", "positionLabel": "LCM", "x": 36, "y": 46, "tacticalLine": "MID" },
-        { "slotOrder": 7, "positionCode": "CM", "positionLabel": "RCM", "x": 64, "y": 46, "tacticalLine": "MID" },
-        { "slotOrder": 8, "positionCode": "RM", "positionLabel": "RM", "x": 86, "y": 48, "tacticalLine": "MID" },
-        { "slotOrder": 9, "positionCode": "ST", "positionLabel": "LS", "x": 38, "y": 20, "tacticalLine": "ATT" },
-        { "slotOrder": 10, "positionCode": "ST", "positionLabel": "RS", "x": 62, "y": 20, "tacticalLine": "ATT" }
+        {
+          "slotOrder": 0,
+          "positionCode": "GK",
+          "positionLabel": "GK",
+          "x": 50,
+          "y": 90,
+          "tacticalLine": "GK",
+          "slotId": "GK"
+        },
+        {
+          "slotOrder": 1,
+          "positionCode": "CB",
+          "positionLabel": "CB",
+          "x": 26,
+          "y": 76,
+          "tacticalLine": "DEF",
+          "slotId": "LCB"
+        },
+        {
+          "slotOrder": 2,
+          "positionCode": "CB",
+          "positionLabel": "CB",
+          "x": 50,
+          "y": 78,
+          "tacticalLine": "DEF",
+          "slotId": "CB"
+        },
+        {
+          "slotOrder": 3,
+          "positionCode": "CB",
+          "positionLabel": "CB",
+          "x": 74,
+          "y": 76,
+          "tacticalLine": "DEF",
+          "slotId": "RCB"
+        },
+        {
+          "slotOrder": 4,
+          "positionCode": "CDM",
+          "positionLabel": "CDM",
+          "x": 50,
+          "y": 62,
+          "tacticalLine": "MID",
+          "slotId": "CDM"
+        },
+        {
+          "slotOrder": 5,
+          "positionCode": "LM",
+          "positionLabel": "LM",
+          "x": 14,
+          "y": 48,
+          "tacticalLine": "MID",
+          "slotId": "LM"
+        },
+        {
+          "slotOrder": 6,
+          "positionCode": "CM",
+          "positionLabel": "CM",
+          "x": 36,
+          "y": 46,
+          "tacticalLine": "MID",
+          "slotId": "LCM"
+        },
+        {
+          "slotOrder": 7,
+          "positionCode": "CM",
+          "positionLabel": "CM",
+          "x": 64,
+          "y": 46,
+          "tacticalLine": "MID",
+          "slotId": "RCM"
+        },
+        {
+          "slotOrder": 8,
+          "positionCode": "RM",
+          "positionLabel": "RM",
+          "x": 86,
+          "y": 48,
+          "tacticalLine": "MID",
+          "slotId": "RM"
+        },
+        {
+          "slotOrder": 9,
+          "positionCode": "ST",
+          "positionLabel": "ST",
+          "x": 38,
+          "y": 20,
+          "tacticalLine": "ATT",
+          "slotId": "LS"
+        },
+        {
+          "slotOrder": 10,
+          "positionCode": "ST",
+          "positionLabel": "ST",
+          "x": 62,
+          "y": 20,
+          "tacticalLine": "ATT",
+          "slotId": "RS"
+        }
       ]
     },
     {
@@ -36,21 +128,113 @@
       "defensiveShape": "5-2-1-2",
       "attackingShape": "3-2-5",
       "tacticalSummary": "Three centre-backs behind a four-man midfield, a central CAM creator, and two strikers.",
-      "gameModes": ["Career Mode", "Kick Off", "Ultimate Team"],
+      "gameModes": [
+        "Career Mode",
+        "Kick Off",
+        "Ultimate Team"
+      ],
       "careerModeStatus": "verified",
       "layoutVerified": true,
       "slots": [
-        { "slotOrder": 0, "positionCode": "GK", "positionLabel": "GK", "x": 50, "y": 90, "tacticalLine": "GK" },
-        { "slotOrder": 1, "positionCode": "CB", "positionLabel": "LCB", "x": 26, "y": 76, "tacticalLine": "DEF" },
-        { "slotOrder": 2, "positionCode": "CB", "positionLabel": "CB", "x": 50, "y": 78, "tacticalLine": "DEF" },
-        { "slotOrder": 3, "positionCode": "CB", "positionLabel": "RCB", "x": 74, "y": 76, "tacticalLine": "DEF" },
-        { "slotOrder": 4, "positionCode": "LM", "positionLabel": "LM", "x": 14, "y": 54, "tacticalLine": "MID" },
-        { "slotOrder": 5, "positionCode": "CM", "positionLabel": "LCM", "x": 38, "y": 56, "tacticalLine": "MID" },
-        { "slotOrder": 6, "positionCode": "CM", "positionLabel": "RCM", "x": 62, "y": 56, "tacticalLine": "MID" },
-        { "slotOrder": 7, "positionCode": "RM", "positionLabel": "RM", "x": 86, "y": 54, "tacticalLine": "MID" },
-        { "slotOrder": 8, "positionCode": "CAM", "positionLabel": "CAM", "x": 50, "y": 38, "tacticalLine": "MID" },
-        { "slotOrder": 9, "positionCode": "ST", "positionLabel": "LS", "x": 38, "y": 20, "tacticalLine": "ATT" },
-        { "slotOrder": 10, "positionCode": "ST", "positionLabel": "RS", "x": 62, "y": 20, "tacticalLine": "ATT" }
+        {
+          "slotOrder": 0,
+          "positionCode": "GK",
+          "positionLabel": "GK",
+          "x": 50,
+          "y": 90,
+          "tacticalLine": "GK",
+          "slotId": "GK"
+        },
+        {
+          "slotOrder": 1,
+          "positionCode": "CB",
+          "positionLabel": "CB",
+          "x": 26,
+          "y": 76,
+          "tacticalLine": "DEF",
+          "slotId": "LCB"
+        },
+        {
+          "slotOrder": 2,
+          "positionCode": "CB",
+          "positionLabel": "CB",
+          "x": 50,
+          "y": 78,
+          "tacticalLine": "DEF",
+          "slotId": "CB"
+        },
+        {
+          "slotOrder": 3,
+          "positionCode": "CB",
+          "positionLabel": "CB",
+          "x": 74,
+          "y": 76,
+          "tacticalLine": "DEF",
+          "slotId": "RCB"
+        },
+        {
+          "slotOrder": 4,
+          "positionCode": "LM",
+          "positionLabel": "LM",
+          "x": 14,
+          "y": 54,
+          "tacticalLine": "MID",
+          "slotId": "LM"
+        },
+        {
+          "slotOrder": 5,
+          "positionCode": "CM",
+          "positionLabel": "CM",
+          "x": 38,
+          "y": 56,
+          "tacticalLine": "MID",
+          "slotId": "LCM"
+        },
+        {
+          "slotOrder": 6,
+          "positionCode": "CM",
+          "positionLabel": "CM",
+          "x": 62,
+          "y": 56,
+          "tacticalLine": "MID",
+          "slotId": "RCM"
+        },
+        {
+          "slotOrder": 7,
+          "positionCode": "RM",
+          "positionLabel": "RM",
+          "x": 86,
+          "y": 54,
+          "tacticalLine": "MID",
+          "slotId": "RM"
+        },
+        {
+          "slotOrder": 8,
+          "positionCode": "CAM",
+          "positionLabel": "CAM",
+          "x": 50,
+          "y": 38,
+          "tacticalLine": "MID",
+          "slotId": "CAM"
+        },
+        {
+          "slotOrder": 9,
+          "positionCode": "ST",
+          "positionLabel": "ST",
+          "x": 38,
+          "y": 20,
+          "tacticalLine": "ATT",
+          "slotId": "LS"
+        },
+        {
+          "slotOrder": 10,
+          "positionCode": "ST",
+          "positionLabel": "ST",
+          "x": 62,
+          "y": 20,
+          "tacticalLine": "ATT",
+          "slotId": "RS"
+        }
       ]
     },
     {
@@ -61,21 +245,113 @@
       "defensiveShape": "5-4-1",
       "attackingShape": "3-2-5",
       "tacticalSummary": "Modern box-midfield structure with twin half-space CAMs supporting a central striker.",
-      "gameModes": ["Career Mode", "Kick Off", "Ultimate Team"],
+      "gameModes": [
+        "Career Mode",
+        "Kick Off",
+        "Ultimate Team"
+      ],
       "careerModeStatus": "verified",
       "layoutVerified": true,
       "slots": [
-        { "slotOrder": 0, "positionCode": "GK", "positionLabel": "GK", "x": 50, "y": 90, "tacticalLine": "GK" },
-        { "slotOrder": 1, "positionCode": "CB", "positionLabel": "LCB", "x": 26, "y": 76, "tacticalLine": "DEF" },
-        { "slotOrder": 2, "positionCode": "CB", "positionLabel": "CB", "x": 50, "y": 78, "tacticalLine": "DEF" },
-        { "slotOrder": 3, "positionCode": "CB", "positionLabel": "RCB", "x": 74, "y": 76, "tacticalLine": "DEF" },
-        { "slotOrder": 4, "positionCode": "LM", "positionLabel": "LM", "x": 14, "y": 54, "tacticalLine": "MID" },
-        { "slotOrder": 5, "positionCode": "CM", "positionLabel": "LCM", "x": 38, "y": 56, "tacticalLine": "MID" },
-        { "slotOrder": 6, "positionCode": "CM", "positionLabel": "RCM", "x": 62, "y": 56, "tacticalLine": "MID" },
-        { "slotOrder": 7, "positionCode": "RM", "positionLabel": "RM", "x": 86, "y": 54, "tacticalLine": "MID" },
-        { "slotOrder": 8, "positionCode": "CAM", "positionLabel": "LCAM", "x": 34, "y": 35, "tacticalLine": "MID" },
-        { "slotOrder": 9, "positionCode": "CAM", "positionLabel": "RCAM", "x": 66, "y": 35, "tacticalLine": "MID" },
-        { "slotOrder": 10, "positionCode": "ST", "positionLabel": "ST", "x": 50, "y": 18, "tacticalLine": "ATT" }
+        {
+          "slotOrder": 0,
+          "positionCode": "GK",
+          "positionLabel": "GK",
+          "x": 50,
+          "y": 90,
+          "tacticalLine": "GK",
+          "slotId": "GK"
+        },
+        {
+          "slotOrder": 1,
+          "positionCode": "CB",
+          "positionLabel": "CB",
+          "x": 26,
+          "y": 76,
+          "tacticalLine": "DEF",
+          "slotId": "LCB"
+        },
+        {
+          "slotOrder": 2,
+          "positionCode": "CB",
+          "positionLabel": "CB",
+          "x": 50,
+          "y": 78,
+          "tacticalLine": "DEF",
+          "slotId": "CB"
+        },
+        {
+          "slotOrder": 3,
+          "positionCode": "CB",
+          "positionLabel": "CB",
+          "x": 74,
+          "y": 76,
+          "tacticalLine": "DEF",
+          "slotId": "RCB"
+        },
+        {
+          "slotOrder": 4,
+          "positionCode": "LM",
+          "positionLabel": "LM",
+          "x": 14,
+          "y": 54,
+          "tacticalLine": "MID",
+          "slotId": "LM"
+        },
+        {
+          "slotOrder": 5,
+          "positionCode": "CM",
+          "positionLabel": "CM",
+          "x": 38,
+          "y": 56,
+          "tacticalLine": "MID",
+          "slotId": "LCM"
+        },
+        {
+          "slotOrder": 6,
+          "positionCode": "CM",
+          "positionLabel": "CM",
+          "x": 62,
+          "y": 56,
+          "tacticalLine": "MID",
+          "slotId": "RCM"
+        },
+        {
+          "slotOrder": 7,
+          "positionCode": "RM",
+          "positionLabel": "RM",
+          "x": 86,
+          "y": 54,
+          "tacticalLine": "MID",
+          "slotId": "RM"
+        },
+        {
+          "slotOrder": 8,
+          "positionCode": "CAM",
+          "positionLabel": "CAM",
+          "x": 34,
+          "y": 35,
+          "tacticalLine": "MID",
+          "slotId": "LCAM"
+        },
+        {
+          "slotOrder": 9,
+          "positionCode": "CAM",
+          "positionLabel": "CAM",
+          "x": 66,
+          "y": 35,
+          "tacticalLine": "MID",
+          "slotId": "RCAM"
+        },
+        {
+          "slotOrder": 10,
+          "positionCode": "ST",
+          "positionLabel": "ST",
+          "x": 50,
+          "y": 18,
+          "tacticalLine": "ATT",
+          "slotId": "ST"
+        }
       ]
     },
     {
@@ -86,21 +362,113 @@
       "defensiveShape": "5-4-1",
       "attackingShape": "3-2-5",
       "tacticalSummary": "Three centre-backs with wide midfielders doubling up on flanks behind a front three.",
-      "gameModes": ["Career Mode", "Kick Off", "Ultimate Team"],
+      "gameModes": [
+        "Career Mode",
+        "Kick Off",
+        "Ultimate Team"
+      ],
       "careerModeStatus": "verified",
       "layoutVerified": true,
       "slots": [
-        { "slotOrder": 0, "positionCode": "GK", "positionLabel": "GK", "x": 50, "y": 90, "tacticalLine": "GK" },
-        { "slotOrder": 1, "positionCode": "CB", "positionLabel": "LCB", "x": 26, "y": 76, "tacticalLine": "DEF" },
-        { "slotOrder": 2, "positionCode": "CB", "positionLabel": "CB", "x": 50, "y": 78, "tacticalLine": "DEF" },
-        { "slotOrder": 3, "positionCode": "CB", "positionLabel": "RCB", "x": 74, "y": 76, "tacticalLine": "DEF" },
-        { "slotOrder": 4, "positionCode": "LM", "positionLabel": "LM", "x": 14, "y": 52, "tacticalLine": "MID" },
-        { "slotOrder": 5, "positionCode": "CM", "positionLabel": "LCM", "x": 38, "y": 54, "tacticalLine": "MID" },
-        { "slotOrder": 6, "positionCode": "CM", "positionLabel": "RCM", "x": 62, "y": 54, "tacticalLine": "MID" },
-        { "slotOrder": 7, "positionCode": "RM", "positionLabel": "RM", "x": 86, "y": 52, "tacticalLine": "MID" },
-        { "slotOrder": 8, "positionCode": "LW", "positionLabel": "LW", "x": 22, "y": 24, "tacticalLine": "ATT" },
-        { "slotOrder": 9, "positionCode": "ST", "positionLabel": "ST", "x": 50, "y": 18, "tacticalLine": "ATT" },
-        { "slotOrder": 10, "positionCode": "RW", "positionLabel": "RW", "x": 78, "y": 24, "tacticalLine": "ATT" }
+        {
+          "slotOrder": 0,
+          "positionCode": "GK",
+          "positionLabel": "GK",
+          "x": 50,
+          "y": 90,
+          "tacticalLine": "GK",
+          "slotId": "GK"
+        },
+        {
+          "slotOrder": 1,
+          "positionCode": "CB",
+          "positionLabel": "CB",
+          "x": 26,
+          "y": 76,
+          "tacticalLine": "DEF",
+          "slotId": "LCB"
+        },
+        {
+          "slotOrder": 2,
+          "positionCode": "CB",
+          "positionLabel": "CB",
+          "x": 50,
+          "y": 78,
+          "tacticalLine": "DEF",
+          "slotId": "CB"
+        },
+        {
+          "slotOrder": 3,
+          "positionCode": "CB",
+          "positionLabel": "CB",
+          "x": 74,
+          "y": 76,
+          "tacticalLine": "DEF",
+          "slotId": "RCB"
+        },
+        {
+          "slotOrder": 4,
+          "positionCode": "LM",
+          "positionLabel": "LM",
+          "x": 14,
+          "y": 52,
+          "tacticalLine": "MID",
+          "slotId": "LM"
+        },
+        {
+          "slotOrder": 5,
+          "positionCode": "CM",
+          "positionLabel": "CM",
+          "x": 38,
+          "y": 54,
+          "tacticalLine": "MID",
+          "slotId": "LCM"
+        },
+        {
+          "slotOrder": 6,
+          "positionCode": "CM",
+          "positionLabel": "CM",
+          "x": 62,
+          "y": 54,
+          "tacticalLine": "MID",
+          "slotId": "RCM"
+        },
+        {
+          "slotOrder": 7,
+          "positionCode": "RM",
+          "positionLabel": "RM",
+          "x": 86,
+          "y": 52,
+          "tacticalLine": "MID",
+          "slotId": "RM"
+        },
+        {
+          "slotOrder": 8,
+          "positionCode": "LW",
+          "positionLabel": "LW",
+          "x": 22,
+          "y": 24,
+          "tacticalLine": "ATT",
+          "slotId": "LW"
+        },
+        {
+          "slotOrder": 9,
+          "positionCode": "ST",
+          "positionLabel": "ST",
+          "x": 50,
+          "y": 18,
+          "tacticalLine": "ATT",
+          "slotId": "ST"
+        },
+        {
+          "slotOrder": 10,
+          "positionCode": "RW",
+          "positionLabel": "RW",
+          "x": 78,
+          "y": 24,
+          "tacticalLine": "ATT",
+          "slotId": "RW"
+        }
       ]
     },
     {
@@ -111,21 +479,113 @@
       "defensiveShape": "5-2-3 / 3-4-3",
       "attackingShape": "3-1-3-3",
       "tacticalSummary": "Positional diamond midfield with a holding CDM and central CAM feeding a wide front three.",
-      "gameModes": ["Career Mode", "Kick Off", "Ultimate Team"],
+      "gameModes": [
+        "Career Mode",
+        "Kick Off",
+        "Ultimate Team"
+      ],
       "careerModeStatus": "verified",
       "layoutVerified": true,
       "slots": [
-        { "slotOrder": 0, "positionCode": "GK", "positionLabel": "GK", "x": 50, "y": 90, "tacticalLine": "GK" },
-        { "slotOrder": 1, "positionCode": "CB", "positionLabel": "LCB", "x": 26, "y": 76, "tacticalLine": "DEF" },
-        { "slotOrder": 2, "positionCode": "CB", "positionLabel": "CB", "x": 50, "y": 78, "tacticalLine": "DEF" },
-        { "slotOrder": 3, "positionCode": "CB", "positionLabel": "RCB", "x": 74, "y": 76, "tacticalLine": "DEF" },
-        { "slotOrder": 4, "positionCode": "CDM", "positionLabel": "CDM", "x": 50, "y": 62, "tacticalLine": "MID" },
-        { "slotOrder": 5, "positionCode": "LM", "positionLabel": "LM", "x": 16, "y": 48, "tacticalLine": "MID" },
-        { "slotOrder": 6, "positionCode": "RM", "positionLabel": "RM", "x": 84, "y": 48, "tacticalLine": "MID" },
-        { "slotOrder": 7, "positionCode": "CAM", "positionLabel": "CAM", "x": 50, "y": 38, "tacticalLine": "MID" },
-        { "slotOrder": 8, "positionCode": "LW", "positionLabel": "LW", "x": 22, "y": 22, "tacticalLine": "ATT" },
-        { "slotOrder": 9, "positionCode": "ST", "positionLabel": "ST", "x": 50, "y": 17, "tacticalLine": "ATT" },
-        { "slotOrder": 10, "positionCode": "RW", "positionLabel": "RW", "x": 78, "y": 22, "tacticalLine": "ATT" }
+        {
+          "slotOrder": 0,
+          "positionCode": "GK",
+          "positionLabel": "GK",
+          "x": 50,
+          "y": 90,
+          "tacticalLine": "GK",
+          "slotId": "GK"
+        },
+        {
+          "slotOrder": 1,
+          "positionCode": "CB",
+          "positionLabel": "CB",
+          "x": 26,
+          "y": 76,
+          "tacticalLine": "DEF",
+          "slotId": "LCB"
+        },
+        {
+          "slotOrder": 2,
+          "positionCode": "CB",
+          "positionLabel": "CB",
+          "x": 50,
+          "y": 78,
+          "tacticalLine": "DEF",
+          "slotId": "CB"
+        },
+        {
+          "slotOrder": 3,
+          "positionCode": "CB",
+          "positionLabel": "CB",
+          "x": 74,
+          "y": 76,
+          "tacticalLine": "DEF",
+          "slotId": "RCB"
+        },
+        {
+          "slotOrder": 4,
+          "positionCode": "CDM",
+          "positionLabel": "CDM",
+          "x": 50,
+          "y": 62,
+          "tacticalLine": "MID",
+          "slotId": "CDM"
+        },
+        {
+          "slotOrder": 5,
+          "positionCode": "LM",
+          "positionLabel": "LM",
+          "x": 16,
+          "y": 48,
+          "tacticalLine": "MID",
+          "slotId": "LM"
+        },
+        {
+          "slotOrder": 6,
+          "positionCode": "RM",
+          "positionLabel": "RM",
+          "x": 84,
+          "y": 48,
+          "tacticalLine": "MID",
+          "slotId": "RM"
+        },
+        {
+          "slotOrder": 7,
+          "positionCode": "CAM",
+          "positionLabel": "CAM",
+          "x": 50,
+          "y": 38,
+          "tacticalLine": "MID",
+          "slotId": "CAM"
+        },
+        {
+          "slotOrder": 8,
+          "positionCode": "LW",
+          "positionLabel": "LW",
+          "x": 22,
+          "y": 22,
+          "tacticalLine": "ATT",
+          "slotId": "LW"
+        },
+        {
+          "slotOrder": 9,
+          "positionCode": "ST",
+          "positionLabel": "ST",
+          "x": 50,
+          "y": 17,
+          "tacticalLine": "ATT",
+          "slotId": "ST"
+        },
+        {
+          "slotOrder": 10,
+          "positionCode": "RW",
+          "positionLabel": "RW",
+          "x": 78,
+          "y": 22,
+          "tacticalLine": "ATT",
+          "slotId": "RW"
+        }
       ]
     },
     {
@@ -136,21 +596,113 @@
       "defensiveShape": "4-3-1-2",
       "attackingShape": "2-3-3-2",
       "tacticalSummary": "Central diamond midfield designed for vertical combinations and interior overloads, relying on fullbacks for width.",
-      "gameModes": ["Career Mode", "Kick Off", "Ultimate Team"],
+      "gameModes": [
+        "Career Mode",
+        "Kick Off",
+        "Ultimate Team"
+      ],
       "careerModeStatus": "verified",
       "layoutVerified": true,
       "slots": [
-        { "slotOrder": 0, "positionCode": "GK", "positionLabel": "GK", "x": 50, "y": 90, "tacticalLine": "GK" },
-        { "slotOrder": 1, "positionCode": "LB", "positionLabel": "LB", "x": 16, "y": 72, "tacticalLine": "DEF" },
-        { "slotOrder": 2, "positionCode": "CB", "positionLabel": "LCB", "x": 38, "y": 76, "tacticalLine": "DEF" },
-        { "slotOrder": 3, "positionCode": "CB", "positionLabel": "RCB", "x": 62, "y": 76, "tacticalLine": "DEF" },
-        { "slotOrder": 4, "positionCode": "RB", "positionLabel": "RB", "x": 84, "y": 72, "tacticalLine": "DEF" },
-        { "slotOrder": 5, "positionCode": "CDM", "positionLabel": "CDM", "x": 50, "y": 60, "tacticalLine": "MID" },
-        { "slotOrder": 6, "positionCode": "CM", "positionLabel": "LCM", "x": 32, "y": 48, "tacticalLine": "MID" },
-        { "slotOrder": 7, "positionCode": "CM", "positionLabel": "RCM", "x": 68, "y": 48, "tacticalLine": "MID" },
-        { "slotOrder": 8, "positionCode": "CAM", "positionLabel": "CAM", "x": 50, "y": 35, "tacticalLine": "MID" },
-        { "slotOrder": 9, "positionCode": "ST", "positionLabel": "LS", "x": 38, "y": 19, "tacticalLine": "ATT" },
-        { "slotOrder": 10, "positionCode": "ST", "positionLabel": "RS", "x": 62, "y": 19, "tacticalLine": "ATT" }
+        {
+          "slotOrder": 0,
+          "positionCode": "GK",
+          "positionLabel": "GK",
+          "x": 50,
+          "y": 90,
+          "tacticalLine": "GK",
+          "slotId": "GK"
+        },
+        {
+          "slotOrder": 1,
+          "positionCode": "LB",
+          "positionLabel": "LB",
+          "x": 16,
+          "y": 72,
+          "tacticalLine": "DEF",
+          "slotId": "LB"
+        },
+        {
+          "slotOrder": 2,
+          "positionCode": "CB",
+          "positionLabel": "CB",
+          "x": 38,
+          "y": 76,
+          "tacticalLine": "DEF",
+          "slotId": "LCB"
+        },
+        {
+          "slotOrder": 3,
+          "positionCode": "CB",
+          "positionLabel": "CB",
+          "x": 62,
+          "y": 76,
+          "tacticalLine": "DEF",
+          "slotId": "RCB"
+        },
+        {
+          "slotOrder": 4,
+          "positionCode": "RB",
+          "positionLabel": "RB",
+          "x": 84,
+          "y": 72,
+          "tacticalLine": "DEF",
+          "slotId": "RB"
+        },
+        {
+          "slotOrder": 5,
+          "positionCode": "CDM",
+          "positionLabel": "CDM",
+          "x": 50,
+          "y": 60,
+          "tacticalLine": "MID",
+          "slotId": "CDM"
+        },
+        {
+          "slotOrder": 6,
+          "positionCode": "CM",
+          "positionLabel": "CM",
+          "x": 32,
+          "y": 48,
+          "tacticalLine": "MID",
+          "slotId": "LCM"
+        },
+        {
+          "slotOrder": 7,
+          "positionCode": "CM",
+          "positionLabel": "CM",
+          "x": 68,
+          "y": 48,
+          "tacticalLine": "MID",
+          "slotId": "RCM"
+        },
+        {
+          "slotOrder": 8,
+          "positionCode": "CAM",
+          "positionLabel": "CAM",
+          "x": 50,
+          "y": 35,
+          "tacticalLine": "MID",
+          "slotId": "CAM"
+        },
+        {
+          "slotOrder": 9,
+          "positionCode": "ST",
+          "positionLabel": "ST",
+          "x": 38,
+          "y": 19,
+          "tacticalLine": "ATT",
+          "slotId": "LS"
+        },
+        {
+          "slotOrder": 10,
+          "positionCode": "ST",
+          "positionLabel": "ST",
+          "x": 62,
+          "y": 19,
+          "tacticalLine": "ATT",
+          "slotId": "RS"
+        }
       ]
     },
     {
@@ -161,21 +713,113 @@
       "defensiveShape": "4-4-2",
       "attackingShape": "4-1-3-2",
       "tacticalSummary": "Wide diamond using LM/RM touchline runners with a CDM anchor, CAM playmaker, and twin strikers.",
-      "gameModes": ["Career Mode", "Kick Off", "Ultimate Team"],
+      "gameModes": [
+        "Career Mode",
+        "Kick Off",
+        "Ultimate Team"
+      ],
       "careerModeStatus": "verified",
       "layoutVerified": true,
       "slots": [
-        { "slotOrder": 0, "positionCode": "GK", "positionLabel": "GK", "x": 50, "y": 90, "tacticalLine": "GK" },
-        { "slotOrder": 1, "positionCode": "LB", "positionLabel": "LB", "x": 16, "y": 74, "tacticalLine": "DEF" },
-        { "slotOrder": 2, "positionCode": "CB", "positionLabel": "LCB", "x": 38, "y": 77, "tacticalLine": "DEF" },
-        { "slotOrder": 3, "positionCode": "CB", "positionLabel": "RCB", "x": 62, "y": 77, "tacticalLine": "DEF" },
-        { "slotOrder": 4, "positionCode": "RB", "positionLabel": "RB", "x": 84, "y": 74, "tacticalLine": "DEF" },
-        { "slotOrder": 5, "positionCode": "CDM", "positionLabel": "CDM", "x": 50, "y": 60, "tacticalLine": "MID" },
-        { "slotOrder": 6, "positionCode": "LM", "positionLabel": "LM", "x": 16, "y": 46, "tacticalLine": "MID" },
-        { "slotOrder": 7, "positionCode": "RM", "positionLabel": "RM", "x": 84, "y": 46, "tacticalLine": "MID" },
-        { "slotOrder": 8, "positionCode": "CAM", "positionLabel": "CAM", "x": 50, "y": 35, "tacticalLine": "MID" },
-        { "slotOrder": 9, "positionCode": "ST", "positionLabel": "LS", "x": 38, "y": 19, "tacticalLine": "ATT" },
-        { "slotOrder": 10, "positionCode": "ST", "positionLabel": "RS", "x": 62, "y": 19, "tacticalLine": "ATT" }
+        {
+          "slotOrder": 0,
+          "positionCode": "GK",
+          "positionLabel": "GK",
+          "x": 50,
+          "y": 90,
+          "tacticalLine": "GK",
+          "slotId": "GK"
+        },
+        {
+          "slotOrder": 1,
+          "positionCode": "LB",
+          "positionLabel": "LB",
+          "x": 16,
+          "y": 74,
+          "tacticalLine": "DEF",
+          "slotId": "LB"
+        },
+        {
+          "slotOrder": 2,
+          "positionCode": "CB",
+          "positionLabel": "CB",
+          "x": 38,
+          "y": 77,
+          "tacticalLine": "DEF",
+          "slotId": "LCB"
+        },
+        {
+          "slotOrder": 3,
+          "positionCode": "CB",
+          "positionLabel": "CB",
+          "x": 62,
+          "y": 77,
+          "tacticalLine": "DEF",
+          "slotId": "RCB"
+        },
+        {
+          "slotOrder": 4,
+          "positionCode": "RB",
+          "positionLabel": "RB",
+          "x": 84,
+          "y": 74,
+          "tacticalLine": "DEF",
+          "slotId": "RB"
+        },
+        {
+          "slotOrder": 5,
+          "positionCode": "CDM",
+          "positionLabel": "CDM",
+          "x": 50,
+          "y": 60,
+          "tacticalLine": "MID",
+          "slotId": "CDM"
+        },
+        {
+          "slotOrder": 6,
+          "positionCode": "LM",
+          "positionLabel": "LM",
+          "x": 16,
+          "y": 46,
+          "tacticalLine": "MID",
+          "slotId": "LM"
+        },
+        {
+          "slotOrder": 7,
+          "positionCode": "RM",
+          "positionLabel": "RM",
+          "x": 84,
+          "y": 46,
+          "tacticalLine": "MID",
+          "slotId": "RM"
+        },
+        {
+          "slotOrder": 8,
+          "positionCode": "CAM",
+          "positionLabel": "CAM",
+          "x": 50,
+          "y": 35,
+          "tacticalLine": "MID",
+          "slotId": "CAM"
+        },
+        {
+          "slotOrder": 9,
+          "positionCode": "ST",
+          "positionLabel": "ST",
+          "x": 38,
+          "y": 19,
+          "tacticalLine": "ATT",
+          "slotId": "LS"
+        },
+        {
+          "slotOrder": 10,
+          "positionCode": "ST",
+          "positionLabel": "ST",
+          "x": 62,
+          "y": 19,
+          "tacticalLine": "ATT",
+          "slotId": "RS"
+        }
       ]
     },
     {
@@ -186,21 +830,113 @@
       "defensiveShape": "4-4-2",
       "attackingShape": "4-1-3-2",
       "tacticalSummary": "Attack-minded twin-striker shape with a lone CDM behind a central CM and wide LM/RM outlets.",
-      "gameModes": ["Career Mode", "Kick Off", "Ultimate Team"],
+      "gameModes": [
+        "Career Mode",
+        "Kick Off",
+        "Ultimate Team"
+      ],
       "careerModeStatus": "verified",
       "layoutVerified": true,
       "slots": [
-        { "slotOrder": 0, "positionCode": "GK", "positionLabel": "GK", "x": 50, "y": 90, "tacticalLine": "GK" },
-        { "slotOrder": 1, "positionCode": "LB", "positionLabel": "LB", "x": 16, "y": 74, "tacticalLine": "DEF" },
-        { "slotOrder": 2, "positionCode": "CB", "positionLabel": "LCB", "x": 38, "y": 77, "tacticalLine": "DEF" },
-        { "slotOrder": 3, "positionCode": "CB", "positionLabel": "RCB", "x": 62, "y": 77, "tacticalLine": "DEF" },
-        { "slotOrder": 4, "positionCode": "RB", "positionLabel": "RB", "x": 84, "y": 74, "tacticalLine": "DEF" },
-        { "slotOrder": 5, "positionCode": "CDM", "positionLabel": "CDM", "x": 50, "y": 60, "tacticalLine": "MID" },
-        { "slotOrder": 6, "positionCode": "LM", "positionLabel": "LM", "x": 16, "y": 44, "tacticalLine": "MID" },
-        { "slotOrder": 7, "positionCode": "CM", "positionLabel": "CM", "x": 50, "y": 44, "tacticalLine": "MID" },
-        { "slotOrder": 8, "positionCode": "RM", "positionLabel": "RM", "x": 84, "y": 44, "tacticalLine": "MID" },
-        { "slotOrder": 9, "positionCode": "ST", "positionLabel": "LS", "x": 38, "y": 20, "tacticalLine": "ATT" },
-        { "slotOrder": 10, "positionCode": "ST", "positionLabel": "RS", "x": 62, "y": 20, "tacticalLine": "ATT" }
+        {
+          "slotOrder": 0,
+          "positionCode": "GK",
+          "positionLabel": "GK",
+          "x": 50,
+          "y": 90,
+          "tacticalLine": "GK",
+          "slotId": "GK"
+        },
+        {
+          "slotOrder": 1,
+          "positionCode": "LB",
+          "positionLabel": "LB",
+          "x": 16,
+          "y": 74,
+          "tacticalLine": "DEF",
+          "slotId": "LB"
+        },
+        {
+          "slotOrder": 2,
+          "positionCode": "CB",
+          "positionLabel": "CB",
+          "x": 38,
+          "y": 77,
+          "tacticalLine": "DEF",
+          "slotId": "LCB"
+        },
+        {
+          "slotOrder": 3,
+          "positionCode": "CB",
+          "positionLabel": "CB",
+          "x": 62,
+          "y": 77,
+          "tacticalLine": "DEF",
+          "slotId": "RCB"
+        },
+        {
+          "slotOrder": 4,
+          "positionCode": "RB",
+          "positionLabel": "RB",
+          "x": 84,
+          "y": 74,
+          "tacticalLine": "DEF",
+          "slotId": "RB"
+        },
+        {
+          "slotOrder": 5,
+          "positionCode": "CDM",
+          "positionLabel": "CDM",
+          "x": 50,
+          "y": 60,
+          "tacticalLine": "MID",
+          "slotId": "CDM"
+        },
+        {
+          "slotOrder": 6,
+          "positionCode": "LM",
+          "positionLabel": "LM",
+          "x": 16,
+          "y": 44,
+          "tacticalLine": "MID",
+          "slotId": "LM"
+        },
+        {
+          "slotOrder": 7,
+          "positionCode": "CM",
+          "positionLabel": "CM",
+          "x": 50,
+          "y": 44,
+          "tacticalLine": "MID",
+          "slotId": "CM"
+        },
+        {
+          "slotOrder": 8,
+          "positionCode": "RM",
+          "positionLabel": "RM",
+          "x": 84,
+          "y": 44,
+          "tacticalLine": "MID",
+          "slotId": "RM"
+        },
+        {
+          "slotOrder": 9,
+          "positionCode": "ST",
+          "positionLabel": "ST",
+          "x": 38,
+          "y": 20,
+          "tacticalLine": "ATT",
+          "slotId": "LS"
+        },
+        {
+          "slotOrder": 10,
+          "positionCode": "ST",
+          "positionLabel": "ST",
+          "x": 62,
+          "y": 20,
+          "tacticalLine": "ATT",
+          "slotId": "RS"
+        }
       ]
     },
     {
@@ -211,21 +947,113 @@
       "defensiveShape": "4-1-4-1 / 4-5-1",
       "attackingShape": "2-3-5 / 4-3-3",
       "tacticalSummary": "Compact defensive block with a dedicated CDM screening behind a four-player midfield line.",
-      "gameModes": ["Career Mode", "Kick Off", "Ultimate Team"],
+      "gameModes": [
+        "Career Mode",
+        "Kick Off",
+        "Ultimate Team"
+      ],
       "careerModeStatus": "verified",
       "layoutVerified": true,
       "slots": [
-        { "slotOrder": 0, "positionCode": "GK", "positionLabel": "GK", "x": 50, "y": 90, "tacticalLine": "GK" },
-        { "slotOrder": 1, "positionCode": "LB", "positionLabel": "LB", "x": 16, "y": 74, "tacticalLine": "DEF" },
-        { "slotOrder": 2, "positionCode": "CB", "positionLabel": "LCB", "x": 38, "y": 77, "tacticalLine": "DEF" },
-        { "slotOrder": 3, "positionCode": "CB", "positionLabel": "RCB", "x": 62, "y": 77, "tacticalLine": "DEF" },
-        { "slotOrder": 4, "positionCode": "RB", "positionLabel": "RB", "x": 84, "y": 74, "tacticalLine": "DEF" },
-        { "slotOrder": 5, "positionCode": "CDM", "positionLabel": "CDM", "x": 50, "y": 60, "tacticalLine": "MID" },
-        { "slotOrder": 6, "positionCode": "LM", "positionLabel": "LM", "x": 15, "y": 44, "tacticalLine": "MID" },
-        { "slotOrder": 7, "positionCode": "CM", "positionLabel": "LCM", "x": 38, "y": 46, "tacticalLine": "MID" },
-        { "slotOrder": 8, "positionCode": "CM", "positionLabel": "RCM", "x": 62, "y": 46, "tacticalLine": "MID" },
-        { "slotOrder": 9, "positionCode": "RM", "positionLabel": "RM", "x": 85, "y": 44, "tacticalLine": "MID" },
-        { "slotOrder": 10, "positionCode": "ST", "positionLabel": "ST", "x": 50, "y": 19, "tacticalLine": "ATT" }
+        {
+          "slotOrder": 0,
+          "positionCode": "GK",
+          "positionLabel": "GK",
+          "x": 50,
+          "y": 90,
+          "tacticalLine": "GK",
+          "slotId": "GK"
+        },
+        {
+          "slotOrder": 1,
+          "positionCode": "LB",
+          "positionLabel": "LB",
+          "x": 16,
+          "y": 74,
+          "tacticalLine": "DEF",
+          "slotId": "LB"
+        },
+        {
+          "slotOrder": 2,
+          "positionCode": "CB",
+          "positionLabel": "CB",
+          "x": 38,
+          "y": 77,
+          "tacticalLine": "DEF",
+          "slotId": "LCB"
+        },
+        {
+          "slotOrder": 3,
+          "positionCode": "CB",
+          "positionLabel": "CB",
+          "x": 62,
+          "y": 77,
+          "tacticalLine": "DEF",
+          "slotId": "RCB"
+        },
+        {
+          "slotOrder": 4,
+          "positionCode": "RB",
+          "positionLabel": "RB",
+          "x": 84,
+          "y": 74,
+          "tacticalLine": "DEF",
+          "slotId": "RB"
+        },
+        {
+          "slotOrder": 5,
+          "positionCode": "CDM",
+          "positionLabel": "CDM",
+          "x": 50,
+          "y": 60,
+          "tacticalLine": "MID",
+          "slotId": "CDM"
+        },
+        {
+          "slotOrder": 6,
+          "positionCode": "LM",
+          "positionLabel": "LM",
+          "x": 15,
+          "y": 44,
+          "tacticalLine": "MID",
+          "slotId": "LM"
+        },
+        {
+          "slotOrder": 7,
+          "positionCode": "CM",
+          "positionLabel": "CM",
+          "x": 38,
+          "y": 46,
+          "tacticalLine": "MID",
+          "slotId": "LCM"
+        },
+        {
+          "slotOrder": 8,
+          "positionCode": "CM",
+          "positionLabel": "CM",
+          "x": 62,
+          "y": 46,
+          "tacticalLine": "MID",
+          "slotId": "RCM"
+        },
+        {
+          "slotOrder": 9,
+          "positionCode": "RM",
+          "positionLabel": "RM",
+          "x": 85,
+          "y": 44,
+          "tacticalLine": "MID",
+          "slotId": "RM"
+        },
+        {
+          "slotOrder": 10,
+          "positionCode": "ST",
+          "positionLabel": "ST",
+          "x": 50,
+          "y": 19,
+          "tacticalLine": "ATT",
+          "slotId": "ST"
+        }
       ]
     },
     {
@@ -236,21 +1064,113 @@
       "defensiveShape": "4-2-3-1",
       "attackingShape": "3-2-5",
       "tacticalSummary": "Double CDM pivot shielding the back four while a central CAM connects directly to a high front three.",
-      "gameModes": ["Career Mode", "Kick Off", "Ultimate Team"],
+      "gameModes": [
+        "Career Mode",
+        "Kick Off",
+        "Ultimate Team"
+      ],
       "careerModeStatus": "verified",
       "layoutVerified": true,
       "slots": [
-        { "slotOrder": 0, "positionCode": "GK", "positionLabel": "GK", "x": 50, "y": 90, "tacticalLine": "GK" },
-        { "slotOrder": 1, "positionCode": "LB", "positionLabel": "LB", "x": 16, "y": 74, "tacticalLine": "DEF" },
-        { "slotOrder": 2, "positionCode": "CB", "positionLabel": "LCB", "x": 38, "y": 77, "tacticalLine": "DEF" },
-        { "slotOrder": 3, "positionCode": "CB", "positionLabel": "RCB", "x": 62, "y": 77, "tacticalLine": "DEF" },
-        { "slotOrder": 4, "positionCode": "RB", "positionLabel": "RB", "x": 84, "y": 74, "tacticalLine": "DEF" },
-        { "slotOrder": 5, "positionCode": "CDM", "positionLabel": "LCDM", "x": 37, "y": 58, "tacticalLine": "MID" },
-        { "slotOrder": 6, "positionCode": "CDM", "positionLabel": "RCDM", "x": 63, "y": 58, "tacticalLine": "MID" },
-        { "slotOrder": 7, "positionCode": "CAM", "positionLabel": "CAM", "x": 50, "y": 40, "tacticalLine": "MID" },
-        { "slotOrder": 8, "positionCode": "LW", "positionLabel": "LW", "x": 20, "y": 24, "tacticalLine": "ATT" },
-        { "slotOrder": 9, "positionCode": "ST", "positionLabel": "ST", "x": 50, "y": 18, "tacticalLine": "ATT" },
-        { "slotOrder": 10, "positionCode": "RW", "positionLabel": "RW", "x": 80, "y": 24, "tacticalLine": "ATT" }
+        {
+          "slotOrder": 0,
+          "positionCode": "GK",
+          "positionLabel": "GK",
+          "x": 50,
+          "y": 90,
+          "tacticalLine": "GK",
+          "slotId": "GK"
+        },
+        {
+          "slotOrder": 1,
+          "positionCode": "LB",
+          "positionLabel": "LB",
+          "x": 16,
+          "y": 74,
+          "tacticalLine": "DEF",
+          "slotId": "LB"
+        },
+        {
+          "slotOrder": 2,
+          "positionCode": "CB",
+          "positionLabel": "CB",
+          "x": 38,
+          "y": 77,
+          "tacticalLine": "DEF",
+          "slotId": "LCB"
+        },
+        {
+          "slotOrder": 3,
+          "positionCode": "CB",
+          "positionLabel": "CB",
+          "x": 62,
+          "y": 77,
+          "tacticalLine": "DEF",
+          "slotId": "RCB"
+        },
+        {
+          "slotOrder": 4,
+          "positionCode": "RB",
+          "positionLabel": "RB",
+          "x": 84,
+          "y": 74,
+          "tacticalLine": "DEF",
+          "slotId": "RB"
+        },
+        {
+          "slotOrder": 5,
+          "positionCode": "CDM",
+          "positionLabel": "CDM",
+          "x": 37,
+          "y": 58,
+          "tacticalLine": "MID",
+          "slotId": "LCDM"
+        },
+        {
+          "slotOrder": 6,
+          "positionCode": "CDM",
+          "positionLabel": "CDM",
+          "x": 63,
+          "y": 58,
+          "tacticalLine": "MID",
+          "slotId": "RCDM"
+        },
+        {
+          "slotOrder": 7,
+          "positionCode": "CAM",
+          "positionLabel": "CAM",
+          "x": 50,
+          "y": 40,
+          "tacticalLine": "MID",
+          "slotId": "CAM"
+        },
+        {
+          "slotOrder": 8,
+          "positionCode": "LW",
+          "positionLabel": "LW",
+          "x": 20,
+          "y": 24,
+          "tacticalLine": "ATT",
+          "slotId": "LW"
+        },
+        {
+          "slotOrder": 9,
+          "positionCode": "ST",
+          "positionLabel": "ST",
+          "x": 50,
+          "y": 18,
+          "tacticalLine": "ATT",
+          "slotId": "ST"
+        },
+        {
+          "slotOrder": 10,
+          "positionCode": "RW",
+          "positionLabel": "RW",
+          "x": 80,
+          "y": 24,
+          "tacticalLine": "ATT",
+          "slotId": "RW"
+        }
       ]
     },
     {
@@ -261,21 +1181,113 @@
       "defensiveShape": "4-4-2",
       "attackingShape": "2-2-4-2",
       "tacticalSummary": "Twin CDMs and twin half-space CAMs feeding a two-striker partnership for rapid central transitions.",
-      "gameModes": ["Career Mode", "Kick Off", "Ultimate Team"],
+      "gameModes": [
+        "Career Mode",
+        "Kick Off",
+        "Ultimate Team"
+      ],
       "careerModeStatus": "verified",
       "layoutVerified": true,
       "slots": [
-        { "slotOrder": 0, "positionCode": "GK", "positionLabel": "GK", "x": 50, "y": 90, "tacticalLine": "GK" },
-        { "slotOrder": 1, "positionCode": "LB", "positionLabel": "LB", "x": 16, "y": 74, "tacticalLine": "DEF" },
-        { "slotOrder": 2, "positionCode": "CB", "positionLabel": "LCB", "x": 38, "y": 77, "tacticalLine": "DEF" },
-        { "slotOrder": 3, "positionCode": "CB", "positionLabel": "RCB", "x": 62, "y": 77, "tacticalLine": "DEF" },
-        { "slotOrder": 4, "positionCode": "RB", "positionLabel": "RB", "x": 84, "y": 74, "tacticalLine": "DEF" },
-        { "slotOrder": 5, "positionCode": "CDM", "positionLabel": "LCDM", "x": 38, "y": 58, "tacticalLine": "MID" },
-        { "slotOrder": 6, "positionCode": "CDM", "positionLabel": "RCDM", "x": 62, "y": 58, "tacticalLine": "MID" },
-        { "slotOrder": 7, "positionCode": "CAM", "positionLabel": "LCAM", "x": 26, "y": 38, "tacticalLine": "MID" },
-        { "slotOrder": 8, "positionCode": "CAM", "positionLabel": "RCAM", "x": 74, "y": 38, "tacticalLine": "MID" },
-        { "slotOrder": 9, "positionCode": "ST", "positionLabel": "LS", "x": 38, "y": 19, "tacticalLine": "ATT" },
-        { "slotOrder": 10, "positionCode": "ST", "positionLabel": "RS", "x": 62, "y": 19, "tacticalLine": "ATT" }
+        {
+          "slotOrder": 0,
+          "positionCode": "GK",
+          "positionLabel": "GK",
+          "x": 50,
+          "y": 90,
+          "tacticalLine": "GK",
+          "slotId": "GK"
+        },
+        {
+          "slotOrder": 1,
+          "positionCode": "LB",
+          "positionLabel": "LB",
+          "x": 16,
+          "y": 74,
+          "tacticalLine": "DEF",
+          "slotId": "LB"
+        },
+        {
+          "slotOrder": 2,
+          "positionCode": "CB",
+          "positionLabel": "CB",
+          "x": 38,
+          "y": 77,
+          "tacticalLine": "DEF",
+          "slotId": "LCB"
+        },
+        {
+          "slotOrder": 3,
+          "positionCode": "CB",
+          "positionLabel": "CB",
+          "x": 62,
+          "y": 77,
+          "tacticalLine": "DEF",
+          "slotId": "RCB"
+        },
+        {
+          "slotOrder": 4,
+          "positionCode": "RB",
+          "positionLabel": "RB",
+          "x": 84,
+          "y": 74,
+          "tacticalLine": "DEF",
+          "slotId": "RB"
+        },
+        {
+          "slotOrder": 5,
+          "positionCode": "CDM",
+          "positionLabel": "CDM",
+          "x": 38,
+          "y": 58,
+          "tacticalLine": "MID",
+          "slotId": "LCDM"
+        },
+        {
+          "slotOrder": 6,
+          "positionCode": "CDM",
+          "positionLabel": "CDM",
+          "x": 62,
+          "y": 58,
+          "tacticalLine": "MID",
+          "slotId": "RCDM"
+        },
+        {
+          "slotOrder": 7,
+          "positionCode": "CAM",
+          "positionLabel": "CAM",
+          "x": 26,
+          "y": 38,
+          "tacticalLine": "MID",
+          "slotId": "LCAM"
+        },
+        {
+          "slotOrder": 8,
+          "positionCode": "CAM",
+          "positionLabel": "CAM",
+          "x": 74,
+          "y": 38,
+          "tacticalLine": "MID",
+          "slotId": "RCAM"
+        },
+        {
+          "slotOrder": 9,
+          "positionCode": "ST",
+          "positionLabel": "ST",
+          "x": 38,
+          "y": 19,
+          "tacticalLine": "ATT",
+          "slotId": "LS"
+        },
+        {
+          "slotOrder": 10,
+          "positionCode": "ST",
+          "positionLabel": "ST",
+          "x": 62,
+          "y": 19,
+          "tacticalLine": "ATT",
+          "slotId": "RS"
+        }
       ]
     },
     {
@@ -286,21 +1298,113 @@
       "defensiveShape": "4-2-3-1",
       "attackingShape": "3-2-4-1",
       "tacticalSummary": "Three CAMs operating across interior channels ahead of a double CDM pivot and lone striker.",
-      "gameModes": ["Career Mode", "Kick Off", "Ultimate Team"],
+      "gameModes": [
+        "Career Mode",
+        "Kick Off",
+        "Ultimate Team"
+      ],
       "careerModeStatus": "verified",
       "layoutVerified": true,
       "slots": [
-        { "slotOrder": 0, "positionCode": "GK", "positionLabel": "GK", "x": 50, "y": 90, "tacticalLine": "GK" },
-        { "slotOrder": 1, "positionCode": "LB", "positionLabel": "LB", "x": 16, "y": 74, "tacticalLine": "DEF" },
-        { "slotOrder": 2, "positionCode": "CB", "positionLabel": "LCB", "x": 38, "y": 77, "tacticalLine": "DEF" },
-        { "slotOrder": 3, "positionCode": "CB", "positionLabel": "RCB", "x": 62, "y": 77, "tacticalLine": "DEF" },
-        { "slotOrder": 4, "positionCode": "RB", "positionLabel": "RB", "x": 84, "y": 74, "tacticalLine": "DEF" },
-        { "slotOrder": 5, "positionCode": "CDM", "positionLabel": "LCDM", "x": 37, "y": 58, "tacticalLine": "MID" },
-        { "slotOrder": 6, "positionCode": "CDM", "positionLabel": "RCDM", "x": 63, "y": 58, "tacticalLine": "MID" },
-        { "slotOrder": 7, "positionCode": "CAM", "positionLabel": "LCAM", "x": 24, "y": 38, "tacticalLine": "MID" },
-        { "slotOrder": 8, "positionCode": "CAM", "positionLabel": "CAM", "x": 50, "y": 38, "tacticalLine": "MID" },
-        { "slotOrder": 9, "positionCode": "CAM", "positionLabel": "RCAM", "x": 76, "y": 38, "tacticalLine": "MID" },
-        { "slotOrder": 10, "positionCode": "ST", "positionLabel": "ST", "x": 50, "y": 19, "tacticalLine": "ATT" }
+        {
+          "slotOrder": 0,
+          "positionCode": "GK",
+          "positionLabel": "GK",
+          "x": 50,
+          "y": 90,
+          "tacticalLine": "GK",
+          "slotId": "GK"
+        },
+        {
+          "slotOrder": 1,
+          "positionCode": "LB",
+          "positionLabel": "LB",
+          "x": 16,
+          "y": 74,
+          "tacticalLine": "DEF",
+          "slotId": "LB"
+        },
+        {
+          "slotOrder": 2,
+          "positionCode": "CB",
+          "positionLabel": "CB",
+          "x": 38,
+          "y": 77,
+          "tacticalLine": "DEF",
+          "slotId": "LCB"
+        },
+        {
+          "slotOrder": 3,
+          "positionCode": "CB",
+          "positionLabel": "CB",
+          "x": 62,
+          "y": 77,
+          "tacticalLine": "DEF",
+          "slotId": "RCB"
+        },
+        {
+          "slotOrder": 4,
+          "positionCode": "RB",
+          "positionLabel": "RB",
+          "x": 84,
+          "y": 74,
+          "tacticalLine": "DEF",
+          "slotId": "RB"
+        },
+        {
+          "slotOrder": 5,
+          "positionCode": "CDM",
+          "positionLabel": "CDM",
+          "x": 37,
+          "y": 58,
+          "tacticalLine": "MID",
+          "slotId": "LCDM"
+        },
+        {
+          "slotOrder": 6,
+          "positionCode": "CDM",
+          "positionLabel": "CDM",
+          "x": 63,
+          "y": 58,
+          "tacticalLine": "MID",
+          "slotId": "RCDM"
+        },
+        {
+          "slotOrder": 7,
+          "positionCode": "CAM",
+          "positionLabel": "CAM",
+          "x": 24,
+          "y": 38,
+          "tacticalLine": "MID",
+          "slotId": "LCAM"
+        },
+        {
+          "slotOrder": 8,
+          "positionCode": "CAM",
+          "positionLabel": "CAM",
+          "x": 50,
+          "y": 38,
+          "tacticalLine": "MID",
+          "slotId": "CAM"
+        },
+        {
+          "slotOrder": 9,
+          "positionCode": "CAM",
+          "positionLabel": "CAM",
+          "x": 76,
+          "y": 38,
+          "tacticalLine": "MID",
+          "slotId": "RCAM"
+        },
+        {
+          "slotOrder": 10,
+          "positionCode": "ST",
+          "positionLabel": "ST",
+          "x": 50,
+          "y": 19,
+          "tacticalLine": "ATT",
+          "slotId": "ST"
+        }
       ]
     },
     {
@@ -311,21 +1415,113 @@
       "defensiveShape": "4-4-1-1 / 4-2-3-1",
       "attackingShape": "3-2-5",
       "tacticalSummary": "Balanced double-pivot system with touchline LM/RM width, a central CAM, and a focal striker.",
-      "gameModes": ["Career Mode", "Kick Off", "Ultimate Team"],
+      "gameModes": [
+        "Career Mode",
+        "Kick Off",
+        "Ultimate Team"
+      ],
       "careerModeStatus": "verified",
       "layoutVerified": true,
       "slots": [
-        { "slotOrder": 0, "positionCode": "GK", "positionLabel": "GK", "x": 50, "y": 90, "tacticalLine": "GK" },
-        { "slotOrder": 1, "positionCode": "LB", "positionLabel": "LB", "x": 16, "y": 74, "tacticalLine": "DEF" },
-        { "slotOrder": 2, "positionCode": "CB", "positionLabel": "LCB", "x": 38, "y": 77, "tacticalLine": "DEF" },
-        { "slotOrder": 3, "positionCode": "CB", "positionLabel": "RCB", "x": 62, "y": 77, "tacticalLine": "DEF" },
-        { "slotOrder": 4, "positionCode": "RB", "positionLabel": "RB", "x": 84, "y": 74, "tacticalLine": "DEF" },
-        { "slotOrder": 5, "positionCode": "CDM", "positionLabel": "LCDM", "x": 37, "y": 58, "tacticalLine": "MID" },
-        { "slotOrder": 6, "positionCode": "CDM", "positionLabel": "RCDM", "x": 63, "y": 58, "tacticalLine": "MID" },
-        { "slotOrder": 7, "positionCode": "LM", "positionLabel": "LM", "x": 16, "y": 38, "tacticalLine": "MID" },
-        { "slotOrder": 8, "positionCode": "CAM", "positionLabel": "CAM", "x": 50, "y": 38, "tacticalLine": "MID" },
-        { "slotOrder": 9, "positionCode": "RM", "positionLabel": "RM", "x": 84, "y": 38, "tacticalLine": "MID" },
-        { "slotOrder": 10, "positionCode": "ST", "positionLabel": "ST", "x": 50, "y": 19, "tacticalLine": "ATT" }
+        {
+          "slotOrder": 0,
+          "positionCode": "GK",
+          "positionLabel": "GK",
+          "x": 50,
+          "y": 90,
+          "tacticalLine": "GK",
+          "slotId": "GK"
+        },
+        {
+          "slotOrder": 1,
+          "positionCode": "LB",
+          "positionLabel": "LB",
+          "x": 16,
+          "y": 74,
+          "tacticalLine": "DEF",
+          "slotId": "LB"
+        },
+        {
+          "slotOrder": 2,
+          "positionCode": "CB",
+          "positionLabel": "CB",
+          "x": 38,
+          "y": 77,
+          "tacticalLine": "DEF",
+          "slotId": "LCB"
+        },
+        {
+          "slotOrder": 3,
+          "positionCode": "CB",
+          "positionLabel": "CB",
+          "x": 62,
+          "y": 77,
+          "tacticalLine": "DEF",
+          "slotId": "RCB"
+        },
+        {
+          "slotOrder": 4,
+          "positionCode": "RB",
+          "positionLabel": "RB",
+          "x": 84,
+          "y": 74,
+          "tacticalLine": "DEF",
+          "slotId": "RB"
+        },
+        {
+          "slotOrder": 5,
+          "positionCode": "CDM",
+          "positionLabel": "CDM",
+          "x": 37,
+          "y": 58,
+          "tacticalLine": "MID",
+          "slotId": "LCDM"
+        },
+        {
+          "slotOrder": 6,
+          "positionCode": "CDM",
+          "positionLabel": "CDM",
+          "x": 63,
+          "y": 58,
+          "tacticalLine": "MID",
+          "slotId": "RCDM"
+        },
+        {
+          "slotOrder": 7,
+          "positionCode": "LM",
+          "positionLabel": "LM",
+          "x": 16,
+          "y": 38,
+          "tacticalLine": "MID",
+          "slotId": "LM"
+        },
+        {
+          "slotOrder": 8,
+          "positionCode": "CAM",
+          "positionLabel": "CAM",
+          "x": 50,
+          "y": 38,
+          "tacticalLine": "MID",
+          "slotId": "CAM"
+        },
+        {
+          "slotOrder": 9,
+          "positionCode": "RM",
+          "positionLabel": "RM",
+          "x": 84,
+          "y": 38,
+          "tacticalLine": "MID",
+          "slotId": "RM"
+        },
+        {
+          "slotOrder": 10,
+          "positionCode": "ST",
+          "positionLabel": "ST",
+          "x": 50,
+          "y": 19,
+          "tacticalLine": "ATT",
+          "slotId": "ST"
+        }
       ]
     },
     {
@@ -336,21 +1532,113 @@
       "defensiveShape": "4-3-1-2",
       "attackingShape": "2-3-3-2",
       "tacticalSummary": "Three flat central midfielders behind a CAM and two strikers for central midfield dominance.",
-      "gameModes": ["Career Mode", "Kick Off", "Ultimate Team"],
+      "gameModes": [
+        "Career Mode",
+        "Kick Off",
+        "Ultimate Team"
+      ],
       "careerModeStatus": "verified",
       "layoutVerified": true,
       "slots": [
-        { "slotOrder": 0, "positionCode": "GK", "positionLabel": "GK", "x": 50, "y": 90, "tacticalLine": "GK" },
-        { "slotOrder": 1, "positionCode": "LB", "positionLabel": "LB", "x": 16, "y": 74, "tacticalLine": "DEF" },
-        { "slotOrder": 2, "positionCode": "CB", "positionLabel": "LCB", "x": 38, "y": 77, "tacticalLine": "DEF" },
-        { "slotOrder": 3, "positionCode": "CB", "positionLabel": "RCB", "x": 62, "y": 77, "tacticalLine": "DEF" },
-        { "slotOrder": 4, "positionCode": "RB", "positionLabel": "RB", "x": 84, "y": 74, "tacticalLine": "DEF" },
-        { "slotOrder": 5, "positionCode": "CM", "positionLabel": "LCM", "x": 28, "y": 54, "tacticalLine": "MID" },
-        { "slotOrder": 6, "positionCode": "CM", "positionLabel": "CM", "x": 50, "y": 56, "tacticalLine": "MID" },
-        { "slotOrder": 7, "positionCode": "CM", "positionLabel": "RCM", "x": 72, "y": 54, "tacticalLine": "MID" },
-        { "slotOrder": 8, "positionCode": "CAM", "positionLabel": "CAM", "x": 50, "y": 36, "tacticalLine": "MID" },
-        { "slotOrder": 9, "positionCode": "ST", "positionLabel": "LS", "x": 38, "y": 19, "tacticalLine": "ATT" },
-        { "slotOrder": 10, "positionCode": "ST", "positionLabel": "RS", "x": 62, "y": 19, "tacticalLine": "ATT" }
+        {
+          "slotOrder": 0,
+          "positionCode": "GK",
+          "positionLabel": "GK",
+          "x": 50,
+          "y": 90,
+          "tacticalLine": "GK",
+          "slotId": "GK"
+        },
+        {
+          "slotOrder": 1,
+          "positionCode": "LB",
+          "positionLabel": "LB",
+          "x": 16,
+          "y": 74,
+          "tacticalLine": "DEF",
+          "slotId": "LB"
+        },
+        {
+          "slotOrder": 2,
+          "positionCode": "CB",
+          "positionLabel": "CB",
+          "x": 38,
+          "y": 77,
+          "tacticalLine": "DEF",
+          "slotId": "LCB"
+        },
+        {
+          "slotOrder": 3,
+          "positionCode": "CB",
+          "positionLabel": "CB",
+          "x": 62,
+          "y": 77,
+          "tacticalLine": "DEF",
+          "slotId": "RCB"
+        },
+        {
+          "slotOrder": 4,
+          "positionCode": "RB",
+          "positionLabel": "RB",
+          "x": 84,
+          "y": 74,
+          "tacticalLine": "DEF",
+          "slotId": "RB"
+        },
+        {
+          "slotOrder": 5,
+          "positionCode": "CM",
+          "positionLabel": "CM",
+          "x": 28,
+          "y": 54,
+          "tacticalLine": "MID",
+          "slotId": "LCM"
+        },
+        {
+          "slotOrder": 6,
+          "positionCode": "CM",
+          "positionLabel": "CM",
+          "x": 50,
+          "y": 56,
+          "tacticalLine": "MID",
+          "slotId": "CM"
+        },
+        {
+          "slotOrder": 7,
+          "positionCode": "CM",
+          "positionLabel": "CM",
+          "x": 72,
+          "y": 54,
+          "tacticalLine": "MID",
+          "slotId": "RCM"
+        },
+        {
+          "slotOrder": 8,
+          "positionCode": "CAM",
+          "positionLabel": "CAM",
+          "x": 50,
+          "y": 36,
+          "tacticalLine": "MID",
+          "slotId": "CAM"
+        },
+        {
+          "slotOrder": 9,
+          "positionCode": "ST",
+          "positionLabel": "ST",
+          "x": 38,
+          "y": 19,
+          "tacticalLine": "ATT",
+          "slotId": "LS"
+        },
+        {
+          "slotOrder": 10,
+          "positionCode": "ST",
+          "positionLabel": "ST",
+          "x": 62,
+          "y": 19,
+          "tacticalLine": "ATT",
+          "slotId": "RS"
+        }
       ]
     },
     {
@@ -361,21 +1649,113 @@
       "defensiveShape": "4-3-2-1 / 4-5-1",
       "attackingShape": "2-3-4-1",
       "tacticalSummary": "Christmas-tree shape packing central zones with three CMs and two interior CAMs behind the striker.",
-      "gameModes": ["Career Mode", "Kick Off", "Ultimate Team"],
+      "gameModes": [
+        "Career Mode",
+        "Kick Off",
+        "Ultimate Team"
+      ],
       "careerModeStatus": "verified",
       "layoutVerified": true,
       "slots": [
-        { "slotOrder": 0, "positionCode": "GK", "positionLabel": "GK", "x": 50, "y": 90, "tacticalLine": "GK" },
-        { "slotOrder": 1, "positionCode": "LB", "positionLabel": "LB", "x": 16, "y": 74, "tacticalLine": "DEF" },
-        { "slotOrder": 2, "positionCode": "CB", "positionLabel": "LCB", "x": 38, "y": 77, "tacticalLine": "DEF" },
-        { "slotOrder": 3, "positionCode": "CB", "positionLabel": "RCB", "x": 62, "y": 77, "tacticalLine": "DEF" },
-        { "slotOrder": 4, "positionCode": "RB", "positionLabel": "RB", "x": 84, "y": 74, "tacticalLine": "DEF" },
-        { "slotOrder": 5, "positionCode": "CM", "positionLabel": "LCM", "x": 28, "y": 54, "tacticalLine": "MID" },
-        { "slotOrder": 6, "positionCode": "CM", "positionLabel": "CM", "x": 50, "y": 56, "tacticalLine": "MID" },
-        { "slotOrder": 7, "positionCode": "CM", "positionLabel": "RCM", "x": 72, "y": 54, "tacticalLine": "MID" },
-        { "slotOrder": 8, "positionCode": "CAM", "positionLabel": "LCAM", "x": 34, "y": 35, "tacticalLine": "MID" },
-        { "slotOrder": 9, "positionCode": "CAM", "positionLabel": "RCAM", "x": 66, "y": 35, "tacticalLine": "MID" },
-        { "slotOrder": 10, "positionCode": "ST", "positionLabel": "ST", "x": 50, "y": 18, "tacticalLine": "ATT" }
+        {
+          "slotOrder": 0,
+          "positionCode": "GK",
+          "positionLabel": "GK",
+          "x": 50,
+          "y": 90,
+          "tacticalLine": "GK",
+          "slotId": "GK"
+        },
+        {
+          "slotOrder": 1,
+          "positionCode": "LB",
+          "positionLabel": "LB",
+          "x": 16,
+          "y": 74,
+          "tacticalLine": "DEF",
+          "slotId": "LB"
+        },
+        {
+          "slotOrder": 2,
+          "positionCode": "CB",
+          "positionLabel": "CB",
+          "x": 38,
+          "y": 77,
+          "tacticalLine": "DEF",
+          "slotId": "LCB"
+        },
+        {
+          "slotOrder": 3,
+          "positionCode": "CB",
+          "positionLabel": "CB",
+          "x": 62,
+          "y": 77,
+          "tacticalLine": "DEF",
+          "slotId": "RCB"
+        },
+        {
+          "slotOrder": 4,
+          "positionCode": "RB",
+          "positionLabel": "RB",
+          "x": 84,
+          "y": 74,
+          "tacticalLine": "DEF",
+          "slotId": "RB"
+        },
+        {
+          "slotOrder": 5,
+          "positionCode": "CM",
+          "positionLabel": "CM",
+          "x": 28,
+          "y": 54,
+          "tacticalLine": "MID",
+          "slotId": "LCM"
+        },
+        {
+          "slotOrder": 6,
+          "positionCode": "CM",
+          "positionLabel": "CM",
+          "x": 50,
+          "y": 56,
+          "tacticalLine": "MID",
+          "slotId": "CM"
+        },
+        {
+          "slotOrder": 7,
+          "positionCode": "CM",
+          "positionLabel": "CM",
+          "x": 72,
+          "y": 54,
+          "tacticalLine": "MID",
+          "slotId": "RCM"
+        },
+        {
+          "slotOrder": 8,
+          "positionCode": "CAM",
+          "positionLabel": "CAM",
+          "x": 34,
+          "y": 35,
+          "tacticalLine": "MID",
+          "slotId": "LCAM"
+        },
+        {
+          "slotOrder": 9,
+          "positionCode": "CAM",
+          "positionLabel": "CAM",
+          "x": 66,
+          "y": 35,
+          "tacticalLine": "MID",
+          "slotId": "RCAM"
+        },
+        {
+          "slotOrder": 10,
+          "positionCode": "ST",
+          "positionLabel": "ST",
+          "x": 50,
+          "y": 18,
+          "tacticalLine": "ATT",
+          "slotId": "ST"
+        }
       ]
     },
     {
@@ -386,21 +1766,113 @@
       "defensiveShape": "4-3-3 / 4-5-1",
       "attackingShape": "2-3-5",
       "tacticalSummary": "Classic flat midfield trio supporting wide wingers and a central striker.",
-      "gameModes": ["Career Mode", "Kick Off", "Ultimate Team"],
+      "gameModes": [
+        "Career Mode",
+        "Kick Off",
+        "Ultimate Team"
+      ],
       "careerModeStatus": "verified",
       "layoutVerified": true,
       "slots": [
-        { "slotOrder": 0, "positionCode": "GK", "positionLabel": "GK", "x": 50, "y": 90, "tacticalLine": "GK" },
-        { "slotOrder": 1, "positionCode": "LB", "positionLabel": "LB", "x": 16, "y": 74, "tacticalLine": "DEF" },
-        { "slotOrder": 2, "positionCode": "CB", "positionLabel": "LCB", "x": 38, "y": 77, "tacticalLine": "DEF" },
-        { "slotOrder": 3, "positionCode": "CB", "positionLabel": "RCB", "x": 62, "y": 77, "tacticalLine": "DEF" },
-        { "slotOrder": 4, "positionCode": "RB", "positionLabel": "RB", "x": 84, "y": 74, "tacticalLine": "DEF" },
-        { "slotOrder": 5, "positionCode": "CM", "positionLabel": "LCM", "x": 28, "y": 52, "tacticalLine": "MID" },
-        { "slotOrder": 6, "positionCode": "CM", "positionLabel": "CM", "x": 50, "y": 52, "tacticalLine": "MID" },
-        { "slotOrder": 7, "positionCode": "CM", "positionLabel": "RCM", "x": 72, "y": 52, "tacticalLine": "MID" },
-        { "slotOrder": 8, "positionCode": "LW", "positionLabel": "LW", "x": 20, "y": 24, "tacticalLine": "ATT" },
-        { "slotOrder": 9, "positionCode": "ST", "positionLabel": "ST", "x": 50, "y": 18, "tacticalLine": "ATT" },
-        { "slotOrder": 10, "positionCode": "RW", "positionLabel": "RW", "x": 80, "y": 24, "tacticalLine": "ATT" }
+        {
+          "slotOrder": 0,
+          "positionCode": "GK",
+          "positionLabel": "GK",
+          "x": 50,
+          "y": 90,
+          "tacticalLine": "GK",
+          "slotId": "GK"
+        },
+        {
+          "slotOrder": 1,
+          "positionCode": "LB",
+          "positionLabel": "LB",
+          "x": 16,
+          "y": 74,
+          "tacticalLine": "DEF",
+          "slotId": "LB"
+        },
+        {
+          "slotOrder": 2,
+          "positionCode": "CB",
+          "positionLabel": "CB",
+          "x": 38,
+          "y": 77,
+          "tacticalLine": "DEF",
+          "slotId": "LCB"
+        },
+        {
+          "slotOrder": 3,
+          "positionCode": "CB",
+          "positionLabel": "CB",
+          "x": 62,
+          "y": 77,
+          "tacticalLine": "DEF",
+          "slotId": "RCB"
+        },
+        {
+          "slotOrder": 4,
+          "positionCode": "RB",
+          "positionLabel": "RB",
+          "x": 84,
+          "y": 74,
+          "tacticalLine": "DEF",
+          "slotId": "RB"
+        },
+        {
+          "slotOrder": 5,
+          "positionCode": "CM",
+          "positionLabel": "CM",
+          "x": 28,
+          "y": 52,
+          "tacticalLine": "MID",
+          "slotId": "LCM"
+        },
+        {
+          "slotOrder": 6,
+          "positionCode": "CM",
+          "positionLabel": "CM",
+          "x": 50,
+          "y": 52,
+          "tacticalLine": "MID",
+          "slotId": "CM"
+        },
+        {
+          "slotOrder": 7,
+          "positionCode": "CM",
+          "positionLabel": "CM",
+          "x": 72,
+          "y": 52,
+          "tacticalLine": "MID",
+          "slotId": "RCM"
+        },
+        {
+          "slotOrder": 8,
+          "positionCode": "LW",
+          "positionLabel": "LW",
+          "x": 20,
+          "y": 24,
+          "tacticalLine": "ATT",
+          "slotId": "LW"
+        },
+        {
+          "slotOrder": 9,
+          "positionCode": "ST",
+          "positionLabel": "ST",
+          "x": 50,
+          "y": 18,
+          "tacticalLine": "ATT",
+          "slotId": "ST"
+        },
+        {
+          "slotOrder": 10,
+          "positionCode": "RW",
+          "positionLabel": "RW",
+          "x": 80,
+          "y": 24,
+          "tacticalLine": "ATT",
+          "slotId": "RW"
+        }
       ]
     },
     {
@@ -411,21 +1883,113 @@
       "defensiveShape": "4-1-4-1",
       "attackingShape": "3-2-5 / 2-3-5",
       "tacticalSummary": "Single-pivot positional play foundation with one CDM and two advanced CMs behind a front three.",
-      "gameModes": ["Career Mode", "Kick Off", "Ultimate Team"],
+      "gameModes": [
+        "Career Mode",
+        "Kick Off",
+        "Ultimate Team"
+      ],
       "careerModeStatus": "verified",
       "layoutVerified": true,
       "slots": [
-        { "slotOrder": 0, "positionCode": "GK", "positionLabel": "GK", "x": 50, "y": 90, "tacticalLine": "GK" },
-        { "slotOrder": 1, "positionCode": "LB", "positionLabel": "LB", "x": 16, "y": 74, "tacticalLine": "DEF" },
-        { "slotOrder": 2, "positionCode": "CB", "positionLabel": "LCB", "x": 38, "y": 77, "tacticalLine": "DEF" },
-        { "slotOrder": 3, "positionCode": "CB", "positionLabel": "RCB", "x": 62, "y": 77, "tacticalLine": "DEF" },
-        { "slotOrder": 4, "positionCode": "RB", "positionLabel": "RB", "x": 84, "y": 74, "tacticalLine": "DEF" },
-        { "slotOrder": 5, "positionCode": "CDM", "positionLabel": "CDM", "x": 50, "y": 60, "tacticalLine": "MID" },
-        { "slotOrder": 6, "positionCode": "CM", "positionLabel": "LCM", "x": 32, "y": 46, "tacticalLine": "MID" },
-        { "slotOrder": 7, "positionCode": "CM", "positionLabel": "RCM", "x": 68, "y": 46, "tacticalLine": "MID" },
-        { "slotOrder": 8, "positionCode": "LW", "positionLabel": "LW", "x": 20, "y": 24, "tacticalLine": "ATT" },
-        { "slotOrder": 9, "positionCode": "ST", "positionLabel": "ST", "x": 50, "y": 18, "tacticalLine": "ATT" },
-        { "slotOrder": 10, "positionCode": "RW", "positionLabel": "RW", "x": 80, "y": 24, "tacticalLine": "ATT" }
+        {
+          "slotOrder": 0,
+          "positionCode": "GK",
+          "positionLabel": "GK",
+          "x": 50,
+          "y": 90,
+          "tacticalLine": "GK",
+          "slotId": "GK"
+        },
+        {
+          "slotOrder": 1,
+          "positionCode": "LB",
+          "positionLabel": "LB",
+          "x": 16,
+          "y": 74,
+          "tacticalLine": "DEF",
+          "slotId": "LB"
+        },
+        {
+          "slotOrder": 2,
+          "positionCode": "CB",
+          "positionLabel": "CB",
+          "x": 38,
+          "y": 77,
+          "tacticalLine": "DEF",
+          "slotId": "LCB"
+        },
+        {
+          "slotOrder": 3,
+          "positionCode": "CB",
+          "positionLabel": "CB",
+          "x": 62,
+          "y": 77,
+          "tacticalLine": "DEF",
+          "slotId": "RCB"
+        },
+        {
+          "slotOrder": 4,
+          "positionCode": "RB",
+          "positionLabel": "RB",
+          "x": 84,
+          "y": 74,
+          "tacticalLine": "DEF",
+          "slotId": "RB"
+        },
+        {
+          "slotOrder": 5,
+          "positionCode": "CDM",
+          "positionLabel": "CDM",
+          "x": 50,
+          "y": 60,
+          "tacticalLine": "MID",
+          "slotId": "CDM"
+        },
+        {
+          "slotOrder": 6,
+          "positionCode": "CM",
+          "positionLabel": "CM",
+          "x": 32,
+          "y": 46,
+          "tacticalLine": "MID",
+          "slotId": "LCM"
+        },
+        {
+          "slotOrder": 7,
+          "positionCode": "CM",
+          "positionLabel": "CM",
+          "x": 68,
+          "y": 46,
+          "tacticalLine": "MID",
+          "slotId": "RCM"
+        },
+        {
+          "slotOrder": 8,
+          "positionCode": "LW",
+          "positionLabel": "LW",
+          "x": 20,
+          "y": 24,
+          "tacticalLine": "ATT",
+          "slotId": "LW"
+        },
+        {
+          "slotOrder": 9,
+          "positionCode": "ST",
+          "positionLabel": "ST",
+          "x": 50,
+          "y": 18,
+          "tacticalLine": "ATT",
+          "slotId": "ST"
+        },
+        {
+          "slotOrder": 10,
+          "positionCode": "RW",
+          "positionLabel": "RW",
+          "x": 80,
+          "y": 24,
+          "tacticalLine": "ATT",
+          "slotId": "RW"
+        }
       ]
     },
     {
@@ -436,21 +2000,113 @@
       "defensiveShape": "4-2-3-1 / 4-5-1",
       "attackingShape": "4-2-1-3",
       "tacticalSummary": "Two holding CDMs shielding the back four with one central CM linking to wingers and striker.",
-      "gameModes": ["Career Mode", "Kick Off", "Ultimate Team"],
+      "gameModes": [
+        "Career Mode",
+        "Kick Off",
+        "Ultimate Team"
+      ],
       "careerModeStatus": "verified",
       "layoutVerified": true,
       "slots": [
-        { "slotOrder": 0, "positionCode": "GK", "positionLabel": "GK", "x": 50, "y": 90, "tacticalLine": "GK" },
-        { "slotOrder": 1, "positionCode": "LB", "positionLabel": "LB", "x": 16, "y": 74, "tacticalLine": "DEF" },
-        { "slotOrder": 2, "positionCode": "CB", "positionLabel": "LCB", "x": 38, "y": 77, "tacticalLine": "DEF" },
-        { "slotOrder": 3, "positionCode": "CB", "positionLabel": "RCB", "x": 62, "y": 77, "tacticalLine": "DEF" },
-        { "slotOrder": 4, "positionCode": "RB", "positionLabel": "RB", "x": 84, "y": 74, "tacticalLine": "DEF" },
-        { "slotOrder": 5, "positionCode": "CDM", "positionLabel": "LCDM", "x": 36, "y": 58, "tacticalLine": "MID" },
-        { "slotOrder": 6, "positionCode": "CDM", "positionLabel": "RCDM", "x": 64, "y": 58, "tacticalLine": "MID" },
-        { "slotOrder": 7, "positionCode": "CM", "positionLabel": "CM", "x": 50, "y": 44, "tacticalLine": "MID" },
-        { "slotOrder": 8, "positionCode": "LW", "positionLabel": "LW", "x": 20, "y": 24, "tacticalLine": "ATT" },
-        { "slotOrder": 9, "positionCode": "ST", "positionLabel": "ST", "x": 50, "y": 18, "tacticalLine": "ATT" },
-        { "slotOrder": 10, "positionCode": "RW", "positionLabel": "RW", "x": 80, "y": 24, "tacticalLine": "ATT" }
+        {
+          "slotOrder": 0,
+          "positionCode": "GK",
+          "positionLabel": "GK",
+          "x": 50,
+          "y": 90,
+          "tacticalLine": "GK",
+          "slotId": "GK"
+        },
+        {
+          "slotOrder": 1,
+          "positionCode": "LB",
+          "positionLabel": "LB",
+          "x": 16,
+          "y": 74,
+          "tacticalLine": "DEF",
+          "slotId": "LB"
+        },
+        {
+          "slotOrder": 2,
+          "positionCode": "CB",
+          "positionLabel": "CB",
+          "x": 38,
+          "y": 77,
+          "tacticalLine": "DEF",
+          "slotId": "LCB"
+        },
+        {
+          "slotOrder": 3,
+          "positionCode": "CB",
+          "positionLabel": "CB",
+          "x": 62,
+          "y": 77,
+          "tacticalLine": "DEF",
+          "slotId": "RCB"
+        },
+        {
+          "slotOrder": 4,
+          "positionCode": "RB",
+          "positionLabel": "RB",
+          "x": 84,
+          "y": 74,
+          "tacticalLine": "DEF",
+          "slotId": "RB"
+        },
+        {
+          "slotOrder": 5,
+          "positionCode": "CDM",
+          "positionLabel": "CDM",
+          "x": 36,
+          "y": 58,
+          "tacticalLine": "MID",
+          "slotId": "LCDM"
+        },
+        {
+          "slotOrder": 6,
+          "positionCode": "CDM",
+          "positionLabel": "CDM",
+          "x": 64,
+          "y": 58,
+          "tacticalLine": "MID",
+          "slotId": "RCDM"
+        },
+        {
+          "slotOrder": 7,
+          "positionCode": "CM",
+          "positionLabel": "CM",
+          "x": 50,
+          "y": 44,
+          "tacticalLine": "MID",
+          "slotId": "CM"
+        },
+        {
+          "slotOrder": 8,
+          "positionCode": "LW",
+          "positionLabel": "LW",
+          "x": 20,
+          "y": 24,
+          "tacticalLine": "ATT",
+          "slotId": "LW"
+        },
+        {
+          "slotOrder": 9,
+          "positionCode": "ST",
+          "positionLabel": "ST",
+          "x": 50,
+          "y": 18,
+          "tacticalLine": "ATT",
+          "slotId": "ST"
+        },
+        {
+          "slotOrder": 10,
+          "positionCode": "RW",
+          "positionLabel": "RW",
+          "x": 80,
+          "y": 24,
+          "tacticalLine": "ATT",
+          "slotId": "RW"
+        }
       ]
     },
     {
@@ -461,21 +2117,113 @@
       "defensiveShape": "4-4-2 / 4-2-3-1",
       "attackingShape": "2-2-6 / 3-2-5",
       "tacticalSummary": "Aggressive 4-3-3 featuring two CMs and a dedicated CAM creator behind a front three.",
-      "gameModes": ["Career Mode", "Kick Off", "Ultimate Team"],
+      "gameModes": [
+        "Career Mode",
+        "Kick Off",
+        "Ultimate Team"
+      ],
       "careerModeStatus": "verified",
       "layoutVerified": true,
       "slots": [
-        { "slotOrder": 0, "positionCode": "GK", "positionLabel": "GK", "x": 50, "y": 90, "tacticalLine": "GK" },
-        { "slotOrder": 1, "positionCode": "LB", "positionLabel": "LB", "x": 16, "y": 74, "tacticalLine": "DEF" },
-        { "slotOrder": 2, "positionCode": "CB", "positionLabel": "LCB", "x": 38, "y": 77, "tacticalLine": "DEF" },
-        { "slotOrder": 3, "positionCode": "CB", "positionLabel": "RCB", "x": 62, "y": 77, "tacticalLine": "DEF" },
-        { "slotOrder": 4, "positionCode": "RB", "positionLabel": "RB", "x": 84, "y": 74, "tacticalLine": "DEF" },
-        { "slotOrder": 5, "positionCode": "CM", "positionLabel": "LCM", "x": 35, "y": 55, "tacticalLine": "MID" },
-        { "slotOrder": 6, "positionCode": "CM", "positionLabel": "RCM", "x": 65, "y": 55, "tacticalLine": "MID" },
-        { "slotOrder": 7, "positionCode": "CAM", "positionLabel": "CAM", "x": 50, "y": 38, "tacticalLine": "MID" },
-        { "slotOrder": 8, "positionCode": "LW", "positionLabel": "LW", "x": 20, "y": 24, "tacticalLine": "ATT" },
-        { "slotOrder": 9, "positionCode": "ST", "positionLabel": "ST", "x": 50, "y": 18, "tacticalLine": "ATT" },
-        { "slotOrder": 10, "positionCode": "RW", "positionLabel": "RW", "x": 80, "y": 24, "tacticalLine": "ATT" }
+        {
+          "slotOrder": 0,
+          "positionCode": "GK",
+          "positionLabel": "GK",
+          "x": 50,
+          "y": 90,
+          "tacticalLine": "GK",
+          "slotId": "GK"
+        },
+        {
+          "slotOrder": 1,
+          "positionCode": "LB",
+          "positionLabel": "LB",
+          "x": 16,
+          "y": 74,
+          "tacticalLine": "DEF",
+          "slotId": "LB"
+        },
+        {
+          "slotOrder": 2,
+          "positionCode": "CB",
+          "positionLabel": "CB",
+          "x": 38,
+          "y": 77,
+          "tacticalLine": "DEF",
+          "slotId": "LCB"
+        },
+        {
+          "slotOrder": 3,
+          "positionCode": "CB",
+          "positionLabel": "CB",
+          "x": 62,
+          "y": 77,
+          "tacticalLine": "DEF",
+          "slotId": "RCB"
+        },
+        {
+          "slotOrder": 4,
+          "positionCode": "RB",
+          "positionLabel": "RB",
+          "x": 84,
+          "y": 74,
+          "tacticalLine": "DEF",
+          "slotId": "RB"
+        },
+        {
+          "slotOrder": 5,
+          "positionCode": "CM",
+          "positionLabel": "CM",
+          "x": 35,
+          "y": 55,
+          "tacticalLine": "MID",
+          "slotId": "LCM"
+        },
+        {
+          "slotOrder": 6,
+          "positionCode": "CM",
+          "positionLabel": "CM",
+          "x": 65,
+          "y": 55,
+          "tacticalLine": "MID",
+          "slotId": "RCM"
+        },
+        {
+          "slotOrder": 7,
+          "positionCode": "CAM",
+          "positionLabel": "CAM",
+          "x": 50,
+          "y": 38,
+          "tacticalLine": "MID",
+          "slotId": "CAM"
+        },
+        {
+          "slotOrder": 8,
+          "positionCode": "LW",
+          "positionLabel": "LW",
+          "x": 20,
+          "y": 24,
+          "tacticalLine": "ATT",
+          "slotId": "LW"
+        },
+        {
+          "slotOrder": 9,
+          "positionCode": "ST",
+          "positionLabel": "ST",
+          "x": 50,
+          "y": 18,
+          "tacticalLine": "ATT",
+          "slotId": "ST"
+        },
+        {
+          "slotOrder": 10,
+          "positionCode": "RW",
+          "positionLabel": "RW",
+          "x": 80,
+          "y": 24,
+          "tacticalLine": "ATT",
+          "slotId": "RW"
+        }
       ]
     },
     {
@@ -486,21 +2234,113 @@
       "defensiveShape": "4-4-2",
       "attackingShape": "4-2-3-1",
       "tacticalSummary": "Two flat banks of four with a creative CAM operating between the lines behind a lone striker.",
-      "gameModes": ["Career Mode", "Kick Off", "Ultimate Team"],
+      "gameModes": [
+        "Career Mode",
+        "Kick Off",
+        "Ultimate Team"
+      ],
       "careerModeStatus": "verified",
       "layoutVerified": true,
       "slots": [
-        { "slotOrder": 0, "positionCode": "GK", "positionLabel": "GK", "x": 50, "y": 90, "tacticalLine": "GK" },
-        { "slotOrder": 1, "positionCode": "LB", "positionLabel": "LB", "x": 16, "y": 74, "tacticalLine": "DEF" },
-        { "slotOrder": 2, "positionCode": "CB", "positionLabel": "LCB", "x": 38, "y": 77, "tacticalLine": "DEF" },
-        { "slotOrder": 3, "positionCode": "CB", "positionLabel": "RCB", "x": 62, "y": 77, "tacticalLine": "DEF" },
-        { "slotOrder": 4, "positionCode": "RB", "positionLabel": "RB", "x": 84, "y": 74, "tacticalLine": "DEF" },
-        { "slotOrder": 5, "positionCode": "LM", "positionLabel": "LM", "x": 16, "y": 50, "tacticalLine": "MID" },
-        { "slotOrder": 6, "positionCode": "CM", "positionLabel": "LCM", "x": 38, "y": 53, "tacticalLine": "MID" },
-        { "slotOrder": 7, "positionCode": "CM", "positionLabel": "RCM", "x": 62, "y": 53, "tacticalLine": "MID" },
-        { "slotOrder": 8, "positionCode": "RM", "positionLabel": "RM", "x": 84, "y": 50, "tacticalLine": "MID" },
-        { "slotOrder": 9, "positionCode": "CAM", "positionLabel": "CAM", "x": 50, "y": 34, "tacticalLine": "MID" },
-        { "slotOrder": 10, "positionCode": "ST", "positionLabel": "ST", "x": 50, "y": 18, "tacticalLine": "ATT" }
+        {
+          "slotOrder": 0,
+          "positionCode": "GK",
+          "positionLabel": "GK",
+          "x": 50,
+          "y": 90,
+          "tacticalLine": "GK",
+          "slotId": "GK"
+        },
+        {
+          "slotOrder": 1,
+          "positionCode": "LB",
+          "positionLabel": "LB",
+          "x": 16,
+          "y": 74,
+          "tacticalLine": "DEF",
+          "slotId": "LB"
+        },
+        {
+          "slotOrder": 2,
+          "positionCode": "CB",
+          "positionLabel": "CB",
+          "x": 38,
+          "y": 77,
+          "tacticalLine": "DEF",
+          "slotId": "LCB"
+        },
+        {
+          "slotOrder": 3,
+          "positionCode": "CB",
+          "positionLabel": "CB",
+          "x": 62,
+          "y": 77,
+          "tacticalLine": "DEF",
+          "slotId": "RCB"
+        },
+        {
+          "slotOrder": 4,
+          "positionCode": "RB",
+          "positionLabel": "RB",
+          "x": 84,
+          "y": 74,
+          "tacticalLine": "DEF",
+          "slotId": "RB"
+        },
+        {
+          "slotOrder": 5,
+          "positionCode": "LM",
+          "positionLabel": "LM",
+          "x": 16,
+          "y": 50,
+          "tacticalLine": "MID",
+          "slotId": "LM"
+        },
+        {
+          "slotOrder": 6,
+          "positionCode": "CM",
+          "positionLabel": "CM",
+          "x": 38,
+          "y": 53,
+          "tacticalLine": "MID",
+          "slotId": "LCM"
+        },
+        {
+          "slotOrder": 7,
+          "positionCode": "CM",
+          "positionLabel": "CM",
+          "x": 62,
+          "y": 53,
+          "tacticalLine": "MID",
+          "slotId": "RCM"
+        },
+        {
+          "slotOrder": 8,
+          "positionCode": "RM",
+          "positionLabel": "RM",
+          "x": 84,
+          "y": 50,
+          "tacticalLine": "MID",
+          "slotId": "RM"
+        },
+        {
+          "slotOrder": 9,
+          "positionCode": "CAM",
+          "positionLabel": "CAM",
+          "x": 50,
+          "y": 34,
+          "tacticalLine": "MID",
+          "slotId": "CAM"
+        },
+        {
+          "slotOrder": 10,
+          "positionCode": "ST",
+          "positionLabel": "ST",
+          "x": 50,
+          "y": 18,
+          "tacticalLine": "ATT",
+          "slotId": "ST"
+        }
       ]
     },
     {
@@ -511,21 +2351,113 @@
       "defensiveShape": "4-4-2",
       "attackingShape": "2-4-4 / 3-2-5",
       "tacticalSummary": "Two disciplined banks of four supporting a classic twin-striker partnership.",
-      "gameModes": ["Career Mode", "Kick Off", "Ultimate Team"],
+      "gameModes": [
+        "Career Mode",
+        "Kick Off",
+        "Ultimate Team"
+      ],
       "careerModeStatus": "verified",
       "layoutVerified": true,
       "slots": [
-        { "slotOrder": 0, "positionCode": "GK", "positionLabel": "GK", "x": 50, "y": 90, "tacticalLine": "GK" },
-        { "slotOrder": 1, "positionCode": "LB", "positionLabel": "LB", "x": 16, "y": 74, "tacticalLine": "DEF" },
-        { "slotOrder": 2, "positionCode": "CB", "positionLabel": "LCB", "x": 38, "y": 77, "tacticalLine": "DEF" },
-        { "slotOrder": 3, "positionCode": "CB", "positionLabel": "RCB", "x": 62, "y": 77, "tacticalLine": "DEF" },
-        { "slotOrder": 4, "positionCode": "RB", "positionLabel": "RB", "x": 84, "y": 74, "tacticalLine": "DEF" },
-        { "slotOrder": 5, "positionCode": "LM", "positionLabel": "LM", "x": 16, "y": 48, "tacticalLine": "MID" },
-        { "slotOrder": 6, "positionCode": "CM", "positionLabel": "LCM", "x": 38, "y": 50, "tacticalLine": "MID" },
-        { "slotOrder": 7, "positionCode": "CM", "positionLabel": "RCM", "x": 62, "y": 50, "tacticalLine": "MID" },
-        { "slotOrder": 8, "positionCode": "RM", "positionLabel": "RM", "x": 84, "y": 48, "tacticalLine": "MID" },
-        { "slotOrder": 9, "positionCode": "ST", "positionLabel": "LS", "x": 38, "y": 20, "tacticalLine": "ATT" },
-        { "slotOrder": 10, "positionCode": "ST", "positionLabel": "RS", "x": 62, "y": 20, "tacticalLine": "ATT" }
+        {
+          "slotOrder": 0,
+          "positionCode": "GK",
+          "positionLabel": "GK",
+          "x": 50,
+          "y": 90,
+          "tacticalLine": "GK",
+          "slotId": "GK"
+        },
+        {
+          "slotOrder": 1,
+          "positionCode": "LB",
+          "positionLabel": "LB",
+          "x": 16,
+          "y": 74,
+          "tacticalLine": "DEF",
+          "slotId": "LB"
+        },
+        {
+          "slotOrder": 2,
+          "positionCode": "CB",
+          "positionLabel": "CB",
+          "x": 38,
+          "y": 77,
+          "tacticalLine": "DEF",
+          "slotId": "LCB"
+        },
+        {
+          "slotOrder": 3,
+          "positionCode": "CB",
+          "positionLabel": "CB",
+          "x": 62,
+          "y": 77,
+          "tacticalLine": "DEF",
+          "slotId": "RCB"
+        },
+        {
+          "slotOrder": 4,
+          "positionCode": "RB",
+          "positionLabel": "RB",
+          "x": 84,
+          "y": 74,
+          "tacticalLine": "DEF",
+          "slotId": "RB"
+        },
+        {
+          "slotOrder": 5,
+          "positionCode": "LM",
+          "positionLabel": "LM",
+          "x": 16,
+          "y": 48,
+          "tacticalLine": "MID",
+          "slotId": "LM"
+        },
+        {
+          "slotOrder": 6,
+          "positionCode": "CM",
+          "positionLabel": "CM",
+          "x": 38,
+          "y": 50,
+          "tacticalLine": "MID",
+          "slotId": "LCM"
+        },
+        {
+          "slotOrder": 7,
+          "positionCode": "CM",
+          "positionLabel": "CM",
+          "x": 62,
+          "y": 50,
+          "tacticalLine": "MID",
+          "slotId": "RCM"
+        },
+        {
+          "slotOrder": 8,
+          "positionCode": "RM",
+          "positionLabel": "RM",
+          "x": 84,
+          "y": 48,
+          "tacticalLine": "MID",
+          "slotId": "RM"
+        },
+        {
+          "slotOrder": 9,
+          "positionCode": "ST",
+          "positionLabel": "ST",
+          "x": 38,
+          "y": 20,
+          "tacticalLine": "ATT",
+          "slotId": "LS"
+        },
+        {
+          "slotOrder": 10,
+          "positionCode": "ST",
+          "positionLabel": "ST",
+          "x": 62,
+          "y": 20,
+          "tacticalLine": "ATT",
+          "slotId": "RS"
+        }
       ]
     },
     {
@@ -536,21 +2468,113 @@
       "defensiveShape": "4-4-2 Low/Mid Block",
       "attackingShape": "4-2-4",
       "tacticalSummary": "Defensive 4-4-2 using twin CDMs instead of CMs for strong Zone 14 protection and direct counterattacks.",
-      "gameModes": ["Career Mode", "Kick Off", "Ultimate Team"],
+      "gameModes": [
+        "Career Mode",
+        "Kick Off",
+        "Ultimate Team"
+      ],
       "careerModeStatus": "verified",
       "layoutVerified": true,
       "slots": [
-        { "slotOrder": 0, "positionCode": "GK", "positionLabel": "GK", "x": 50, "y": 90, "tacticalLine": "GK" },
-        { "slotOrder": 1, "positionCode": "LB", "positionLabel": "LB", "x": 16, "y": 74, "tacticalLine": "DEF" },
-        { "slotOrder": 2, "positionCode": "CB", "positionLabel": "LCB", "x": 38, "y": 77, "tacticalLine": "DEF" },
-        { "slotOrder": 3, "positionCode": "CB", "positionLabel": "RCB", "x": 62, "y": 77, "tacticalLine": "DEF" },
-        { "slotOrder": 4, "positionCode": "RB", "positionLabel": "RB", "x": 84, "y": 74, "tacticalLine": "DEF" },
-        { "slotOrder": 5, "positionCode": "LM", "positionLabel": "LM", "x": 16, "y": 48, "tacticalLine": "MID" },
-        { "slotOrder": 6, "positionCode": "CDM", "positionLabel": "LCDM", "x": 38, "y": 58, "tacticalLine": "MID" },
-        { "slotOrder": 7, "positionCode": "CDM", "positionLabel": "RCDM", "x": 62, "y": 58, "tacticalLine": "MID" },
-        { "slotOrder": 8, "positionCode": "RM", "positionLabel": "RM", "x": 84, "y": 48, "tacticalLine": "MID" },
-        { "slotOrder": 9, "positionCode": "ST", "positionLabel": "LS", "x": 38, "y": 20, "tacticalLine": "ATT" },
-        { "slotOrder": 10, "positionCode": "ST", "positionLabel": "RS", "x": 62, "y": 20, "tacticalLine": "ATT" }
+        {
+          "slotOrder": 0,
+          "positionCode": "GK",
+          "positionLabel": "GK",
+          "x": 50,
+          "y": 90,
+          "tacticalLine": "GK",
+          "slotId": "GK"
+        },
+        {
+          "slotOrder": 1,
+          "positionCode": "LB",
+          "positionLabel": "LB",
+          "x": 16,
+          "y": 74,
+          "tacticalLine": "DEF",
+          "slotId": "LB"
+        },
+        {
+          "slotOrder": 2,
+          "positionCode": "CB",
+          "positionLabel": "CB",
+          "x": 38,
+          "y": 77,
+          "tacticalLine": "DEF",
+          "slotId": "LCB"
+        },
+        {
+          "slotOrder": 3,
+          "positionCode": "CB",
+          "positionLabel": "CB",
+          "x": 62,
+          "y": 77,
+          "tacticalLine": "DEF",
+          "slotId": "RCB"
+        },
+        {
+          "slotOrder": 4,
+          "positionCode": "RB",
+          "positionLabel": "RB",
+          "x": 84,
+          "y": 74,
+          "tacticalLine": "DEF",
+          "slotId": "RB"
+        },
+        {
+          "slotOrder": 5,
+          "positionCode": "LM",
+          "positionLabel": "LM",
+          "x": 16,
+          "y": 48,
+          "tacticalLine": "MID",
+          "slotId": "LM"
+        },
+        {
+          "slotOrder": 6,
+          "positionCode": "CDM",
+          "positionLabel": "CDM",
+          "x": 38,
+          "y": 58,
+          "tacticalLine": "MID",
+          "slotId": "LCDM"
+        },
+        {
+          "slotOrder": 7,
+          "positionCode": "CDM",
+          "positionLabel": "CDM",
+          "x": 62,
+          "y": 58,
+          "tacticalLine": "MID",
+          "slotId": "RCDM"
+        },
+        {
+          "slotOrder": 8,
+          "positionCode": "RM",
+          "positionLabel": "RM",
+          "x": 84,
+          "y": 48,
+          "tacticalLine": "MID",
+          "slotId": "RM"
+        },
+        {
+          "slotOrder": 9,
+          "positionCode": "ST",
+          "positionLabel": "ST",
+          "x": 38,
+          "y": 20,
+          "tacticalLine": "ATT",
+          "slotId": "LS"
+        },
+        {
+          "slotOrder": 10,
+          "positionCode": "ST",
+          "positionLabel": "ST",
+          "x": 62,
+          "y": 20,
+          "tacticalLine": "ATT",
+          "slotId": "RS"
+        }
       ]
     },
     {
@@ -561,21 +2585,113 @@
       "defensiveShape": "4-5-1",
       "attackingShape": "4-1-4-1 / 2-3-5",
       "tacticalSummary": "Single central CM flanked by wide LM/RM with twin CAMs arriving behind a lone striker.",
-      "gameModes": ["Career Mode", "Kick Off", "Ultimate Team"],
+      "gameModes": [
+        "Career Mode",
+        "Kick Off",
+        "Ultimate Team"
+      ],
       "careerModeStatus": "verified",
       "layoutVerified": true,
       "slots": [
-        { "slotOrder": 0, "positionCode": "GK", "positionLabel": "GK", "x": 50, "y": 90, "tacticalLine": "GK" },
-        { "slotOrder": 1, "positionCode": "LB", "positionLabel": "LB", "x": 16, "y": 74, "tacticalLine": "DEF" },
-        { "slotOrder": 2, "positionCode": "CB", "positionLabel": "LCB", "x": 38, "y": 77, "tacticalLine": "DEF" },
-        { "slotOrder": 3, "positionCode": "CB", "positionLabel": "RCB", "x": 62, "y": 77, "tacticalLine": "DEF" },
-        { "slotOrder": 4, "positionCode": "RB", "positionLabel": "RB", "x": 84, "y": 74, "tacticalLine": "DEF" },
-        { "slotOrder": 5, "positionCode": "CM", "positionLabel": "CM", "x": 50, "y": 56, "tacticalLine": "MID" },
-        { "slotOrder": 6, "positionCode": "LM", "positionLabel": "LM", "x": 16, "y": 44, "tacticalLine": "MID" },
-        { "slotOrder": 7, "positionCode": "CAM", "positionLabel": "LCAM", "x": 35, "y": 36, "tacticalLine": "MID" },
-        { "slotOrder": 8, "positionCode": "CAM", "positionLabel": "RCAM", "x": 65, "y": 36, "tacticalLine": "MID" },
-        { "slotOrder": 9, "positionCode": "RM", "positionLabel": "RM", "x": 84, "y": 44, "tacticalLine": "MID" },
-        { "slotOrder": 10, "positionCode": "ST", "positionLabel": "ST", "x": 50, "y": 18, "tacticalLine": "ATT" }
+        {
+          "slotOrder": 0,
+          "positionCode": "GK",
+          "positionLabel": "GK",
+          "x": 50,
+          "y": 90,
+          "tacticalLine": "GK",
+          "slotId": "GK"
+        },
+        {
+          "slotOrder": 1,
+          "positionCode": "LB",
+          "positionLabel": "LB",
+          "x": 16,
+          "y": 74,
+          "tacticalLine": "DEF",
+          "slotId": "LB"
+        },
+        {
+          "slotOrder": 2,
+          "positionCode": "CB",
+          "positionLabel": "CB",
+          "x": 38,
+          "y": 77,
+          "tacticalLine": "DEF",
+          "slotId": "LCB"
+        },
+        {
+          "slotOrder": 3,
+          "positionCode": "CB",
+          "positionLabel": "CB",
+          "x": 62,
+          "y": 77,
+          "tacticalLine": "DEF",
+          "slotId": "RCB"
+        },
+        {
+          "slotOrder": 4,
+          "positionCode": "RB",
+          "positionLabel": "RB",
+          "x": 84,
+          "y": 74,
+          "tacticalLine": "DEF",
+          "slotId": "RB"
+        },
+        {
+          "slotOrder": 5,
+          "positionCode": "CM",
+          "positionLabel": "CM",
+          "x": 50,
+          "y": 56,
+          "tacticalLine": "MID",
+          "slotId": "CM"
+        },
+        {
+          "slotOrder": 6,
+          "positionCode": "LM",
+          "positionLabel": "LM",
+          "x": 16,
+          "y": 44,
+          "tacticalLine": "MID",
+          "slotId": "LM"
+        },
+        {
+          "slotOrder": 7,
+          "positionCode": "CAM",
+          "positionLabel": "CAM",
+          "x": 35,
+          "y": 36,
+          "tacticalLine": "MID",
+          "slotId": "LCAM"
+        },
+        {
+          "slotOrder": 8,
+          "positionCode": "CAM",
+          "positionLabel": "CAM",
+          "x": 65,
+          "y": 36,
+          "tacticalLine": "MID",
+          "slotId": "RCAM"
+        },
+        {
+          "slotOrder": 9,
+          "positionCode": "RM",
+          "positionLabel": "RM",
+          "x": 84,
+          "y": 44,
+          "tacticalLine": "MID",
+          "slotId": "RM"
+        },
+        {
+          "slotOrder": 10,
+          "positionCode": "ST",
+          "positionLabel": "ST",
+          "x": 50,
+          "y": 18,
+          "tacticalLine": "ATT",
+          "slotId": "ST"
+        }
       ]
     },
     {
@@ -586,21 +2702,113 @@
       "defensiveShape": "4-5-1",
       "attackingShape": "4-3-3",
       "tacticalSummary": "Dense five-man midfield wall built to deny central progression and launch structured counterattacks.",
-      "gameModes": ["Career Mode", "Kick Off", "Ultimate Team"],
+      "gameModes": [
+        "Career Mode",
+        "Kick Off",
+        "Ultimate Team"
+      ],
       "careerModeStatus": "verified",
       "layoutVerified": true,
       "slots": [
-        { "slotOrder": 0, "positionCode": "GK", "positionLabel": "GK", "x": 50, "y": 90, "tacticalLine": "GK" },
-        { "slotOrder": 1, "positionCode": "LB", "positionLabel": "LB", "x": 16, "y": 74, "tacticalLine": "DEF" },
-        { "slotOrder": 2, "positionCode": "CB", "positionLabel": "LCB", "x": 38, "y": 77, "tacticalLine": "DEF" },
-        { "slotOrder": 3, "positionCode": "CB", "positionLabel": "RCB", "x": 62, "y": 77, "tacticalLine": "DEF" },
-        { "slotOrder": 4, "positionCode": "RB", "positionLabel": "RB", "x": 84, "y": 74, "tacticalLine": "DEF" },
-        { "slotOrder": 5, "positionCode": "LM", "positionLabel": "LM", "x": 14, "y": 48, "tacticalLine": "MID" },
-        { "slotOrder": 6, "positionCode": "CM", "positionLabel": "LCM", "x": 32, "y": 51, "tacticalLine": "MID" },
-        { "slotOrder": 7, "positionCode": "CM", "positionLabel": "CM", "x": 50, "y": 53, "tacticalLine": "MID" },
-        { "slotOrder": 8, "positionCode": "CM", "positionLabel": "RCM", "x": 68, "y": 51, "tacticalLine": "MID" },
-        { "slotOrder": 9, "positionCode": "RM", "positionLabel": "RM", "x": 86, "y": 48, "tacticalLine": "MID" },
-        { "slotOrder": 10, "positionCode": "ST", "positionLabel": "ST", "x": 50, "y": 19, "tacticalLine": "ATT" }
+        {
+          "slotOrder": 0,
+          "positionCode": "GK",
+          "positionLabel": "GK",
+          "x": 50,
+          "y": 90,
+          "tacticalLine": "GK",
+          "slotId": "GK"
+        },
+        {
+          "slotOrder": 1,
+          "positionCode": "LB",
+          "positionLabel": "LB",
+          "x": 16,
+          "y": 74,
+          "tacticalLine": "DEF",
+          "slotId": "LB"
+        },
+        {
+          "slotOrder": 2,
+          "positionCode": "CB",
+          "positionLabel": "CB",
+          "x": 38,
+          "y": 77,
+          "tacticalLine": "DEF",
+          "slotId": "LCB"
+        },
+        {
+          "slotOrder": 3,
+          "positionCode": "CB",
+          "positionLabel": "CB",
+          "x": 62,
+          "y": 77,
+          "tacticalLine": "DEF",
+          "slotId": "RCB"
+        },
+        {
+          "slotOrder": 4,
+          "positionCode": "RB",
+          "positionLabel": "RB",
+          "x": 84,
+          "y": 74,
+          "tacticalLine": "DEF",
+          "slotId": "RB"
+        },
+        {
+          "slotOrder": 5,
+          "positionCode": "LM",
+          "positionLabel": "LM",
+          "x": 14,
+          "y": 48,
+          "tacticalLine": "MID",
+          "slotId": "LM"
+        },
+        {
+          "slotOrder": 6,
+          "positionCode": "CM",
+          "positionLabel": "CM",
+          "x": 32,
+          "y": 51,
+          "tacticalLine": "MID",
+          "slotId": "LCM"
+        },
+        {
+          "slotOrder": 7,
+          "positionCode": "CM",
+          "positionLabel": "CM",
+          "x": 50,
+          "y": 53,
+          "tacticalLine": "MID",
+          "slotId": "CM"
+        },
+        {
+          "slotOrder": 8,
+          "positionCode": "CM",
+          "positionLabel": "CM",
+          "x": 68,
+          "y": 51,
+          "tacticalLine": "MID",
+          "slotId": "RCM"
+        },
+        {
+          "slotOrder": 9,
+          "positionCode": "RM",
+          "positionLabel": "RM",
+          "x": 86,
+          "y": 48,
+          "tacticalLine": "MID",
+          "slotId": "RM"
+        },
+        {
+          "slotOrder": 10,
+          "positionCode": "ST",
+          "positionLabel": "ST",
+          "x": 50,
+          "y": 19,
+          "tacticalLine": "ATT",
+          "slotId": "ST"
+        }
       ]
     },
     {
@@ -611,21 +2819,113 @@
       "defensiveShape": "5-2-1-2",
       "attackingShape": "3-4-1-2",
       "tacticalSummary": "Back five with attacking fullbacks/wingbacks, two central midfielders, a central CAM, and two strikers.",
-      "gameModes": ["Career Mode", "Kick Off", "Ultimate Team"],
+      "gameModes": [
+        "Career Mode",
+        "Kick Off",
+        "Ultimate Team"
+      ],
       "careerModeStatus": "verified",
       "layoutVerified": true,
       "slots": [
-        { "slotOrder": 0, "positionCode": "GK", "positionLabel": "GK", "x": 50, "y": 90, "tacticalLine": "GK" },
-        { "slotOrder": 1, "positionCode": "LB", "positionLabel": "LWB", "x": 13, "y": 66, "tacticalLine": "DEF" },
-        { "slotOrder": 2, "positionCode": "CB", "positionLabel": "LCB", "x": 32, "y": 76, "tacticalLine": "DEF" },
-        { "slotOrder": 3, "positionCode": "CB", "positionLabel": "CB", "x": 50, "y": 78, "tacticalLine": "DEF" },
-        { "slotOrder": 4, "positionCode": "CB", "positionLabel": "RCB", "x": 68, "y": 76, "tacticalLine": "DEF" },
-        { "slotOrder": 5, "positionCode": "RB", "positionLabel": "RWB", "x": 87, "y": 66, "tacticalLine": "DEF" },
-        { "slotOrder": 6, "positionCode": "CM", "positionLabel": "LCM", "x": 38, "y": 54, "tacticalLine": "MID" },
-        { "slotOrder": 7, "positionCode": "CM", "positionLabel": "RCM", "x": 62, "y": 54, "tacticalLine": "MID" },
-        { "slotOrder": 8, "positionCode": "CAM", "positionLabel": "CAM", "x": 50, "y": 37, "tacticalLine": "MID" },
-        { "slotOrder": 9, "positionCode": "ST", "positionLabel": "LS", "x": 38, "y": 19, "tacticalLine": "ATT" },
-        { "slotOrder": 10, "positionCode": "ST", "positionLabel": "RS", "x": 62, "y": 19, "tacticalLine": "ATT" }
+        {
+          "slotOrder": 0,
+          "positionCode": "GK",
+          "positionLabel": "GK",
+          "x": 50,
+          "y": 90,
+          "tacticalLine": "GK",
+          "slotId": "GK"
+        },
+        {
+          "slotOrder": 1,
+          "positionCode": "LB",
+          "positionLabel": "LB",
+          "x": 13,
+          "y": 66,
+          "tacticalLine": "DEF",
+          "slotId": "LWB"
+        },
+        {
+          "slotOrder": 2,
+          "positionCode": "CB",
+          "positionLabel": "CB",
+          "x": 32,
+          "y": 76,
+          "tacticalLine": "DEF",
+          "slotId": "LCB"
+        },
+        {
+          "slotOrder": 3,
+          "positionCode": "CB",
+          "positionLabel": "CB",
+          "x": 50,
+          "y": 78,
+          "tacticalLine": "DEF",
+          "slotId": "CB"
+        },
+        {
+          "slotOrder": 4,
+          "positionCode": "CB",
+          "positionLabel": "CB",
+          "x": 68,
+          "y": 76,
+          "tacticalLine": "DEF",
+          "slotId": "RCB"
+        },
+        {
+          "slotOrder": 5,
+          "positionCode": "RB",
+          "positionLabel": "RB",
+          "x": 87,
+          "y": 66,
+          "tacticalLine": "DEF",
+          "slotId": "RWB"
+        },
+        {
+          "slotOrder": 6,
+          "positionCode": "CM",
+          "positionLabel": "CM",
+          "x": 38,
+          "y": 54,
+          "tacticalLine": "MID",
+          "slotId": "LCM"
+        },
+        {
+          "slotOrder": 7,
+          "positionCode": "CM",
+          "positionLabel": "CM",
+          "x": 62,
+          "y": 54,
+          "tacticalLine": "MID",
+          "slotId": "RCM"
+        },
+        {
+          "slotOrder": 8,
+          "positionCode": "CAM",
+          "positionLabel": "CAM",
+          "x": 50,
+          "y": 37,
+          "tacticalLine": "MID",
+          "slotId": "CAM"
+        },
+        {
+          "slotOrder": 9,
+          "positionCode": "ST",
+          "positionLabel": "ST",
+          "x": 38,
+          "y": 19,
+          "tacticalLine": "ATT",
+          "slotId": "LS"
+        },
+        {
+          "slotOrder": 10,
+          "positionCode": "ST",
+          "positionLabel": "ST",
+          "x": 62,
+          "y": 19,
+          "tacticalLine": "ATT",
+          "slotId": "RS"
+        }
       ]
     },
     {
@@ -636,21 +2936,113 @@
       "defensiveShape": "5-4-1",
       "attackingShape": "3-4-3",
       "tacticalSummary": "Back five converting into a 3-4-3 in possession with wingbacks overlapping inside wingers.",
-      "gameModes": ["Career Mode", "Kick Off", "Ultimate Team"],
+      "gameModes": [
+        "Career Mode",
+        "Kick Off",
+        "Ultimate Team"
+      ],
       "careerModeStatus": "verified",
       "layoutVerified": true,
       "slots": [
-        { "slotOrder": 0, "positionCode": "GK", "positionLabel": "GK", "x": 50, "y": 90, "tacticalLine": "GK" },
-        { "slotOrder": 1, "positionCode": "LB", "positionLabel": "LWB", "x": 13, "y": 66, "tacticalLine": "DEF" },
-        { "slotOrder": 2, "positionCode": "CB", "positionLabel": "LCB", "x": 32, "y": 76, "tacticalLine": "DEF" },
-        { "slotOrder": 3, "positionCode": "CB", "positionLabel": "CB", "x": 50, "y": 78, "tacticalLine": "DEF" },
-        { "slotOrder": 4, "positionCode": "CB", "positionLabel": "RCB", "x": 68, "y": 76, "tacticalLine": "DEF" },
-        { "slotOrder": 5, "positionCode": "RB", "positionLabel": "RWB", "x": 87, "y": 66, "tacticalLine": "DEF" },
-        { "slotOrder": 6, "positionCode": "CM", "positionLabel": "LCM", "x": 38, "y": 54, "tacticalLine": "MID" },
-        { "slotOrder": 7, "positionCode": "CM", "positionLabel": "RCM", "x": 62, "y": 54, "tacticalLine": "MID" },
-        { "slotOrder": 8, "positionCode": "LW", "positionLabel": "LW", "x": 24, "y": 30, "tacticalLine": "ATT" },
-        { "slotOrder": 9, "positionCode": "RW", "positionLabel": "RW", "x": 76, "y": 30, "tacticalLine": "ATT" },
-        { "slotOrder": 10, "positionCode": "ST", "positionLabel": "ST", "x": 50, "y": 18, "tacticalLine": "ATT" }
+        {
+          "slotOrder": 0,
+          "positionCode": "GK",
+          "positionLabel": "GK",
+          "x": 50,
+          "y": 90,
+          "tacticalLine": "GK",
+          "slotId": "GK"
+        },
+        {
+          "slotOrder": 1,
+          "positionCode": "LB",
+          "positionLabel": "LB",
+          "x": 13,
+          "y": 66,
+          "tacticalLine": "DEF",
+          "slotId": "LWB"
+        },
+        {
+          "slotOrder": 2,
+          "positionCode": "CB",
+          "positionLabel": "CB",
+          "x": 32,
+          "y": 76,
+          "tacticalLine": "DEF",
+          "slotId": "LCB"
+        },
+        {
+          "slotOrder": 3,
+          "positionCode": "CB",
+          "positionLabel": "CB",
+          "x": 50,
+          "y": 78,
+          "tacticalLine": "DEF",
+          "slotId": "CB"
+        },
+        {
+          "slotOrder": 4,
+          "positionCode": "CB",
+          "positionLabel": "CB",
+          "x": 68,
+          "y": 76,
+          "tacticalLine": "DEF",
+          "slotId": "RCB"
+        },
+        {
+          "slotOrder": 5,
+          "positionCode": "RB",
+          "positionLabel": "RB",
+          "x": 87,
+          "y": 66,
+          "tacticalLine": "DEF",
+          "slotId": "RWB"
+        },
+        {
+          "slotOrder": 6,
+          "positionCode": "CM",
+          "positionLabel": "CM",
+          "x": 38,
+          "y": 54,
+          "tacticalLine": "MID",
+          "slotId": "LCM"
+        },
+        {
+          "slotOrder": 7,
+          "positionCode": "CM",
+          "positionLabel": "CM",
+          "x": 62,
+          "y": 54,
+          "tacticalLine": "MID",
+          "slotId": "RCM"
+        },
+        {
+          "slotOrder": 8,
+          "positionCode": "LW",
+          "positionLabel": "LW",
+          "x": 24,
+          "y": 30,
+          "tacticalLine": "ATT",
+          "slotId": "LW"
+        },
+        {
+          "slotOrder": 9,
+          "positionCode": "RW",
+          "positionLabel": "RW",
+          "x": 76,
+          "y": 30,
+          "tacticalLine": "ATT",
+          "slotId": "RW"
+        },
+        {
+          "slotOrder": 10,
+          "positionCode": "ST",
+          "positionLabel": "ST",
+          "x": 50,
+          "y": 18,
+          "tacticalLine": "ATT",
+          "slotId": "ST"
+        }
       ]
     },
     {
@@ -661,21 +3053,113 @@
       "defensiveShape": "5-2-3 / 5-4-1",
       "attackingShape": "3-2-5",
       "tacticalSummary": "High-transition back five keeping three forwards advanced to exploit counterattacking space.",
-      "gameModes": ["Career Mode", "Kick Off", "Ultimate Team"],
+      "gameModes": [
+        "Career Mode",
+        "Kick Off",
+        "Ultimate Team"
+      ],
       "careerModeStatus": "verified",
       "layoutVerified": true,
       "slots": [
-        { "slotOrder": 0, "positionCode": "GK", "positionLabel": "GK", "x": 50, "y": 90, "tacticalLine": "GK" },
-        { "slotOrder": 1, "positionCode": "LB", "positionLabel": "LWB", "x": 13, "y": 68, "tacticalLine": "DEF" },
-        { "slotOrder": 2, "positionCode": "CB", "positionLabel": "LCB", "x": 32, "y": 76, "tacticalLine": "DEF" },
-        { "slotOrder": 3, "positionCode": "CB", "positionLabel": "CB", "x": 50, "y": 78, "tacticalLine": "DEF" },
-        { "slotOrder": 4, "positionCode": "CB", "positionLabel": "RCB", "x": 68, "y": 76, "tacticalLine": "DEF" },
-        { "slotOrder": 5, "positionCode": "RB", "positionLabel": "RWB", "x": 87, "y": 68, "tacticalLine": "DEF" },
-        { "slotOrder": 6, "positionCode": "CM", "positionLabel": "LCM", "x": 38, "y": 54, "tacticalLine": "MID" },
-        { "slotOrder": 7, "positionCode": "CM", "positionLabel": "RCM", "x": 62, "y": 54, "tacticalLine": "MID" },
-        { "slotOrder": 8, "positionCode": "LW", "positionLabel": "LW", "x": 20, "y": 24, "tacticalLine": "ATT" },
-        { "slotOrder": 9, "positionCode": "ST", "positionLabel": "ST", "x": 50, "y": 18, "tacticalLine": "ATT" },
-        { "slotOrder": 10, "positionCode": "RW", "positionLabel": "RW", "x": 80, "y": 24, "tacticalLine": "ATT" }
+        {
+          "slotOrder": 0,
+          "positionCode": "GK",
+          "positionLabel": "GK",
+          "x": 50,
+          "y": 90,
+          "tacticalLine": "GK",
+          "slotId": "GK"
+        },
+        {
+          "slotOrder": 1,
+          "positionCode": "LB",
+          "positionLabel": "LB",
+          "x": 13,
+          "y": 68,
+          "tacticalLine": "DEF",
+          "slotId": "LWB"
+        },
+        {
+          "slotOrder": 2,
+          "positionCode": "CB",
+          "positionLabel": "CB",
+          "x": 32,
+          "y": 76,
+          "tacticalLine": "DEF",
+          "slotId": "LCB"
+        },
+        {
+          "slotOrder": 3,
+          "positionCode": "CB",
+          "positionLabel": "CB",
+          "x": 50,
+          "y": 78,
+          "tacticalLine": "DEF",
+          "slotId": "CB"
+        },
+        {
+          "slotOrder": 4,
+          "positionCode": "CB",
+          "positionLabel": "CB",
+          "x": 68,
+          "y": 76,
+          "tacticalLine": "DEF",
+          "slotId": "RCB"
+        },
+        {
+          "slotOrder": 5,
+          "positionCode": "RB",
+          "positionLabel": "RB",
+          "x": 87,
+          "y": 68,
+          "tacticalLine": "DEF",
+          "slotId": "RWB"
+        },
+        {
+          "slotOrder": 6,
+          "positionCode": "CM",
+          "positionLabel": "CM",
+          "x": 38,
+          "y": 54,
+          "tacticalLine": "MID",
+          "slotId": "LCM"
+        },
+        {
+          "slotOrder": 7,
+          "positionCode": "CM",
+          "positionLabel": "CM",
+          "x": 62,
+          "y": 54,
+          "tacticalLine": "MID",
+          "slotId": "RCM"
+        },
+        {
+          "slotOrder": 8,
+          "positionCode": "LW",
+          "positionLabel": "LW",
+          "x": 20,
+          "y": 24,
+          "tacticalLine": "ATT",
+          "slotId": "LW"
+        },
+        {
+          "slotOrder": 9,
+          "positionCode": "ST",
+          "positionLabel": "ST",
+          "x": 50,
+          "y": 18,
+          "tacticalLine": "ATT",
+          "slotId": "ST"
+        },
+        {
+          "slotOrder": 10,
+          "positionCode": "RW",
+          "positionLabel": "RW",
+          "x": 80,
+          "y": 24,
+          "tacticalLine": "ATT",
+          "slotId": "RW"
+        }
       ]
     },
     {
@@ -686,21 +3170,113 @@
       "defensiveShape": "5-3-2",
       "attackingShape": "3-5-2",
       "tacticalSummary": "Resilient back five with three central midfielders protecting the box and twin strikers.",
-      "gameModes": ["Career Mode", "Kick Off", "Ultimate Team"],
+      "gameModes": [
+        "Career Mode",
+        "Kick Off",
+        "Ultimate Team"
+      ],
       "careerModeStatus": "verified",
       "layoutVerified": true,
       "slots": [
-        { "slotOrder": 0, "positionCode": "GK", "positionLabel": "GK", "x": 50, "y": 90, "tacticalLine": "GK" },
-        { "slotOrder": 1, "positionCode": "LB", "positionLabel": "LWB", "x": 13, "y": 66, "tacticalLine": "DEF" },
-        { "slotOrder": 2, "positionCode": "CB", "positionLabel": "LCB", "x": 32, "y": 76, "tacticalLine": "DEF" },
-        { "slotOrder": 3, "positionCode": "CB", "positionLabel": "CB", "x": 50, "y": 78, "tacticalLine": "DEF" },
-        { "slotOrder": 4, "positionCode": "CB", "positionLabel": "RCB", "x": 68, "y": 76, "tacticalLine": "DEF" },
-        { "slotOrder": 5, "positionCode": "RB", "positionLabel": "RWB", "x": 87, "y": 66, "tacticalLine": "DEF" },
-        { "slotOrder": 6, "positionCode": "CM", "positionLabel": "LCM", "x": 30, "y": 50, "tacticalLine": "MID" },
-        { "slotOrder": 7, "positionCode": "CM", "positionLabel": "CM", "x": 50, "y": 54, "tacticalLine": "MID" },
-        { "slotOrder": 8, "positionCode": "CM", "positionLabel": "RCM", "x": 70, "y": 50, "tacticalLine": "MID" },
-        { "slotOrder": 9, "positionCode": "ST", "positionLabel": "LS", "x": 38, "y": 20, "tacticalLine": "ATT" },
-        { "slotOrder": 10, "positionCode": "ST", "positionLabel": "RS", "x": 62, "y": 20, "tacticalLine": "ATT" }
+        {
+          "slotOrder": 0,
+          "positionCode": "GK",
+          "positionLabel": "GK",
+          "x": 50,
+          "y": 90,
+          "tacticalLine": "GK",
+          "slotId": "GK"
+        },
+        {
+          "slotOrder": 1,
+          "positionCode": "LB",
+          "positionLabel": "LB",
+          "x": 13,
+          "y": 66,
+          "tacticalLine": "DEF",
+          "slotId": "LWB"
+        },
+        {
+          "slotOrder": 2,
+          "positionCode": "CB",
+          "positionLabel": "CB",
+          "x": 32,
+          "y": 76,
+          "tacticalLine": "DEF",
+          "slotId": "LCB"
+        },
+        {
+          "slotOrder": 3,
+          "positionCode": "CB",
+          "positionLabel": "CB",
+          "x": 50,
+          "y": 78,
+          "tacticalLine": "DEF",
+          "slotId": "CB"
+        },
+        {
+          "slotOrder": 4,
+          "positionCode": "CB",
+          "positionLabel": "CB",
+          "x": 68,
+          "y": 76,
+          "tacticalLine": "DEF",
+          "slotId": "RCB"
+        },
+        {
+          "slotOrder": 5,
+          "positionCode": "RB",
+          "positionLabel": "RB",
+          "x": 87,
+          "y": 66,
+          "tacticalLine": "DEF",
+          "slotId": "RWB"
+        },
+        {
+          "slotOrder": 6,
+          "positionCode": "CM",
+          "positionLabel": "CM",
+          "x": 30,
+          "y": 50,
+          "tacticalLine": "MID",
+          "slotId": "LCM"
+        },
+        {
+          "slotOrder": 7,
+          "positionCode": "CM",
+          "positionLabel": "CM",
+          "x": 50,
+          "y": 54,
+          "tacticalLine": "MID",
+          "slotId": "CM"
+        },
+        {
+          "slotOrder": 8,
+          "positionCode": "CM",
+          "positionLabel": "CM",
+          "x": 70,
+          "y": 50,
+          "tacticalLine": "MID",
+          "slotId": "RCM"
+        },
+        {
+          "slotOrder": 9,
+          "positionCode": "ST",
+          "positionLabel": "ST",
+          "x": 38,
+          "y": 20,
+          "tacticalLine": "ATT",
+          "slotId": "LS"
+        },
+        {
+          "slotOrder": 10,
+          "positionCode": "ST",
+          "positionLabel": "ST",
+          "x": 62,
+          "y": 20,
+          "tacticalLine": "ATT",
+          "slotId": "RS"
+        }
       ]
     },
     {
@@ -711,21 +3287,113 @@
       "defensiveShape": "5-4-1 Low Block",
       "attackingShape": "3-4-3",
       "tacticalSummary": "Ultra-compact low-block structure closing all five vertical channels when protecting a lead.",
-      "gameModes": ["Career Mode", "Kick Off", "Ultimate Team"],
+      "gameModes": [
+        "Career Mode",
+        "Kick Off",
+        "Ultimate Team"
+      ],
       "careerModeStatus": "verified",
       "layoutVerified": true,
       "slots": [
-        { "slotOrder": 0, "positionCode": "GK", "positionLabel": "GK", "x": 50, "y": 90, "tacticalLine": "GK" },
-        { "slotOrder": 1, "positionCode": "LB", "positionLabel": "LWB", "x": 13, "y": 68, "tacticalLine": "DEF" },
-        { "slotOrder": 2, "positionCode": "CB", "positionLabel": "LCB", "x": 32, "y": 76, "tacticalLine": "DEF" },
-        { "slotOrder": 3, "positionCode": "CB", "positionLabel": "CB", "x": 50, "y": 78, "tacticalLine": "DEF" },
-        { "slotOrder": 4, "positionCode": "CB", "positionLabel": "RCB", "x": 68, "y": 76, "tacticalLine": "DEF" },
-        { "slotOrder": 5, "positionCode": "RB", "positionLabel": "RWB", "x": 87, "y": 68, "tacticalLine": "DEF" },
-        { "slotOrder": 6, "positionCode": "LM", "positionLabel": "LM", "x": 16, "y": 46, "tacticalLine": "MID" },
-        { "slotOrder": 7, "positionCode": "CM", "positionLabel": "LCM", "x": 38, "y": 50, "tacticalLine": "MID" },
-        { "slotOrder": 8, "positionCode": "CM", "positionLabel": "RCM", "x": 62, "y": 50, "tacticalLine": "MID" },
-        { "slotOrder": 9, "positionCode": "RM", "positionLabel": "RM", "x": 84, "y": 46, "tacticalLine": "MID" },
-        { "slotOrder": 10, "positionCode": "ST", "positionLabel": "ST", "x": 50, "y": 19, "tacticalLine": "ATT" }
+        {
+          "slotOrder": 0,
+          "positionCode": "GK",
+          "positionLabel": "GK",
+          "x": 50,
+          "y": 90,
+          "tacticalLine": "GK",
+          "slotId": "GK"
+        },
+        {
+          "slotOrder": 1,
+          "positionCode": "LB",
+          "positionLabel": "LB",
+          "x": 13,
+          "y": 68,
+          "tacticalLine": "DEF",
+          "slotId": "LWB"
+        },
+        {
+          "slotOrder": 2,
+          "positionCode": "CB",
+          "positionLabel": "CB",
+          "x": 32,
+          "y": 76,
+          "tacticalLine": "DEF",
+          "slotId": "LCB"
+        },
+        {
+          "slotOrder": 3,
+          "positionCode": "CB",
+          "positionLabel": "CB",
+          "x": 50,
+          "y": 78,
+          "tacticalLine": "DEF",
+          "slotId": "CB"
+        },
+        {
+          "slotOrder": 4,
+          "positionCode": "CB",
+          "positionLabel": "CB",
+          "x": 68,
+          "y": 76,
+          "tacticalLine": "DEF",
+          "slotId": "RCB"
+        },
+        {
+          "slotOrder": 5,
+          "positionCode": "RB",
+          "positionLabel": "RB",
+          "x": 87,
+          "y": 68,
+          "tacticalLine": "DEF",
+          "slotId": "RWB"
+        },
+        {
+          "slotOrder": 6,
+          "positionCode": "LM",
+          "positionLabel": "LM",
+          "x": 16,
+          "y": 46,
+          "tacticalLine": "MID",
+          "slotId": "LM"
+        },
+        {
+          "slotOrder": 7,
+          "positionCode": "CM",
+          "positionLabel": "CM",
+          "x": 38,
+          "y": 50,
+          "tacticalLine": "MID",
+          "slotId": "LCM"
+        },
+        {
+          "slotOrder": 8,
+          "positionCode": "CM",
+          "positionLabel": "CM",
+          "x": 62,
+          "y": 50,
+          "tacticalLine": "MID",
+          "slotId": "RCM"
+        },
+        {
+          "slotOrder": 9,
+          "positionCode": "RM",
+          "positionLabel": "RM",
+          "x": 84,
+          "y": 46,
+          "tacticalLine": "MID",
+          "slotId": "RM"
+        },
+        {
+          "slotOrder": 10,
+          "positionCode": "ST",
+          "positionLabel": "ST",
+          "x": 50,
+          "y": 19,
+          "tacticalLine": "ATT",
+          "slotId": "ST"
+        }
       ]
     },
     {
@@ -736,21 +3404,113 @@
       "defensiveShape": "5-4-1",
       "attackingShape": "3-1-4-2 / 3-4-2-1",
       "tacticalSummary": "Back five paired with a midfield diamond featuring a dedicated CDM and CAM behind the lone striker.",
-      "gameModes": ["Career Mode", "Kick Off", "Ultimate Team"],
+      "gameModes": [
+        "Career Mode",
+        "Kick Off",
+        "Ultimate Team"
+      ],
       "careerModeStatus": "verified",
       "layoutVerified": true,
       "slots": [
-        { "slotOrder": 0, "positionCode": "GK", "positionLabel": "GK", "x": 50, "y": 90, "tacticalLine": "GK" },
-        { "slotOrder": 1, "positionCode": "LB", "positionLabel": "LWB", "x": 13, "y": 68, "tacticalLine": "DEF" },
-        { "slotOrder": 2, "positionCode": "CB", "positionLabel": "LCB", "x": 32, "y": 76, "tacticalLine": "DEF" },
-        { "slotOrder": 3, "positionCode": "CB", "positionLabel": "CB", "x": 50, "y": 78, "tacticalLine": "DEF" },
-        { "slotOrder": 4, "positionCode": "CB", "positionLabel": "RCB", "x": 68, "y": 76, "tacticalLine": "DEF" },
-        { "slotOrder": 5, "positionCode": "RB", "positionLabel": "RWB", "x": 87, "y": 68, "tacticalLine": "DEF" },
-        { "slotOrder": 6, "positionCode": "CDM", "positionLabel": "CDM", "x": 50, "y": 60, "tacticalLine": "MID" },
-        { "slotOrder": 7, "positionCode": "LM", "positionLabel": "LM", "x": 18, "y": 46, "tacticalLine": "MID" },
-        { "slotOrder": 8, "positionCode": "RM", "positionLabel": "RM", "x": 82, "y": 46, "tacticalLine": "MID" },
-        { "slotOrder": 9, "positionCode": "CAM", "positionLabel": "CAM", "x": 50, "y": 35, "tacticalLine": "MID" },
-        { "slotOrder": 10, "positionCode": "ST", "positionLabel": "ST", "x": 50, "y": 18, "tacticalLine": "ATT" }
+        {
+          "slotOrder": 0,
+          "positionCode": "GK",
+          "positionLabel": "GK",
+          "x": 50,
+          "y": 90,
+          "tacticalLine": "GK",
+          "slotId": "GK"
+        },
+        {
+          "slotOrder": 1,
+          "positionCode": "LB",
+          "positionLabel": "LB",
+          "x": 13,
+          "y": 68,
+          "tacticalLine": "DEF",
+          "slotId": "LWB"
+        },
+        {
+          "slotOrder": 2,
+          "positionCode": "CB",
+          "positionLabel": "CB",
+          "x": 32,
+          "y": 76,
+          "tacticalLine": "DEF",
+          "slotId": "LCB"
+        },
+        {
+          "slotOrder": 3,
+          "positionCode": "CB",
+          "positionLabel": "CB",
+          "x": 50,
+          "y": 78,
+          "tacticalLine": "DEF",
+          "slotId": "CB"
+        },
+        {
+          "slotOrder": 4,
+          "positionCode": "CB",
+          "positionLabel": "CB",
+          "x": 68,
+          "y": 76,
+          "tacticalLine": "DEF",
+          "slotId": "RCB"
+        },
+        {
+          "slotOrder": 5,
+          "positionCode": "RB",
+          "positionLabel": "RB",
+          "x": 87,
+          "y": 68,
+          "tacticalLine": "DEF",
+          "slotId": "RWB"
+        },
+        {
+          "slotOrder": 6,
+          "positionCode": "CDM",
+          "positionLabel": "CDM",
+          "x": 50,
+          "y": 60,
+          "tacticalLine": "MID",
+          "slotId": "CDM"
+        },
+        {
+          "slotOrder": 7,
+          "positionCode": "LM",
+          "positionLabel": "LM",
+          "x": 18,
+          "y": 46,
+          "tacticalLine": "MID",
+          "slotId": "LM"
+        },
+        {
+          "slotOrder": 8,
+          "positionCode": "RM",
+          "positionLabel": "RM",
+          "x": 82,
+          "y": 46,
+          "tacticalLine": "MID",
+          "slotId": "RM"
+        },
+        {
+          "slotOrder": 9,
+          "positionCode": "CAM",
+          "positionLabel": "CAM",
+          "x": 50,
+          "y": 35,
+          "tacticalLine": "MID",
+          "slotId": "CAM"
+        },
+        {
+          "slotOrder": 10,
+          "positionCode": "ST",
+          "positionLabel": "ST",
+          "x": 50,
+          "y": 18,
+          "tacticalLine": "ATT",
+          "slotId": "ST"
+        }
       ]
     },
     {
@@ -761,21 +3521,113 @@
       "defensiveShape": "5-3-2",
       "attackingShape": "3-2-5",
       "tacticalSummary": "Three centre-backs behind a double CDM pivot, wide LM/RM shuttlers, a central CAM, and two strikers.",
-      "gameModes": ["Career Mode", "Kick Off", "Ultimate Team"],
+      "gameModes": [
+        "Career Mode",
+        "Kick Off",
+        "Ultimate Team"
+      ],
       "careerModeStatus": "verified",
       "layoutVerified": true,
       "slots": [
-        { "slotOrder": 0, "positionCode": "GK", "positionLabel": "GK", "x": 50, "y": 90, "tacticalLine": "GK" },
-        { "slotOrder": 1, "positionCode": "CB", "positionLabel": "LCB", "x": 26, "y": 76, "tacticalLine": "DEF" },
-        { "slotOrder": 2, "positionCode": "CB", "positionLabel": "CB", "x": 50, "y": 78, "tacticalLine": "DEF" },
-        { "slotOrder": 3, "positionCode": "CB", "positionLabel": "RCB", "x": 74, "y": 76, "tacticalLine": "DEF" },
-        { "slotOrder": 4, "positionCode": "CDM", "positionLabel": "LCDM", "x": 38, "y": 59, "tacticalLine": "MID" },
-        { "slotOrder": 5, "positionCode": "CDM", "positionLabel": "RCDM", "x": 62, "y": 59, "tacticalLine": "MID" },
-        { "slotOrder": 6, "positionCode": "LM", "positionLabel": "LM", "x": 14, "y": 48, "tacticalLine": "MID" },
-        { "slotOrder": 7, "positionCode": "RM", "positionLabel": "RM", "x": 86, "y": 48, "tacticalLine": "MID" },
-        { "slotOrder": 8, "positionCode": "CAM", "positionLabel": "CAM", "x": 50, "y": 37, "tacticalLine": "MID" },
-        { "slotOrder": 9, "positionCode": "ST", "positionLabel": "LS", "x": 38, "y": 19, "tacticalLine": "ATT" },
-        { "slotOrder": 10, "positionCode": "ST", "positionLabel": "RS", "x": 62, "y": 19, "tacticalLine": "ATT" }
+        {
+          "slotOrder": 0,
+          "positionCode": "GK",
+          "positionLabel": "GK",
+          "x": 50,
+          "y": 90,
+          "tacticalLine": "GK",
+          "slotId": "GK"
+        },
+        {
+          "slotOrder": 1,
+          "positionCode": "CB",
+          "positionLabel": "CB",
+          "x": 26,
+          "y": 76,
+          "tacticalLine": "DEF",
+          "slotId": "LCB"
+        },
+        {
+          "slotOrder": 2,
+          "positionCode": "CB",
+          "positionLabel": "CB",
+          "x": 50,
+          "y": 78,
+          "tacticalLine": "DEF",
+          "slotId": "CB"
+        },
+        {
+          "slotOrder": 3,
+          "positionCode": "CB",
+          "positionLabel": "CB",
+          "x": 74,
+          "y": 76,
+          "tacticalLine": "DEF",
+          "slotId": "RCB"
+        },
+        {
+          "slotOrder": 4,
+          "positionCode": "CDM",
+          "positionLabel": "CDM",
+          "x": 38,
+          "y": 59,
+          "tacticalLine": "MID",
+          "slotId": "LCDM"
+        },
+        {
+          "slotOrder": 5,
+          "positionCode": "CDM",
+          "positionLabel": "CDM",
+          "x": 62,
+          "y": 59,
+          "tacticalLine": "MID",
+          "slotId": "RCDM"
+        },
+        {
+          "slotOrder": 6,
+          "positionCode": "LM",
+          "positionLabel": "LM",
+          "x": 14,
+          "y": 48,
+          "tacticalLine": "MID",
+          "slotId": "LM"
+        },
+        {
+          "slotOrder": 7,
+          "positionCode": "RM",
+          "positionLabel": "RM",
+          "x": 86,
+          "y": 48,
+          "tacticalLine": "MID",
+          "slotId": "RM"
+        },
+        {
+          "slotOrder": 8,
+          "positionCode": "CAM",
+          "positionLabel": "CAM",
+          "x": 50,
+          "y": 37,
+          "tacticalLine": "MID",
+          "slotId": "CAM"
+        },
+        {
+          "slotOrder": 9,
+          "positionCode": "ST",
+          "positionLabel": "ST",
+          "x": 38,
+          "y": 19,
+          "tacticalLine": "ATT",
+          "slotId": "LS"
+        },
+        {
+          "slotOrder": 10,
+          "positionCode": "ST",
+          "positionLabel": "ST",
+          "x": 62,
+          "y": 19,
+          "tacticalLine": "ATT",
+          "slotId": "RS"
+        }
       ]
     },
     {
@@ -786,21 +3638,113 @@
       "defensiveShape": "4-4-2",
       "attackingShape": "2-4-4",
       "tacticalSummary": "High-octane attacking setup pinning the opposition backline with two wingers and two central strikers.",
-      "gameModes": ["Career Mode", "Kick Off", "Ultimate Team"],
+      "gameModes": [
+        "Career Mode",
+        "Kick Off",
+        "Ultimate Team"
+      ],
       "careerModeStatus": "verified",
       "layoutVerified": true,
       "slots": [
-        { "slotOrder": 0, "positionCode": "GK", "positionLabel": "GK", "x": 50, "y": 90, "tacticalLine": "GK" },
-        { "slotOrder": 1, "positionCode": "LB", "positionLabel": "LB", "x": 16, "y": 74, "tacticalLine": "DEF" },
-        { "slotOrder": 2, "positionCode": "CB", "positionLabel": "LCB", "x": 38, "y": 77, "tacticalLine": "DEF" },
-        { "slotOrder": 3, "positionCode": "CB", "positionLabel": "RCB", "x": 62, "y": 77, "tacticalLine": "DEF" },
-        { "slotOrder": 4, "positionCode": "RB", "positionLabel": "RB", "x": 84, "y": 74, "tacticalLine": "DEF" },
-        { "slotOrder": 5, "positionCode": "CM", "positionLabel": "LCM", "x": 37, "y": 54, "tacticalLine": "MID" },
-        { "slotOrder": 6, "positionCode": "CM", "positionLabel": "RCM", "x": 63, "y": 54, "tacticalLine": "MID" },
-        { "slotOrder": 7, "positionCode": "LW", "positionLabel": "LW", "x": 18, "y": 28, "tacticalLine": "ATT" },
-        { "slotOrder": 8, "positionCode": "ST", "positionLabel": "LS", "x": 39, "y": 19, "tacticalLine": "ATT" },
-        { "slotOrder": 9, "positionCode": "ST", "positionLabel": "RS", "x": 61, "y": 19, "tacticalLine": "ATT" },
-        { "slotOrder": 10, "positionCode": "RW", "positionLabel": "RW", "x": 82, "y": 28, "tacticalLine": "ATT" }
+        {
+          "slotOrder": 0,
+          "positionCode": "GK",
+          "positionLabel": "GK",
+          "x": 50,
+          "y": 90,
+          "tacticalLine": "GK",
+          "slotId": "GK"
+        },
+        {
+          "slotOrder": 1,
+          "positionCode": "LB",
+          "positionLabel": "LB",
+          "x": 16,
+          "y": 74,
+          "tacticalLine": "DEF",
+          "slotId": "LB"
+        },
+        {
+          "slotOrder": 2,
+          "positionCode": "CB",
+          "positionLabel": "CB",
+          "x": 38,
+          "y": 77,
+          "tacticalLine": "DEF",
+          "slotId": "LCB"
+        },
+        {
+          "slotOrder": 3,
+          "positionCode": "CB",
+          "positionLabel": "CB",
+          "x": 62,
+          "y": 77,
+          "tacticalLine": "DEF",
+          "slotId": "RCB"
+        },
+        {
+          "slotOrder": 4,
+          "positionCode": "RB",
+          "positionLabel": "RB",
+          "x": 84,
+          "y": 74,
+          "tacticalLine": "DEF",
+          "slotId": "RB"
+        },
+        {
+          "slotOrder": 5,
+          "positionCode": "CM",
+          "positionLabel": "CM",
+          "x": 37,
+          "y": 54,
+          "tacticalLine": "MID",
+          "slotId": "LCM"
+        },
+        {
+          "slotOrder": 6,
+          "positionCode": "CM",
+          "positionLabel": "CM",
+          "x": 63,
+          "y": 54,
+          "tacticalLine": "MID",
+          "slotId": "RCM"
+        },
+        {
+          "slotOrder": 7,
+          "positionCode": "LW",
+          "positionLabel": "LW",
+          "x": 18,
+          "y": 28,
+          "tacticalLine": "ATT",
+          "slotId": "LW"
+        },
+        {
+          "slotOrder": 8,
+          "positionCode": "ST",
+          "positionLabel": "ST",
+          "x": 39,
+          "y": 19,
+          "tacticalLine": "ATT",
+          "slotId": "LS"
+        },
+        {
+          "slotOrder": 9,
+          "positionCode": "ST",
+          "positionLabel": "ST",
+          "x": 61,
+          "y": 19,
+          "tacticalLine": "ATT",
+          "slotId": "RS"
+        },
+        {
+          "slotOrder": 10,
+          "positionCode": "RW",
+          "positionLabel": "RW",
+          "x": 82,
+          "y": 28,
+          "tacticalLine": "ATT",
+          "slotId": "RW"
+        }
       ]
     },
     {
@@ -811,21 +3755,113 @@
       "defensiveShape": "4-1-4-1",
       "attackingShape": "3-2-5",
       "tacticalSummary": "Positional possession shape featuring a deep-dropping CF/False 9 creating space for inside-cutting wingers.",
-      "gameModes": ["Career Mode", "Kick Off", "Ultimate Team"],
+      "gameModes": [
+        "Career Mode",
+        "Kick Off",
+        "Ultimate Team"
+      ],
       "careerModeStatus": "verified",
       "layoutVerified": true,
       "slots": [
-        { "slotOrder": 0, "positionCode": "GK", "positionLabel": "GK", "x": 50, "y": 90, "tacticalLine": "GK" },
-        { "slotOrder": 1, "positionCode": "LB", "positionLabel": "LB", "x": 16, "y": 74, "tacticalLine": "DEF" },
-        { "slotOrder": 2, "positionCode": "CB", "positionLabel": "LCB", "x": 38, "y": 77, "tacticalLine": "DEF" },
-        { "slotOrder": 3, "positionCode": "CB", "positionLabel": "RCB", "x": 62, "y": 77, "tacticalLine": "DEF" },
-        { "slotOrder": 4, "positionCode": "RB", "positionLabel": "RB", "x": 84, "y": 74, "tacticalLine": "DEF" },
-        { "slotOrder": 5, "positionCode": "CDM", "positionLabel": "CDM", "x": 50, "y": 60, "tacticalLine": "MID" },
-        { "slotOrder": 6, "positionCode": "CM", "positionLabel": "LCM", "x": 32, "y": 46, "tacticalLine": "MID" },
-        { "slotOrder": 7, "positionCode": "CM", "positionLabel": "RCM", "x": 68, "y": 46, "tacticalLine": "MID" },
-        { "slotOrder": 8, "positionCode": "LW", "positionLabel": "LW", "x": 20, "y": 22, "tacticalLine": "ATT" },
-        { "slotOrder": 9, "positionCode": "CF", "positionLabel": "CF", "x": 50, "y": 29, "tacticalLine": "ATT" },
-        { "slotOrder": 10, "positionCode": "RW", "positionLabel": "RW", "x": 80, "y": 22, "tacticalLine": "ATT" }
+        {
+          "slotOrder": 0,
+          "positionCode": "GK",
+          "positionLabel": "GK",
+          "x": 50,
+          "y": 90,
+          "tacticalLine": "GK",
+          "slotId": "GK"
+        },
+        {
+          "slotOrder": 1,
+          "positionCode": "LB",
+          "positionLabel": "LB",
+          "x": 16,
+          "y": 74,
+          "tacticalLine": "DEF",
+          "slotId": "LB"
+        },
+        {
+          "slotOrder": 2,
+          "positionCode": "CB",
+          "positionLabel": "CB",
+          "x": 38,
+          "y": 77,
+          "tacticalLine": "DEF",
+          "slotId": "LCB"
+        },
+        {
+          "slotOrder": 3,
+          "positionCode": "CB",
+          "positionLabel": "CB",
+          "x": 62,
+          "y": 77,
+          "tacticalLine": "DEF",
+          "slotId": "RCB"
+        },
+        {
+          "slotOrder": 4,
+          "positionCode": "RB",
+          "positionLabel": "RB",
+          "x": 84,
+          "y": 74,
+          "tacticalLine": "DEF",
+          "slotId": "RB"
+        },
+        {
+          "slotOrder": 5,
+          "positionCode": "CDM",
+          "positionLabel": "CDM",
+          "x": 50,
+          "y": 60,
+          "tacticalLine": "MID",
+          "slotId": "CDM"
+        },
+        {
+          "slotOrder": 6,
+          "positionCode": "CM",
+          "positionLabel": "CM",
+          "x": 32,
+          "y": 46,
+          "tacticalLine": "MID",
+          "slotId": "LCM"
+        },
+        {
+          "slotOrder": 7,
+          "positionCode": "CM",
+          "positionLabel": "CM",
+          "x": 68,
+          "y": 46,
+          "tacticalLine": "MID",
+          "slotId": "RCM"
+        },
+        {
+          "slotOrder": 8,
+          "positionCode": "LW",
+          "positionLabel": "LW",
+          "x": 20,
+          "y": 22,
+          "tacticalLine": "ATT",
+          "slotId": "LW"
+        },
+        {
+          "slotOrder": 9,
+          "positionCode": "CF",
+          "positionLabel": "CF",
+          "x": 50,
+          "y": 29,
+          "tacticalLine": "ATT",
+          "slotId": "CF"
+        },
+        {
+          "slotOrder": 10,
+          "positionCode": "RW",
+          "positionLabel": "RW",
+          "x": 80,
+          "y": 22,
+          "tacticalLine": "ATT",
+          "slotId": "RW"
+        }
       ]
     },
     {
@@ -836,21 +3872,113 @@
       "defensiveShape": "4-4-2",
       "attackingShape": "4-2-3-1",
       "tacticalSummary": "Two flat banks of four with an advanced second striker/CF linking directly beneath the focal striker.",
-      "gameModes": ["Career Mode", "Kick Off", "Ultimate Team"],
+      "gameModes": [
+        "Career Mode",
+        "Kick Off",
+        "Ultimate Team"
+      ],
       "careerModeStatus": "verified",
       "layoutVerified": true,
       "slots": [
-        { "slotOrder": 0, "positionCode": "GK", "positionLabel": "GK", "x": 50, "y": 90, "tacticalLine": "GK" },
-        { "slotOrder": 1, "positionCode": "LB", "positionLabel": "LB", "x": 16, "y": 74, "tacticalLine": "DEF" },
-        { "slotOrder": 2, "positionCode": "CB", "positionLabel": "LCB", "x": 38, "y": 77, "tacticalLine": "DEF" },
-        { "slotOrder": 3, "positionCode": "CB", "positionLabel": "RCB", "x": 62, "y": 77, "tacticalLine": "DEF" },
-        { "slotOrder": 4, "positionCode": "RB", "positionLabel": "RB", "x": 84, "y": 74, "tacticalLine": "DEF" },
-        { "slotOrder": 5, "positionCode": "LM", "positionLabel": "LM", "x": 16, "y": 48, "tacticalLine": "MID" },
-        { "slotOrder": 6, "positionCode": "CM", "positionLabel": "LCM", "x": 38, "y": 51, "tacticalLine": "MID" },
-        { "slotOrder": 7, "positionCode": "CM", "positionLabel": "RCM", "x": 62, "y": 51, "tacticalLine": "MID" },
-        { "slotOrder": 8, "positionCode": "RM", "positionLabel": "RM", "x": 84, "y": 48, "tacticalLine": "MID" },
-        { "slotOrder": 9, "positionCode": "CF", "positionLabel": "CF", "x": 50, "y": 31, "tacticalLine": "ATT" },
-        { "slotOrder": 10, "positionCode": "ST", "positionLabel": "ST", "x": 50, "y": 17, "tacticalLine": "ATT" }
+        {
+          "slotOrder": 0,
+          "positionCode": "GK",
+          "positionLabel": "GK",
+          "x": 50,
+          "y": 90,
+          "tacticalLine": "GK",
+          "slotId": "GK"
+        },
+        {
+          "slotOrder": 1,
+          "positionCode": "LB",
+          "positionLabel": "LB",
+          "x": 16,
+          "y": 74,
+          "tacticalLine": "DEF",
+          "slotId": "LB"
+        },
+        {
+          "slotOrder": 2,
+          "positionCode": "CB",
+          "positionLabel": "CB",
+          "x": 38,
+          "y": 77,
+          "tacticalLine": "DEF",
+          "slotId": "LCB"
+        },
+        {
+          "slotOrder": 3,
+          "positionCode": "CB",
+          "positionLabel": "CB",
+          "x": 62,
+          "y": 77,
+          "tacticalLine": "DEF",
+          "slotId": "RCB"
+        },
+        {
+          "slotOrder": 4,
+          "positionCode": "RB",
+          "positionLabel": "RB",
+          "x": 84,
+          "y": 74,
+          "tacticalLine": "DEF",
+          "slotId": "RB"
+        },
+        {
+          "slotOrder": 5,
+          "positionCode": "LM",
+          "positionLabel": "LM",
+          "x": 16,
+          "y": 48,
+          "tacticalLine": "MID",
+          "slotId": "LM"
+        },
+        {
+          "slotOrder": 6,
+          "positionCode": "CM",
+          "positionLabel": "CM",
+          "x": 38,
+          "y": 51,
+          "tacticalLine": "MID",
+          "slotId": "LCM"
+        },
+        {
+          "slotOrder": 7,
+          "positionCode": "CM",
+          "positionLabel": "CM",
+          "x": 62,
+          "y": 51,
+          "tacticalLine": "MID",
+          "slotId": "RCM"
+        },
+        {
+          "slotOrder": 8,
+          "positionCode": "RM",
+          "positionLabel": "RM",
+          "x": 84,
+          "y": 48,
+          "tacticalLine": "MID",
+          "slotId": "RM"
+        },
+        {
+          "slotOrder": 9,
+          "positionCode": "CF",
+          "positionLabel": "CF",
+          "x": 50,
+          "y": 31,
+          "tacticalLine": "ATT",
+          "slotId": "CF"
+        },
+        {
+          "slotOrder": 10,
+          "positionCode": "ST",
+          "positionLabel": "ST",
+          "x": 50,
+          "y": 17,
+          "tacticalLine": "ATT",
+          "slotId": "ST"
+        }
       ]
     }
   ]
