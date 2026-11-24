@@ -9,6 +9,7 @@ const SECTION_LABELS: Record<NavigationSection, string> = {
   'match-capture': 'Match Capture',
   'halftime-briefing': 'Half-Time Briefing',
   'tactical-board': 'Tactical Board',
+  'database-center': 'FC26 Database Center',
   opposition: 'Opposition Analysis',
   'match-reports': 'Match Reports',
   'match-history': 'Match History',

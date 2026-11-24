@@ -3,6 +3,7 @@ import {
   Brain,
   ClipboardList,
   Crosshair,
+  Database,
   FileText,
   History,
   LayoutDashboard,
@@ -31,6 +32,7 @@ const NAV_GROUPS: NavGroup[] = [
     items: [
       { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
       { id: 'clubs', label: 'Career Mode Clubs', icon: Shield },
+      { id: 'database-center', label: 'FC26 Database Center', icon: Database },
       { id: 'opposition', label: 'Opposition Analysis', icon: Crosshair },
     ],
   },

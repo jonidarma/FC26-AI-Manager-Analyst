@@ -1,0 +1,22 @@
+{
+  "datasetVersion": "fc26-positions-1.0.0",
+  "sourceKey": "ea_fc26_pitch_notes",
+  "completeness": "verified_complete",
+  "records": [
+    { "code": "GK", "label": "Goalkeeper", "category": "Goalkeeper", "tacticalLine": "GK", "sortOrder": 1 },
+    { "code": "CB", "label": "Centre-Back", "category": "Defender", "tacticalLine": "DEF", "sortOrder": 2 },
+    { "code": "LB", "label": "Left-Back", "category": "Defender", "tacticalLine": "DEF", "sortOrder": 3 },
+    { "code": "RB", "label": "Right-Back", "category": "Defender", "tacticalLine": "DEF", "sortOrder": 4 },
+    { "code": "LWB", "label": "Left Wing-Back", "category": "Defender", "tacticalLine": "DEF", "sortOrder": 5 },
+    { "code": "RWB", "label": "Right Wing-Back", "category": "Defender", "tacticalLine": "DEF", "sortOrder": 6 },
+    { "code": "CDM", "label": "Central Defensive Midfielder", "category": "Midfielder", "tacticalLine": "MID", "sortOrder": 7 },
+    { "code": "CM", "label": "Central Midfielder", "category": "Midfielder", "tacticalLine": "MID", "sortOrder": 8 },
+    { "code": "CAM", "label": "Central Attacking Midfielder", "category": "Midfielder", "tacticalLine": "MID", "sortOrder": 9 },
+    { "code": "LM", "label": "Left Midfielder", "category": "Midfielder", "tacticalLine": "MID", "sortOrder": 10 },
+    { "code": "RM", "label": "Right Midfielder", "category": "Midfielder", "tacticalLine": "MID", "sortOrder": 11 },
+    { "code": "LW", "label": "Left Winger", "category": "Forward", "tacticalLine": "ATT", "sortOrder": 12 },
+    { "code": "RW", "label": "Right Winger", "category": "Forward", "tacticalLine": "ATT", "sortOrder": 13 },
+    { "code": "CF", "label": "Centre Forward", "category": "Forward", "tacticalLine": "ATT", "sortOrder": 14 },
+    { "code": "ST", "label": "Striker", "category": "Forward", "tacticalLine": "ATT", "sortOrder": 15 }
+  ]
+}

@@ -52,6 +52,7 @@ function resolvePackagedPaths(): {
   staticDistDir: string;
   userDataDbDir: string;
   recordingsRootDir: string;
+  referenceDataDir: string;
 } {
   const appPath = app.getAppPath();
   const unpackedAppPath = app.isPackaged
@@ -65,6 +66,13 @@ function resolvePackagedPaths(): {
   const serverScriptPath =
     candidateServerPaths.find((p) => fs.existsSync(p)) ?? candidateServerPaths[0];
 
+  const candidateRefDataDirs = [
+    path.join(unpackedAppPath, 'data', 'fc26'),
+    path.join(appPath, 'data', 'fc26'),
+  ];
+  const referenceDataDir =
+    candidateRefDataDirs.find((p) => fs.existsSync(p)) ?? candidateRefDataDirs[0];
+
   const staticDistDir = path.join(appPath, 'dist');
   const userDataRoot = app.getPath('userData');
   const userDataDbDir = path.join(userDataRoot, 'database');
@@ -73,7 +81,7 @@ function resolvePackagedPaths(): {
   fs.mkdirSync(userDataDbDir, { recursive: true });
   fs.mkdirSync(recordingsRootDir, { recursive: true });
 
-  return { serverScriptPath, staticDistDir, userDataDbDir, recordingsRootDir };
+  return { serverScriptPath, staticDistDir, userDataDbDir, recordingsRootDir, referenceDataDir };
 }
 
 function checkHealthOnce(port: number): Promise<boolean> {
@@ -127,7 +135,7 @@ async function waitForBackendReady(port: number, timeoutMs = 15000): Promise<voi
 }
 
 async function startLocalBackend(): Promise<void> {
-  const { serverScriptPath, staticDistDir, userDataDbDir, recordingsRootDir } =
+  const { serverScriptPath, staticDistDir, userDataDbDir, recordingsRootDir, referenceDataDir } =
     resolvePackagedPaths();
 
   captureEngine = new CaptureSessionEngine(recordingsRootDir);
@@ -157,6 +165,7 @@ async function startLocalBackend(): Promise<void> {
       FC26_PORT: String(backendPort),
       FC26_USER_DATA_DIR: userDataDbDir,
       FC26_STATIC_DIR: staticDistDir,
+      FC26_REFERENCE_DATA_DIR: referenceDataDir,
       FC26_API_TOKEN: sessionApiToken,
     },
     stdio: ['ignore', 'pipe', 'pipe'],

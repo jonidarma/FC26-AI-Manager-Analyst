@@ -12,8 +12,19 @@ import {
   getDb,
   restoreDatabaseBackup,
 } from './server/db/database.ts';
+import {
+  executeCatalogImport,
+  previewCatalogImport,
+  rollbackCatalogImportRun,
+} from './server/services/catalogImporter.ts';
+import * as catalogRepo from './server/services/catalogRepository.ts';
 import { getGeminiStatus } from './server/services/geminiService.ts';
 import * as repo from './server/services/repository.ts';
+import {
+  buildAiMatchTacticalContext,
+  validatePlayerRoleFocus,
+} from './server/services/tacticalContextService.ts';
+import type { CatalogDatasetType } from './src/types/domain.ts';
 
 const IS_DESKTOP_MODE = process.env.FC26_DESKTOP_MODE === '1';
 const IS_PRODUCTION = process.env.NODE_ENV === 'production' || IS_DESKTOP_MODE;
@@ -122,6 +133,8 @@ function requireDestructiveConfirmation(req: Request, res: Response, next: NextF
 const clubSchema = z.object({
   name: z.string().trim().min(1).max(120),
   league: z.string().trim().max(120).default(''),
+  nation: z.string().trim().max(100).default(''),
+  catalogClubId: z.string().uuid().nullable().optional(),
   season: z.string().trim().min(1).max(40).default('2025/26'),
   managerName: z.string().trim().max(100).default(''),
   preferredPhilosophy: z.string().trim().max(120).default('Balanced Positional Play'),
@@ -134,19 +147,41 @@ const clubSchema = z.object({
 
 const playerSchema = z.object({
   clubId: z.string().uuid(),
+  catalogPlayerId: z.string().uuid().nullable().optional(),
   name: z.string().trim().min(1).max(100),
   position: z.string().trim().min(1).max(12),
   overallRating: z.number().int().min(1).max(99).nullable().default(null),
+  potentialRating: z.number().int().min(1).max(99).nullable().optional(),
+  age: z.number().int().min(14).max(55).nullable().optional(),
   preferredFoot: z.enum(['Right', 'Left', 'Both']).default('Right'),
   playerRole: z.string().trim().max(80).default(''),
+  playerFocus: z.string().trim().max(80).default(''),
+  contractExpiry: z.string().trim().max(20).nullable().optional(),
+  marketValueEur: z.number().int().min(0).nullable().optional(),
+  wageEur: z.number().int().min(0).nullable().optional(),
   strengths: z.string().trim().max(400).default(''),
   weaknesses: z.string().trim().max(400).default(''),
   preferredInstructions: z.string().trim().max(400).default(''),
 });
 
+const importPlayerFromCatalogSchema = z.object({
+  catalogPlayerId: z.string().uuid(),
+  position: z.string().trim().min(1).max(12).optional(),
+  overallRating: z.number().int().min(1).max(99).nullable().optional(),
+  potentialRating: z.number().int().min(1).max(99).nullable().optional(),
+  age: z.number().int().min(14).max(55).nullable().optional(),
+  playerRole: z.string().trim().max(80).optional(),
+  playerFocus: z.string().trim().max(80).optional(),
+  contractExpiry: z.string().trim().max(20).nullable().optional(),
+  strengths: z.string().trim().max(400).optional(),
+  weaknesses: z.string().trim().max(400).optional(),
+  preferredInstructions: z.string().trim().max(400).optional(),
+});
+
 const opponentSchema = z.object({
   name: z.string().trim().min(1).max(120),
   league: z.string().trim().max(120).default(''),
+  catalogClubId: z.string().uuid().nullable().optional(),
   typicalFormation: z.string().trim().max(60).default('Unknown'),
   strengths: z.string().trim().max(600).default(''),
   weaknesses: z.string().trim().max(600).default(''),
@@ -258,6 +293,9 @@ async function startServer() {
 
   const app = express();
   app.disable('x-powered-by');
+  // Higher payload limit strictly for large CSV/JSON catalog imports (20,000+ players)
+  app.use('/api/catalog/import', express.json({ limit: '25mb' }));
+  app.use('/api/database/restore', express.json({ limit: '25mb' }));
   app.use(express.json({ limit: '5mb' }));
 
   // Apply security headers & strict origin checks to all API routes
@@ -373,6 +411,21 @@ async function startServer() {
     const updated = repo.updatePlayer(req.params.id, parsed.data);
     if (!updated) return res.status(404).json({ error: 'Player not found' });
     return res.json(updated);
+  });
+
+  app.post('/api/clubs/:clubId/players/from-catalog', (req, res) => {
+    const parsed = importPlayerFromCatalogSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return res
+        .status(400)
+        .json({ error: 'Invalid catalog player import payload', details: parsed.error.flatten() });
+    }
+    const { catalogPlayerId, ...overrides } = parsed.data;
+    const created = repo.importPlayerFromCatalog(req.params.clubId, catalogPlayerId, overrides);
+    if (!created) {
+      return res.status(404).json({ error: 'Catalog player not found' });
+    }
+    return res.status(201).json(created);
   });
 
   app.delete('/api/players/:id', (req, res) => {
@@ -517,6 +570,296 @@ async function startServer() {
     const deleted = repo.deleteTacticalCatalogItem(req.params.id);
     if (!deleted) return res.status(404).json({ error: 'Catalog item not found' });
     return res.json({ deleted: true });
+  });
+
+  // ============================================================
+  // Phase 1.2 — EA SPORTS FC 26 Master Reference Database API
+  // ============================================================
+
+  const importDatasetTypeSchema = z.enum([
+    'nations',
+    'leagues',
+    'clubs',
+    'players',
+    'formations',
+    'positions',
+    'roles',
+    'focuses',
+    'sources',
+  ]);
+
+  const catalogImportPreviewSchema = z.object({
+    datasetType: importDatasetTypeSchema,
+    format: z.enum(['json', 'csv']),
+    rawContent: z.string().min(1),
+  });
+
+  const catalogImportExecuteSchema = catalogImportPreviewSchema.extend({
+    fileName: z.string().trim().max(180).optional(),
+    sourceKey: z.string().trim().max(80).optional(),
+    datasetVersion: z.string().trim().max(60).optional(),
+    completeness: z
+      .enum(['verified_complete', 'partial_baseline', 'user_imported', 'empty_awaiting_user_import'])
+      .optional(),
+    mode: z.enum(['upsert', 'insert_only', 'replace_dataset']).optional(),
+  });
+
+  const formationSlotsUpdateSchema = z.object({
+    slots: z
+      .array(
+        z.object({
+          slotOrder: z.number().int().min(0).max(10),
+          x: z.number().min(5).max(95),
+          y: z.number().min(8).max(94),
+        })
+      )
+      .min(1)
+      .max(11),
+  });
+
+  const roleFocusValidateSchema = z.object({
+    positionCode: z.string().trim().min(1).max(12),
+    role: z.string().trim().max(80).default(''),
+    focus: z.string().trim().max(80).default(''),
+  });
+
+  const parseOptionalInt = (val: unknown): number | undefined => {
+    if (typeof val !== 'string' || !val.trim()) return undefined;
+    const n = Number(val);
+    return Number.isFinite(n) ? Math.round(n) : undefined;
+  };
+
+  app.get('/api/catalog/overview', (_req, res) => {
+    res.json(catalogRepo.getCatalogOverview());
+  });
+
+  app.get('/api/catalog/sources', (_req, res) => {
+    res.json(catalogRepo.listCatalogSources());
+  });
+
+  app.get('/api/catalog/import-runs', (_req, res) => {
+    res.json(catalogRepo.listImportRuns());
+  });
+
+  app.get('/api/catalog/positions', (_req, res) => {
+    res.json(catalogRepo.listCatalogPositions());
+  });
+
+  app.get('/api/catalog/nations', (req, res) => {
+    const q = typeof req.query.q === 'string' ? req.query.q : undefined;
+    const region = typeof req.query.region === 'string' ? req.query.region : undefined;
+    res.json(catalogRepo.listCatalogNations({ q, region }));
+  });
+
+  app.get('/api/catalog/leagues', (req, res) => {
+    const q = typeof req.query.q === 'string' ? req.query.q : undefined;
+    const countryId = typeof req.query.countryId === 'string' ? req.query.countryId : undefined;
+    const category = typeof req.query.category === 'string' ? req.query.category : undefined;
+    res.json(catalogRepo.listCatalogLeagues({ q, countryId, category }));
+  });
+
+  app.get('/api/catalog/clubs', (req, res) => {
+    const q = typeof req.query.q === 'string' ? req.query.q : undefined;
+    const leagueId = typeof req.query.leagueId === 'string' ? req.query.leagueId : undefined;
+    const nationId = typeof req.query.nationId === 'string' ? req.query.nationId : undefined;
+    const teamCategory =
+      req.query.teamCategory === 'mens' || req.query.teamCategory === 'womens'
+        ? req.query.teamCategory
+        : '';
+    const page = parseOptionalInt(req.query.page) ?? 1;
+    const pageSize = parseOptionalInt(req.query.pageSize) ?? 40;
+    res.json(
+      catalogRepo.searchCatalogClubs({ q, leagueId, nationId, teamCategory, page, pageSize })
+    );
+  });
+
+  app.get('/api/catalog/players', (req, res) => {
+    const q = typeof req.query.q === 'string' ? req.query.q : undefined;
+    const positionsParam = typeof req.query.positions === 'string' ? req.query.positions : '';
+    const positions = positionsParam
+      ? positionsParam
+          .split(',')
+          .map((s) => s.trim())
+          .filter(Boolean)
+      : undefined;
+    const clubId = typeof req.query.clubId === 'string' ? req.query.clubId : undefined;
+    const leagueId = typeof req.query.leagueId === 'string' ? req.query.leagueId : undefined;
+    const nationId = typeof req.query.nationId === 'string' ? req.query.nationId : undefined;
+    const preferredFoot =
+      req.query.preferredFoot === 'Right' ||
+      req.query.preferredFoot === 'Left' ||
+      req.query.preferredFoot === 'Both'
+        ? req.query.preferredFoot
+        : '';
+    const sortBy =
+      typeof req.query.sortBy === 'string' &&
+      ['overall', 'potential', 'growth', 'age', 'name', 'pace', 'market_value'].includes(
+        req.query.sortBy
+      )
+        ? (req.query.sortBy as catalogRepo.PlayerSearchFilters['sortBy'])
+        : 'overall';
+    const sortDir = req.query.sortDir === 'asc' ? 'asc' : 'desc';
+
+    res.json(
+      catalogRepo.searchCatalogPlayers({
+        q,
+        positions,
+        clubId,
+        leagueId,
+        nationId,
+        minOvr: parseOptionalInt(req.query.minOvr),
+        maxOvr: parseOptionalInt(req.query.maxOvr),
+        minPot: parseOptionalInt(req.query.minPot),
+        maxPot: parseOptionalInt(req.query.maxPot),
+        minAge: parseOptionalInt(req.query.minAge),
+        maxAge: parseOptionalInt(req.query.maxAge),
+        preferredFoot,
+        sortBy,
+        sortDir,
+        page: parseOptionalInt(req.query.page) ?? 1,
+        pageSize: parseOptionalInt(req.query.pageSize) ?? 30,
+      })
+    );
+  });
+
+  app.get('/api/catalog/players/:id', (req, res) => {
+    const player = catalogRepo.getCatalogPlayerById(req.params.id);
+    if (!player) return res.status(404).json({ error: 'Catalog player not found' });
+    return res.json(player);
+  });
+
+  app.get('/api/catalog/formations', (req, res) => {
+    const q = typeof req.query.q === 'string' ? req.query.q : undefined;
+    const category = typeof req.query.category === 'string' ? req.query.category : undefined;
+    res.json(catalogRepo.listCatalogFormations({ q, category }));
+  });
+
+  app.get('/api/catalog/formations/:id', (req, res) => {
+    const formation = catalogRepo.getCatalogFormationByIdOrName(req.params.id);
+    if (!formation) return res.status(404).json({ error: 'Catalog formation not found' });
+    return res.json(formation);
+  });
+
+  app.put('/api/catalog/formations/:id/slots', (req, res) => {
+    const parsed = formationSlotsUpdateSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return res
+        .status(400)
+        .json({ error: 'Invalid slot coordinate payload', details: parsed.error.flatten() });
+    }
+    const updated = catalogRepo.updateFormationSlotCoordinates(req.params.id, parsed.data.slots);
+    if (!updated) return res.status(404).json({ error: 'Catalog formation not found' });
+    return res.json(updated);
+  });
+
+  app.get('/api/catalog/roles', (req, res) => {
+    const positionCode =
+      typeof req.query.positionCode === 'string' ? req.query.positionCode : undefined;
+    res.json(catalogRepo.listCatalogRoles(positionCode));
+  });
+
+  app.get('/api/catalog/focuses', (req, res) => {
+    const roleName = typeof req.query.roleName === 'string' ? req.query.roleName : undefined;
+    const positionCode =
+      typeof req.query.positionCode === 'string' ? req.query.positionCode : undefined;
+    res.json(catalogRepo.listCatalogFocuses({ roleName, positionCode }));
+  });
+
+  app.get('/api/catalog/compatibility', (req, res) => {
+    const positionCode =
+      typeof req.query.positionCode === 'string' ? req.query.positionCode : undefined;
+    const roleName = typeof req.query.roleName === 'string' ? req.query.roleName : undefined;
+    res.json(catalogRepo.getRoleFocusCompatibilityMatrix({ positionCode, roleName }));
+  });
+
+  app.post('/api/catalog/validate-role-focus', (req, res) => {
+    const parsed = roleFocusValidateSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json({ error: 'Invalid validation payload', details: parsed.error.flatten() });
+    }
+    return res.json(
+      validatePlayerRoleFocus(parsed.data.positionCode, parsed.data.role, parsed.data.focus)
+    );
+  });
+
+  app.post('/api/catalog/import/preview', (req, res) => {
+    const parsed = catalogImportPreviewSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return res
+        .status(400)
+        .json({ error: 'Invalid import preview payload', details: parsed.error.flatten() });
+    }
+    try {
+      const preview = previewCatalogImport(
+        getDb(),
+        parsed.data.datasetType,
+        parsed.data.format,
+        parsed.data.rawContent
+      );
+      return res.json(preview);
+    } catch (err) {
+      return res.status(400).json({
+        error: err instanceof Error ? err.message : 'Failed to parse dataset preview',
+      });
+    }
+  });
+
+  app.post('/api/catalog/import/execute', (req, res) => {
+    const parsed = catalogImportExecuteSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return res
+        .status(400)
+        .json({ error: 'Invalid import execute payload', details: parsed.error.flatten() });
+    }
+    try {
+      const run = executeCatalogImport(
+        getDb(),
+        parsed.data.datasetType,
+        parsed.data.format,
+        parsed.data.rawContent,
+        {
+          fileName: parsed.data.fileName,
+          sourceKey: parsed.data.sourceKey,
+          datasetVersion: parsed.data.datasetVersion,
+          completeness: parsed.data.completeness,
+          mode: parsed.data.mode,
+        }
+      );
+      return res.status(201).json({ run });
+    } catch (err) {
+      return res.status(400).json({
+        error: err instanceof Error ? err.message : 'Failed to execute catalog import',
+      });
+    }
+  });
+
+  app.post('/api/catalog/import-runs/:id/rollback', (req, res) => {
+    const result = rollbackCatalogImportRun(getDb(), req.params.id);
+    if (!result.rolledBack) {
+      return res.status(400).json({ error: result.error ?? 'Failed to roll back import run' });
+    }
+    return res.json(result);
+  });
+
+  app.get('/api/catalog/export/:datasetType', (req, res) => {
+    const parsedType = importDatasetTypeSchema.safeParse(req.params.datasetType);
+    if (!parsedType.success) {
+      return res.status(400).json({ error: 'Unsupported catalog dataset type for export.' });
+    }
+    const datasetType = parsedType.data as CatalogDatasetType;
+    const payload = catalogRepo.exportCatalogDataset(datasetType);
+    res.setHeader('Content-Type', 'application/json');
+    res.setHeader(
+      'Content-Disposition',
+      `attachment; filename="fc26-catalog-${datasetType}-${new Date().toISOString().slice(0, 10)}.json"`
+    );
+    return res.json(payload);
+  });
+
+  app.get('/api/matches/:id/ai-context', (req, res) => {
+    const ctx = buildAiMatchTacticalContext(req.params.id);
+    if (!ctx) return res.status(404).json({ error: 'Match not found' });
+    return res.json(ctx);
   });
 
   // Settings & API Usage

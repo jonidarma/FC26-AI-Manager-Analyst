@@ -1,22 +1,41 @@
 import type {
+  AiMatchTacticalContext,
   ApiUsageLog,
   ApplicationSettings,
   CaptureSourceInfo,
+  CatalogClub,
+  CatalogCompatibilityRow,
+  CatalogDatasetType,
+  CatalogFocus,
+  CatalogFormation,
+  CatalogImportRun,
+  CatalogLeague,
+  CatalogNation,
+  CatalogOverview,
+  CatalogPlayer,
+  CatalogPosition,
+  CatalogRole,
+  CatalogSource,
   ClubWithProfile,
   ConfidenceLevel,
   DashboardSummary,
+  DatasetCompleteness,
   DesktopBridgeCapabilities,
   DiskSpaceInfo,
   FeedbackChoice,
   HalftimeReportData,
+  ImportExecuteResult,
+  ImportPreviewResult,
   MatchRecord,
   MatchStatus,
   MatchVenue,
   Opponent,
+  PaginatedResult,
   Player,
   PlayerRoleAssignment,
   PostMatchReportRecord,
   RecommendationFeedbackRecord,
+  RoleFocusValidationResult,
   TacticalCatalogItem,
   TacticalMemoryEntry,
 } from '../types/domain';
@@ -233,6 +252,8 @@ class DesktopBridgeService {
   public createClub(payload: {
     name: string;
     league: string;
+    nation?: string;
+    catalogClubId?: string | null;
     season: string;
     managerName: string;
     preferredPhilosophy: string;
@@ -253,6 +274,8 @@ class DesktopBridgeService {
     payload: Partial<{
       name: string;
       league: string;
+      nation: string;
+      catalogClubId: string | null;
       season: string;
       managerName: string;
       preferredPhilosophy: string;
@@ -282,16 +305,45 @@ class DesktopBridgeService {
 
   public createPlayer(payload: {
     clubId: string;
+    catalogPlayerId?: string | null;
     name: string;
     position: string;
     overallRating: number | null;
+    potentialRating?: number | null;
+    age?: number | null;
     preferredFoot: 'Right' | 'Left' | 'Both';
     playerRole: string;
+    playerFocus?: string;
+    contractExpiry?: string | null;
+    marketValueEur?: number | null;
+    wageEur?: number | null;
     strengths: string;
     weaknesses: string;
     preferredInstructions: string;
   }): Promise<Player> {
     return this.apiFetch<Player>('/api/players', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  }
+
+  public importPlayerFromCatalog(
+    clubId: string,
+    payload: {
+      catalogPlayerId: string;
+      position?: string;
+      overallRating?: number | null;
+      potentialRating?: number | null;
+      age?: number | null;
+      playerRole?: string;
+      playerFocus?: string;
+      contractExpiry?: string | null;
+      strengths?: string;
+      weaknesses?: string;
+      preferredInstructions?: string;
+    }
+  ): Promise<Player> {
+    return this.apiFetch<Player>(`/api/clubs/${clubId}/players/from-catalog`, {
       method: 'POST',
       body: JSON.stringify(payload),
     });
@@ -318,6 +370,7 @@ class DesktopBridgeService {
   public createOpponent(payload: {
     name: string;
     league: string;
+    catalogClubId?: string | null;
     typicalFormation: string;
     strengths: string;
     weaknesses: string;
@@ -528,6 +581,211 @@ class DesktopBridgeService {
       },
       body: JSON.stringify({ confirmation: 'DELETE' }),
     });
+  }
+
+  // Phase 1.2 — FC 26 Master Reference Catalog API
+  public getCatalogOverview(): Promise<CatalogOverview> {
+    return this.apiFetch<CatalogOverview>('/api/catalog/overview');
+  }
+
+  public listCatalogSources(): Promise<CatalogSource[]> {
+    return this.apiFetch<CatalogSource[]>('/api/catalog/sources');
+  }
+
+  public listCatalogImportRuns(): Promise<CatalogImportRun[]> {
+    return this.apiFetch<CatalogImportRun[]>('/api/catalog/import-runs');
+  }
+
+  public listCatalogPositions(): Promise<CatalogPosition[]> {
+    return this.apiFetch<CatalogPosition[]>('/api/catalog/positions');
+  }
+
+  public listCatalogNations(params?: { q?: string; region?: string }): Promise<CatalogNation[]> {
+    const qs = new URLSearchParams();
+    if (params?.q) qs.set('q', params.q);
+    if (params?.region) qs.set('region', params.region);
+    const suffix = qs.toString() ? `?${qs.toString()}` : '';
+    return this.apiFetch<CatalogNation[]>(`/api/catalog/nations${suffix}`);
+  }
+
+  public listCatalogLeagues(params?: {
+    q?: string;
+    countryId?: string;
+    category?: string;
+  }): Promise<CatalogLeague[]> {
+    const qs = new URLSearchParams();
+    if (params?.q) qs.set('q', params.q);
+    if (params?.countryId) qs.set('countryId', params.countryId);
+    if (params?.category) qs.set('category', params.category);
+    const suffix = qs.toString() ? `?${qs.toString()}` : '';
+    return this.apiFetch<CatalogLeague[]>(`/api/catalog/leagues${suffix}`);
+  }
+
+  public searchCatalogClubs(params?: {
+    q?: string;
+    leagueId?: string;
+    nationId?: string;
+    teamCategory?: 'mens' | 'womens' | '';
+    page?: number;
+    pageSize?: number;
+  }): Promise<PaginatedResult<CatalogClub>> {
+    const qs = new URLSearchParams();
+    if (params?.q) qs.set('q', params.q);
+    if (params?.leagueId) qs.set('leagueId', params.leagueId);
+    if (params?.nationId) qs.set('nationId', params.nationId);
+    if (params?.teamCategory) qs.set('teamCategory', params.teamCategory);
+    if (params?.page) qs.set('page', String(params.page));
+    if (params?.pageSize) qs.set('pageSize', String(params.pageSize));
+    const suffix = qs.toString() ? `?${qs.toString()}` : '';
+    return this.apiFetch<PaginatedResult<CatalogClub>>(`/api/catalog/clubs${suffix}`);
+  }
+
+  public searchCatalogPlayers(params?: {
+    q?: string;
+    positions?: string[];
+    clubId?: string;
+    leagueId?: string;
+    nationId?: string;
+    minOvr?: number;
+    maxOvr?: number;
+    minPot?: number;
+    maxPot?: number;
+    minAge?: number;
+    maxAge?: number;
+    preferredFoot?: 'Right' | 'Left' | 'Both' | '';
+    sortBy?: 'overall' | 'potential' | 'growth' | 'age' | 'name' | 'pace' | 'market_value';
+    sortDir?: 'asc' | 'desc';
+    page?: number;
+    pageSize?: number;
+  }): Promise<PaginatedResult<CatalogPlayer>> {
+    const qs = new URLSearchParams();
+    if (params?.q) qs.set('q', params.q);
+    if (params?.positions?.length) qs.set('positions', params.positions.join(','));
+    if (params?.clubId) qs.set('clubId', params.clubId);
+    if (params?.leagueId) qs.set('leagueId', params.leagueId);
+    if (params?.nationId) qs.set('nationId', params.nationId);
+    if (params?.minOvr !== undefined) qs.set('minOvr', String(params.minOvr));
+    if (params?.maxOvr !== undefined) qs.set('maxOvr', String(params.maxOvr));
+    if (params?.minPot !== undefined) qs.set('minPot', String(params.minPot));
+    if (params?.maxPot !== undefined) qs.set('maxPot', String(params.maxPot));
+    if (params?.minAge !== undefined) qs.set('minAge', String(params.minAge));
+    if (params?.maxAge !== undefined) qs.set('maxAge', String(params.maxAge));
+    if (params?.preferredFoot) qs.set('preferredFoot', params.preferredFoot);
+    if (params?.sortBy) qs.set('sortBy', params.sortBy);
+    if (params?.sortDir) qs.set('sortDir', params.sortDir);
+    if (params?.page) qs.set('page', String(params.page));
+    if (params?.pageSize) qs.set('pageSize', String(params.pageSize));
+    const suffix = qs.toString() ? `?${qs.toString()}` : '';
+    return this.apiFetch<PaginatedResult<CatalogPlayer>>(`/api/catalog/players${suffix}`);
+  }
+
+  public getCatalogPlayerById(id: string): Promise<CatalogPlayer> {
+    return this.apiFetch<CatalogPlayer>(`/api/catalog/players/${id}`);
+  }
+
+  public listCatalogFormations(params?: {
+    q?: string;
+    category?: string;
+  }): Promise<CatalogFormation[]> {
+    const qs = new URLSearchParams();
+    if (params?.q) qs.set('q', params.q);
+    if (params?.category) qs.set('category', params.category);
+    const suffix = qs.toString() ? `?${qs.toString()}` : '';
+    return this.apiFetch<CatalogFormation[]>(`/api/catalog/formations${suffix}`);
+  }
+
+  public updateFormationSlotCoordinates(
+    formationId: string,
+    slots: Array<{ slotOrder: number; x: number; y: number }>
+  ): Promise<CatalogFormation> {
+    return this.apiFetch<CatalogFormation>(`/api/catalog/formations/${formationId}/slots`, {
+      method: 'PUT',
+      body: JSON.stringify({ slots }),
+    });
+  }
+
+  public listCatalogRoles(positionCode?: string): Promise<CatalogRole[]> {
+    const suffix = positionCode ? `?positionCode=${encodeURIComponent(positionCode)}` : '';
+    return this.apiFetch<CatalogRole[]>(`/api/catalog/roles${suffix}`);
+  }
+
+  public listCatalogFocuses(params?: {
+    roleName?: string;
+    positionCode?: string;
+  }): Promise<CatalogFocus[]> {
+    const qs = new URLSearchParams();
+    if (params?.roleName) qs.set('roleName', params.roleName);
+    if (params?.positionCode) qs.set('positionCode', params.positionCode);
+    const suffix = qs.toString() ? `?${qs.toString()}` : '';
+    return this.apiFetch<CatalogFocus[]>(`/api/catalog/focuses${suffix}`);
+  }
+
+  public getRoleFocusCompatibility(params?: {
+    positionCode?: string;
+    roleName?: string;
+  }): Promise<CatalogCompatibilityRow[]> {
+    const qs = new URLSearchParams();
+    if (params?.positionCode) qs.set('positionCode', params.positionCode);
+    if (params?.roleName) qs.set('roleName', params.roleName);
+    const suffix = qs.toString() ? `?${qs.toString()}` : '';
+    return this.apiFetch<CatalogCompatibilityRow[]>(`/api/catalog/compatibility${suffix}`);
+  }
+
+  public validateRoleFocus(
+    positionCode: string,
+    role: string,
+    focus: string
+  ): Promise<RoleFocusValidationResult> {
+    return this.apiFetch<RoleFocusValidationResult>('/api/catalog/validate-role-focus', {
+      method: 'POST',
+      body: JSON.stringify({ positionCode, role, focus }),
+    });
+  }
+
+  public previewCatalogImport(payload: {
+    datasetType: CatalogDatasetType;
+    format: 'json' | 'csv';
+    rawContent: string;
+  }): Promise<ImportPreviewResult> {
+    return this.apiFetch<ImportPreviewResult>('/api/catalog/import/preview', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  }
+
+  public executeCatalogImport(payload: {
+    datasetType: CatalogDatasetType;
+    format: 'json' | 'csv';
+    rawContent: string;
+    fileName?: string;
+    sourceKey?: string;
+    datasetVersion?: string;
+    completeness?: DatasetCompleteness;
+    mode?: 'upsert' | 'insert_only' | 'replace_dataset';
+  }): Promise<ImportExecuteResult> {
+    return this.apiFetch<ImportExecuteResult>('/api/catalog/import/execute', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  }
+
+  public rollbackCatalogImportRun(
+    runId: string
+  ): Promise<{ rolledBack: boolean; deletedRows: number }> {
+    return this.apiFetch<{ rolledBack: boolean; deletedRows: number }>(
+      `/api/catalog/import-runs/${runId}/rollback`,
+      { method: 'POST' }
+    );
+  }
+
+  public async exportCatalogDataset(datasetType: CatalogDatasetType): Promise<Blob> {
+    const res = await this.authorizedFetch(`/api/catalog/export/${datasetType}`, { method: 'GET' });
+    if (!res.ok) throw new Error(`Failed to export ${datasetType} catalog`);
+    return res.blob();
+  }
+
+  public getMatchAiContext(matchId: string): Promise<AiMatchTacticalContext> {
+    return this.apiFetch<AiMatchTacticalContext>(`/api/matches/${matchId}/ai-context`);
   }
 }
 

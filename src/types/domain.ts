@@ -5,6 +5,7 @@ export type NavigationSection =
   | 'match-capture'
   | 'halftime-briefing'
   | 'tactical-board'
+  | 'database-center'
   | 'opposition'
   | 'match-reports'
   | 'match-history'
@@ -35,6 +36,8 @@ export interface Club {
   id: string;
   name: string;
   league: string;
+  nation: string;
+  catalogClubId: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -63,11 +66,18 @@ export interface ClubWithProfile extends Club {
 export interface Player {
   id: string;
   clubId: string;
+  catalogPlayerId: string | null;
   name: string;
   position: string;
   overallRating: number | null;
+  potentialRating: number | null;
+  age: number | null;
   preferredFoot: 'Right' | 'Left' | 'Both';
   playerRole: string;
+  playerFocus: string;
+  contractExpiry: string | null;
+  marketValueEur: number | null;
+  wageEur: number | null;
   strengths: string;
   weaknesses: string;
   preferredInstructions: string;
@@ -79,6 +89,7 @@ export interface Opponent {
   id: string;
   name: string;
   league: string;
+  catalogClubId: string | null;
   typicalFormation: string;
   strengths: string;
   weaknesses: string;
@@ -418,8 +429,305 @@ export interface DesktopBridgeCapabilities {
 export interface PitchNodePosition {
   slotIndex: number;
   positionCode: string;
+  positionLabel?: string;
   x: number; // 0 to 100 (left to right across pitch width)
   y: number; // 0 to 100 (top = opponent goal, bottom = own goal)
   defaultRole: string;
   defaultFocus: string;
+  isUserAdjusted?: boolean;
+}
+
+export type CatalogDatasetType =
+  | 'nations'
+  | 'leagues'
+  | 'clubs'
+  | 'players'
+  | 'formations'
+  | 'positions'
+  | 'roles'
+  | 'focuses'
+  | 'sources';
+
+export type DatasetCompleteness =
+  | 'verified_complete'
+  | 'partial_baseline'
+  | 'user_imported'
+  | 'empty_awaiting_user_import';
+
+export interface CatalogSource {
+  id: string;
+  sourceKey: string;
+  name: string;
+  url: string;
+  edition: string;
+  licenseNotes: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface CatalogImportRun {
+  id: string;
+  datasetType: CatalogDatasetType;
+  sourceId: string | null;
+  sourceName: string | null;
+  fileName: string;
+  format: 'json' | 'csv';
+  datasetVersion: string;
+  completeness: DatasetCompleteness;
+  checksum: string;
+  mode: 'upsert' | 'insert_only' | 'replace_dataset';
+  status: 'completed' | 'failed' | 'rolled_back';
+  totalRows: number;
+  insertedCount: number;
+  updatedCount: number;
+  rejectedCount: number;
+  errors: Array<{ row: number; field: string; message: string }>;
+  startedAt: string;
+  completedAt: string | null;
+}
+
+export interface CatalogNation {
+  id: string;
+  externalSourceId: string;
+  sourceName: string;
+  displayName: string;
+  isoCode: string;
+  region: string;
+  clubCount?: number;
+  leagueCount?: number;
+  playerCount?: number;
+}
+
+export interface CatalogLeague {
+  id: string;
+  externalSourceId: string;
+  name: string;
+  countryId: string | null;
+  countryName: string;
+  tier: number | null;
+  category: 'mens' | 'womens' | 'mixed';
+  clubCount?: number;
+  playerCount?: number;
+}
+
+export interface CatalogClub {
+  id: string;
+  externalSourceId: string;
+  name: string;
+  shortName: string;
+  leagueId: string | null;
+  leagueName: string | null;
+  nationId: string | null;
+  nationName: string | null;
+  teamCategory: 'mens' | 'womens';
+  playerCount?: number;
+}
+
+export interface CatalogPosition {
+  code: string;
+  label: string;
+  category: string;
+  tacticalLine: 'GK' | 'DEF' | 'MID' | 'ATT';
+  sortOrder: number;
+}
+
+export interface CatalogPlayer {
+  id: string;
+  externalSourceId: string;
+  fullName: string;
+  shortName: string;
+  clubId: string | null;
+  clubName: string | null;
+  leagueId: string | null;
+  leagueName: string | null;
+  nationId: string | null;
+  nationName: string | null;
+  primaryPosition: string;
+  secondaryPositions: string[];
+  age: number | null;
+  overallRating: number | null;
+  potentialRating: number | null;
+  growth: number | null;
+  pace: number | null;
+  shooting: number | null;
+  passing: number | null;
+  dribbling: number | null;
+  defending: number | null;
+  physicality: number | null;
+  preferredFoot: 'Right' | 'Left' | 'Both' | null;
+  weakFoot: number | null;
+  skillMoves: number | null;
+  heightCm: number | null;
+  weightKg: number | null;
+  marketValueEur: number | null;
+  wageEur: number | null;
+  contractExpiry: string | null;
+  attributes: Record<string, unknown> | null;
+  sourceName: string | null;
+}
+
+export interface CatalogFormationSlot {
+  id: string;
+  formationId: string;
+  slotOrder: number;
+  positionCode: string;
+  positionLabel: string;
+  x: number;
+  y: number;
+  tacticalLine: 'GK' | 'DEF' | 'MID' | 'ATT';
+  isUserAdjusted: boolean;
+}
+
+export interface CatalogFormation {
+  id: string;
+  externalSourceId: string;
+  name: string;
+  code: string;
+  category: string;
+  defensiveShape: string;
+  attackingShape: string;
+  tacticalSummary: string;
+  gameModes: string[];
+  careerModeStatus: 'verified' | 'unverified' | 'fut_only';
+  layoutVerified: boolean;
+  isUserAdjusted: boolean;
+  slots: CatalogFormationSlot[];
+}
+
+export interface CatalogRole {
+  id: string;
+  externalSourceId: string;
+  name: string;
+  description: string;
+  positionCategory: string;
+  tacticalBehavior: string;
+  attackingBehavior: string;
+  defensiveBehavior: string;
+  isFc26New: boolean;
+  verificationStatus: 'verified' | 'unverified';
+  sourceReference: string;
+  eligiblePositions: string[];
+  compatibleFocusesByPosition: Record<string, string[]>;
+}
+
+export interface CatalogFocus {
+  id: string;
+  externalSourceId: string;
+  name: string;
+  description: string;
+  tacticalPurpose: string;
+  isFc26Updated: boolean;
+  verificationStatus: 'verified' | 'unverified';
+  sourceReference: string;
+  compatibleRolesCount?: number;
+}
+
+export interface CatalogCompatibilityRow {
+  roleId: string;
+  roleName: string;
+  positionCode: string;
+  focusId: string;
+  focusName: string;
+  verificationStatus: 'verified' | 'unverified';
+  evidence: string;
+}
+
+export interface PaginatedResult<T> {
+  items: T[];
+  total: number;
+  page: number;
+  pageSize: number;
+  totalPages: number;
+}
+
+export interface CatalogOverview {
+  schemaVersion: number;
+  counts: {
+    players: number;
+    clubs: number;
+    mensClubs: number;
+    womensClubs: number;
+    leagues: number;
+    nations: number;
+    formations: number;
+    positions: number;
+    roles: number;
+    focuses: number;
+    rolePositionPairs: number;
+    roleFocusPairs: number;
+    sources: number;
+    importRuns: number;
+  };
+  completeness: Record<
+    'positions' | 'roles' | 'focuses' | 'formations' | 'nations' | 'leagues' | 'clubs' | 'players',
+    DatasetCompleteness
+  >;
+  lastImportAt: string | null;
+  sources: CatalogSource[];
+  warnings: string[];
+}
+
+export interface ImportValidationError {
+  row: number;
+  field: string;
+  message: string;
+}
+
+export interface ImportPreviewResult {
+  datasetType: CatalogDatasetType;
+  format: 'json' | 'csv';
+  checksum: string;
+  totalRows: number;
+  validCount: number;
+  insertCount: number;
+  updateCount: number;
+  rejectedCount: number;
+  duplicatesInFile: number;
+  sampleRows: Array<Record<string, unknown>>;
+  validationErrors: ImportValidationError[];
+}
+
+export interface ImportExecuteResult {
+  run: CatalogImportRun;
+}
+
+export interface RoleFocusValidationResult {
+  valid: boolean;
+  reason?: string;
+  allowedRoles: string[];
+  allowedFocuses: string[];
+}
+
+export interface AiMatchTacticalContext {
+  matchId: string;
+  clubName: string;
+  opponentName: string;
+  formation: {
+    name: string;
+    careerModeStatus: string;
+    layoutVerified: boolean;
+    slots: CatalogFormationSlot[];
+  } | null;
+  startingXi: Array<{
+    slotIndex: number;
+    positionCode: string;
+    playerName: string | null;
+    assignedRole: string;
+    assignedFocus: string;
+    roleFocusValid: boolean;
+    careerModeOverall: number | null;
+    masterCatalogOverall: number | null;
+    potentialRating: number | null;
+    preferredFoot: string | null;
+    secondaryPositions: string[];
+    faceStats: {
+      pace: number | null;
+      shooting: number | null;
+      passing: number | null;
+      dribbling: number | null;
+      defending: number | null;
+      physicality: number | null;
+    } | null;
+  }>;
+  validRolesByPosition: Record<string, Record<string, string[]>>;
 }

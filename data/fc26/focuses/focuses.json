@@ -1,0 +1,136 @@
+{
+  "datasetVersion": "fc26-focuses-1.0.0",
+  "sourceKey": "ea_fc26_pitch_notes",
+  "completeness": "verified_complete",
+  "focuses": [
+    {
+      "externalSourceId": "focus_defend",
+      "name": "Defend",
+      "description": "Prioritizes defensive shape, rest-defense security, and transition protection.",
+      "tacticalPurpose": "Minimizes space exposed behind the player during turnovers.",
+      "isFc26Updated": false,
+      "verificationStatus": "verified",
+      "sourceReference": "EA FC 26 Pitch Notes & FUTBIN Roles"
+    },
+    {
+      "externalSourceId": "focus_balanced",
+      "name": "Balanced",
+      "description": "Adapts attacking and defensive involvement proportionally to ball position and game state.",
+      "tacticalPurpose": "Provides measured two-way contribution without extreme positional commitment.",
+      "isFc26Updated": false,
+      "verificationStatus": "verified",
+      "sourceReference": "EA FC 26 Pitch Notes & FUTBIN Roles"
+    },
+    {
+      "externalSourceId": "focus_attack",
+      "name": "Attack",
+      "description": "Commits aggressively forward into final-third spaces and box arrivals.",
+      "tacticalPurpose": "Maximizes offensive threat and numerical presence around the penalty area.",
+      "isFc26Updated": true,
+      "verificationStatus": "verified",
+      "sourceReference": "EA FC 26 Pitch Notes & FUTBIN Roles"
+    },
+    {
+      "externalSourceId": "focus_build_up",
+      "name": "Build-Up",
+      "description": "Offers structured passing angles during early and middle-third ball progression.",
+      "tacticalPurpose": "Stabilizes possession under opposition pressing.",
+      "isFc26Updated": true,
+      "verificationStatus": "verified",
+      "sourceReference": "EA FC 26 Pitch Notes & FUTBIN Roles"
+    },
+    {
+      "externalSourceId": "focus_support",
+      "name": "Support",
+      "description": "Operates close to teammates to create triangles, overlaps, and short passing combinations.",
+      "tacticalPurpose": "Improves local numerical superiority and combination play.",
+      "isFc26Updated": true,
+      "verificationStatus": "verified",
+      "sourceReference": "EA FC 26 Pitch Notes & FUTBIN Roles"
+    },
+    {
+      "externalSourceId": "focus_roaming",
+      "name": "Roaming",
+      "description": "Permits vacating the starting zone to find open pockets across channels.",
+      "tacticalPurpose": "Disrupts man-marking schemes and creates fluid overloads.",
+      "isFc26Updated": true,
+      "verificationStatus": "verified",
+      "sourceReference": "EA FC 26 Pitch Notes & FUTBIN Roles"
+    },
+    {
+      "externalSourceId": "focus_aggressive",
+      "name": "Aggressive",
+      "description": "FC 26 update: steps proactively out of the line to press, intercept early, and contest duels tightly.",
+      "tacticalPurpose": "Compresses time on the ball for opposing attackers at the risk of space behind.",
+      "isFc26Updated": true,
+      "verificationStatus": "verified",
+      "sourceReference": "EA FC 26 Gameplay Deep Dive Pitch Notes"
+    },
+    {
+      "externalSourceId": "focus_versatile",
+      "name": "Versatile",
+      "description": "FC 26 update: reduces positional rigidity so the player adapts fluidly across phases and open spaces.",
+      "tacticalPurpose": "Allows dynamic switching between support, width, and box-attacking behavior.",
+      "isFc26Updated": true,
+      "verificationStatus": "verified",
+      "sourceReference": "EA FC 26 Gameplay Deep Dive Pitch Notes"
+    },
+    {
+      "externalSourceId": "focus_ball_winning",
+      "name": "Ball-Winning",
+      "description": "FC 26 update: tasks midfielders with proactively stepping in to win duels and intercept passes.",
+      "tacticalPurpose": "Accelerates ball recovery in central zones.",
+      "isFc26Updated": true,
+      "verificationStatus": "verified",
+      "sourceReference": "EA FC 26 Pitch Notes & FUTBIN Roles"
+    },
+    {
+      "externalSourceId": "focus_wide",
+      "name": "Wide",
+      "description": "Drifts toward outer channels to stretch opposition central defenders.",
+      "tacticalPurpose": "Pulls centre-backs wide and opens central lanes.",
+      "isFc26Updated": false,
+      "verificationStatus": "verified",
+      "sourceReference": "EA FC 26 Pitch Notes & FUTBIN Roles"
+    }
+  ],
+  "compatibility": [
+    { "roleName": "Goalkeeper", "positions": ["GK"], "focuses": ["Defend", "Balanced"], "evidence": "EA FC 26 Pitch Notes" },
+    { "roleName": "Sweeper Keeper", "positions": ["GK"], "focuses": ["Balanced", "Build-Up"], "evidence": "EA FC 26 Pitch Notes" },
+    { "roleName": "Ball-Playing Keeper", "positions": ["GK"], "focuses": ["Build-Up"], "evidence": "EA FC 26 Gameplay Deep Dive" },
+
+    { "roleName": "Defender", "positions": ["CB"], "focuses": ["Defend", "Balanced"], "evidence": "EA FC 26 Pitch Notes" },
+    { "roleName": "Stopper", "positions": ["CB"], "focuses": ["Balanced", "Aggressive"], "evidence": "EA FC 26 Pitch Notes" },
+    { "roleName": "Ball-Playing Defender", "positions": ["CB"], "focuses": ["Defend", "Build-Up", "Aggressive"], "evidence": "EA FC 26 Pitch Notes & FUTBIN" },
+    { "roleName": "Wide Back", "positions": ["CB"], "focuses": ["Defend", "Aggressive", "Support"], "evidence": "EA FC 26 Gameplay Deep Dive" },
+
+    { "roleName": "Fullback", "positions": ["LB", "RB"], "focuses": ["Defend", "Balanced", "Versatile"], "evidence": "EA FC 26 Gameplay Deep Dive" },
+    { "roleName": "Wingback", "positions": ["LB", "RB", "LWB", "RWB"], "focuses": ["Balanced", "Support"], "evidence": "EA FC 26 Pitch Notes" },
+    { "roleName": "Attacking Wingback", "positions": ["LB", "RB", "LWB", "RWB"], "focuses": ["Balanced", "Attack"], "evidence": "EA FC 26 Pitch Notes" },
+    { "roleName": "Falseback", "positions": ["LB", "RB"], "focuses": ["Defend", "Balanced"], "evidence": "EA FC 26 Pitch Notes" },
+    { "roleName": "Inverted Wingback", "positions": ["LB", "RB"], "focuses": ["Build-Up", "Attack"], "evidence": "EA FC 26 Gameplay Deep Dive" },
+
+    { "roleName": "Holding", "positions": ["CDM", "CM"], "focuses": ["Defend", "Ball-Winning", "Roaming"], "evidence": "EA FC 26 Pitch Notes & FUTBIN" },
+    { "roleName": "Centre-Half", "positions": ["CDM"], "focuses": ["Defend"], "evidence": "EA FC 26 Pitch Notes" },
+    { "roleName": "Deep-Lying Playmaker", "positions": ["CDM", "CM"], "focuses": ["Defend", "Build-Up", "Roaming"], "evidence": "EA FC 26 Pitch Notes" },
+    { "roleName": "Box Crasher", "positions": ["CDM"], "focuses": ["Balanced"], "evidence": "EA FC 26 Gameplay Deep Dive" },
+
+    { "roleName": "Box-to-Box", "positions": ["CM"], "focuses": ["Balanced", "Ball-Winning"], "evidence": "EA FC 26 Pitch Notes" },
+    { "roleName": "Playmaker", "positions": ["CM"], "focuses": ["Attack", "Roaming", "Build-Up"], "evidence": "EA FC 26 Pitch Notes" },
+    { "roleName": "Playmaker", "positions": ["CAM"], "focuses": ["Balanced", "Roaming", "Build-Up"], "evidence": "EA FC 26 Pitch Notes" },
+    { "roleName": "Half-Winger", "positions": ["CM"], "focuses": ["Balanced", "Attack", "Support"], "evidence": "EA FC 26 Pitch Notes (CM Support)" },
+    { "roleName": "Half-Winger", "positions": ["CAM"], "focuses": ["Balanced", "Attack", "Roaming"], "evidence": "EA FC 26 Pitch Notes (CAM Roaming)" },
+    { "roleName": "Shadow Striker", "positions": ["CAM"], "focuses": ["Attack"], "evidence": "EA FC 26 Pitch Notes" },
+    { "roleName": "Classic 10", "positions": ["CAM"], "focuses": ["Attack", "Wide", "Versatile"], "evidence": "EA FC 26 Gameplay Deep Dive" },
+
+    { "roleName": "Winger", "positions": ["LM", "RM", "LW", "RW"], "focuses": ["Balanced", "Attack", "Versatile"], "evidence": "EA FC 26 Gameplay Deep Dive" },
+    { "roleName": "Wide Midfielder", "positions": ["LM", "RM"], "focuses": ["Defend", "Balanced"], "evidence": "EA FC 26 Pitch Notes" },
+    { "roleName": "Wide Playmaker", "positions": ["LM", "RM", "LW", "RW"], "focuses": ["Attack", "Build-Up"], "evidence": "EA FC 26 Pitch Notes" },
+    { "roleName": "Inside Forward", "positions": ["LM", "RM", "LW", "RW"], "focuses": ["Balanced", "Attack", "Roaming"], "evidence": "EA FC 26 Pitch Notes" },
+
+    { "roleName": "Advanced Forward", "positions": ["ST", "CF"], "focuses": ["Attack", "Support", "Versatile"], "evidence": "EA FC 26 Gameplay Deep Dive" },
+    { "roleName": "Poacher", "positions": ["ST"], "focuses": ["Attack", "Support"], "evidence": "EA FC 26 Pitch Notes" },
+    { "roleName": "False 9", "positions": ["ST", "CF"], "focuses": ["Build-Up", "Attack"], "evidence": "EA FC 26 Gameplay Deep Dive" },
+    { "roleName": "Target Forward", "positions": ["ST", "CF"], "focuses": ["Balanced", "Attack", "Wide"], "evidence": "EA FC 26 Pitch Notes" }
+  ]
+}

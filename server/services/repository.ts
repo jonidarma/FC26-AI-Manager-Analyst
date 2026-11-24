@@ -21,6 +21,8 @@ import type {
   TacticalMemoryEntry,
 } from '../../src/types/domain.ts';
 import { DEFAULT_APP_SETTINGS, getDb } from '../db/database.ts';
+import { getCatalogPlayerById } from './catalogRepository.ts';
+import { validatePlayerRoleFocus } from './tacticalContextService.ts';
 
 function safeJsonParse<T>(raw: string | null | undefined, fallback: T): T {
   if (!raw) return fallback;
@@ -87,7 +89,7 @@ export function listClubs(): ClubWithProfile[] {
   const rows = db
     .prepare(`
       SELECT
-        c.id, c.name, c.league, c.created_at, c.updated_at,
+        c.id, c.name, c.league, c.nation, c.catalog_club_id, c.created_at, c.updated_at,
         cp.id as profile_id, cp.season, cp.manager_name, cp.preferred_philosophy,
         cp.primary_formation, cp.alternative_formation, cp.preferred_attacking_style,
         cp.preferred_defensive_style, cp.is_active, cp.created_at as profile_created_at,
@@ -104,6 +106,8 @@ export function listClubs(): ClubWithProfile[] {
     id: String(r.id),
     name: String(r.name),
     league: String(r.league),
+    nation: String(r.nation ?? ''),
+    catalogClubId: r.catalog_club_id ? String(r.catalog_club_id) : null,
     createdAt: String(r.created_at),
     updatedAt: String(r.updated_at),
     playerCount: Number(r.player_count ?? 0),
@@ -128,6 +132,8 @@ export function listClubs(): ClubWithProfile[] {
 export function createClub(input: {
   name: string;
   league: string;
+  nation?: string;
+  catalogClubId?: string | null;
   season: string;
   managerName: string;
   preferredPhilosophy: string;
@@ -152,9 +158,17 @@ export function createClub(input: {
       db.prepare('UPDATE career_profiles SET is_active = 0').run();
     }
     db.prepare(`
-      INSERT INTO clubs (id, name, league, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?)
-    `).run(clubId, input.name.trim(), input.league.trim(), now, now);
+      INSERT INTO clubs (id, name, league, nation, catalog_club_id, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      clubId,
+      input.name.trim(),
+      input.league.trim(),
+      (input.nation ?? '').trim(),
+      input.catalogClubId ?? null,
+      now,
+      now
+    );
 
     db.prepare(`
       INSERT INTO career_profiles (
@@ -192,6 +206,8 @@ export function updateClub(
   input: {
     name?: string;
     league?: string;
+    nation?: string;
+    catalogClubId?: string | null;
     season?: string;
     managerName?: string;
     preferredPhilosophy?: string;
@@ -207,9 +223,13 @@ export function updateClub(
 
   const now = new Date().toISOString();
   const tx = db.transaction(() => {
-    db.prepare('UPDATE clubs SET name = ?, league = ?, updated_at = ? WHERE id = ?').run(
+    db.prepare(
+      'UPDATE clubs SET name = ?, league = ?, nation = ?, catalog_club_id = ?, updated_at = ? WHERE id = ?'
+    ).run(
       input.name?.trim() ?? existing.name,
       input.league?.trim() ?? existing.league,
+      input.nation?.trim() ?? existing.nation,
+      input.catalogClubId !== undefined ? input.catalogClubId : existing.catalogClubId,
       now,
       clubId
     );
@@ -278,11 +298,18 @@ export function listPlayers(clubId: string): Player[] {
   return rows.map((r) => ({
     id: String(r.id),
     clubId: String(r.club_id),
+    catalogPlayerId: r.catalog_player_id ? String(r.catalog_player_id) : null,
     name: String(r.name),
     position: String(r.position),
     overallRating: r.overall_rating === null ? null : Number(r.overall_rating),
+    potentialRating: r.potential_rating === null || r.potential_rating === undefined ? null : Number(r.potential_rating),
+    age: r.age === null || r.age === undefined ? null : Number(r.age),
     preferredFoot: String(r.preferred_foot) as Player['preferredFoot'],
     playerRole: String(r.player_role),
+    playerFocus: String(r.player_focus ?? ''),
+    contractExpiry: r.contract_expiry ? String(r.contract_expiry) : null,
+    marketValueEur: r.market_value_eur === null || r.market_value_eur === undefined ? null : Number(r.market_value_eur),
+    wageEur: r.wage_eur === null || r.wage_eur === undefined ? null : Number(r.wage_eur),
     strengths: String(r.strengths),
     weaknesses: String(r.weaknesses),
     preferredInstructions: String(r.preferred_instructions),
@@ -293,11 +320,18 @@ export function listPlayers(clubId: string): Player[] {
 
 export function createPlayer(input: {
   clubId: string;
+  catalogPlayerId?: string | null;
   name: string;
   position: string;
   overallRating: number | null;
+  potentialRating?: number | null;
+  age?: number | null;
   preferredFoot: 'Right' | 'Left' | 'Both';
   playerRole: string;
+  playerFocus?: string;
+  contractExpiry?: string | null;
+  marketValueEur?: number | null;
+  wageEur?: number | null;
   strengths: string;
   weaknesses: string;
   preferredInstructions: string;
@@ -308,17 +342,25 @@ export function createPlayer(input: {
 
   db.prepare(`
     INSERT INTO players (
-      id, club_id, name, position, overall_rating, preferred_foot,
-      player_role, strengths, weaknesses, preferred_instructions, created_at, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      id, club_id, catalog_player_id, name, position, overall_rating, potential_rating, age,
+      preferred_foot, player_role, player_focus, contract_expiry, market_value_eur, wage_eur,
+      strengths, weaknesses, preferred_instructions, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     id,
     input.clubId,
+    input.catalogPlayerId ?? null,
     input.name.trim(),
-    input.position.trim(),
+    input.position.trim().toUpperCase(),
     input.overallRating,
+    input.potentialRating ?? null,
+    input.age ?? null,
     input.preferredFoot,
     input.playerRole.trim(),
+    (input.playerFocus ?? '').trim(),
+    input.contractExpiry ?? null,
+    input.marketValueEur ?? null,
+    input.wageEur ?? null,
     input.strengths.trim(),
     input.weaknesses.trim(),
     input.preferredInstructions.trim(),
@@ -329,14 +371,62 @@ export function createPlayer(input: {
   return listPlayers(input.clubId).find((p) => p.id === id)!;
 }
 
+export function importPlayerFromCatalog(
+  clubId: string,
+  catalogPlayerId: string,
+  overrides: Partial<{
+    position: string;
+    overallRating: number | null;
+    potentialRating: number | null;
+    age: number | null;
+    playerRole: string;
+    playerFocus: string;
+    contractExpiry: string | null;
+    strengths: string;
+    weaknesses: string;
+    preferredInstructions: string;
+  }> = {}
+): Player | null {
+  const master = getCatalogPlayerById(catalogPlayerId);
+  if (!master) return null;
+
+  return createPlayer({
+    clubId,
+    catalogPlayerId: master.id,
+    name: master.fullName,
+    position: overrides.position ?? master.primaryPosition,
+    overallRating:
+      overrides.overallRating !== undefined ? overrides.overallRating : master.overallRating,
+    potentialRating:
+      overrides.potentialRating !== undefined ? overrides.potentialRating : master.potentialRating,
+    age: overrides.age !== undefined ? overrides.age : master.age,
+    preferredFoot: master.preferredFoot ?? 'Right',
+    playerRole: overrides.playerRole ?? '',
+    playerFocus: overrides.playerFocus ?? '',
+    contractExpiry:
+      overrides.contractExpiry !== undefined ? overrides.contractExpiry : master.contractExpiry,
+    marketValueEur: master.marketValueEur,
+    wageEur: master.wageEur,
+    strengths: overrides.strengths ?? '',
+    weaknesses: overrides.weaknesses ?? '',
+    preferredInstructions: overrides.preferredInstructions ?? '',
+  });
+}
+
 export function updatePlayer(
   playerId: string,
   input: Partial<{
     name: string;
     position: string;
     overallRating: number | null;
+    potentialRating: number | null;
+    age: number | null;
     preferredFoot: 'Right' | 'Left' | 'Both';
     playerRole: string;
+    playerFocus: string;
+    contractExpiry: string | null;
+    marketValueEur: number | null;
+    wageEur: number | null;
     strengths: string;
     weaknesses: string;
     preferredInstructions: string;
@@ -351,19 +441,47 @@ export function updatePlayer(
   const now = new Date().toISOString();
   db.prepare(`
     UPDATE players
-    SET name = ?, position = ?, overall_rating = ?, preferred_foot = ?,
-        player_role = ?, strengths = ?, weaknesses = ?, preferred_instructions = ?, updated_at = ?
+    SET name = ?, position = ?, overall_rating = ?, potential_rating = ?, age = ?,
+        preferred_foot = ?, player_role = ?, player_focus = ?, contract_expiry = ?,
+        market_value_eur = ?, wage_eur = ?, strengths = ?, weaknesses = ?,
+        preferred_instructions = ?, updated_at = ?
     WHERE id = ?
   `).run(
     input.name?.trim() ?? String(row.name),
-    input.position?.trim() ?? String(row.position),
+    input.position?.trim().toUpperCase() ?? String(row.position),
     input.overallRating !== undefined
       ? input.overallRating
       : row.overall_rating === null
         ? null
         : Number(row.overall_rating),
+    input.potentialRating !== undefined
+      ? input.potentialRating
+      : row.potential_rating === null || row.potential_rating === undefined
+        ? null
+        : Number(row.potential_rating),
+    input.age !== undefined
+      ? input.age
+      : row.age === null || row.age === undefined
+        ? null
+        : Number(row.age),
     input.preferredFoot ?? String(row.preferred_foot),
     input.playerRole?.trim() ?? String(row.player_role),
+    input.playerFocus?.trim() ?? String(row.player_focus ?? ''),
+    input.contractExpiry !== undefined
+      ? input.contractExpiry
+      : row.contract_expiry
+        ? String(row.contract_expiry)
+        : null,
+    input.marketValueEur !== undefined
+      ? input.marketValueEur
+      : row.market_value_eur === null || row.market_value_eur === undefined
+        ? null
+        : Number(row.market_value_eur),
+    input.wageEur !== undefined
+      ? input.wageEur
+      : row.wage_eur === null || row.wage_eur === undefined
+        ? null
+        : Number(row.wage_eur),
     input.strengths?.trim() ?? String(row.strengths),
     input.weaknesses?.trim() ?? String(row.weaknesses),
     input.preferredInstructions?.trim() ?? String(row.preferred_instructions),
@@ -389,6 +507,7 @@ export function listOpponents(): Opponent[] {
     id: String(r.id),
     name: String(r.name),
     league: String(r.league),
+    catalogClubId: r.catalog_club_id ? String(r.catalog_club_id) : null,
     typicalFormation: String(r.typical_formation),
     strengths: String(r.strengths),
     weaknesses: String(r.weaknesses),
@@ -402,6 +521,7 @@ export function listOpponents(): Opponent[] {
 export function createOpponent(input: {
   name: string;
   league: string;
+  catalogClubId?: string | null;
   typicalFormation: string;
   strengths: string;
   weaknesses: string;
@@ -413,13 +533,14 @@ export function createOpponent(input: {
   const now = new Date().toISOString();
   db.prepare(`
     INSERT INTO opponents (
-      id, name, league, typical_formation, strengths, weaknesses,
+      id, name, league, catalog_club_id, typical_formation, strengths, weaknesses,
       dangerous_channels, notes, created_at, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     id,
     input.name.trim(),
     input.league.trim(),
+    input.catalogClubId ?? null,
     input.typicalFormation.trim() || 'Unknown',
     input.strengths.trim(),
     input.weaknesses.trim(),
@@ -437,6 +558,7 @@ export function updateOpponent(
   input: Partial<{
     name: string;
     league: string;
+    catalogClubId: string | null;
     typicalFormation: string;
     strengths: string;
     weaknesses: string;
@@ -451,12 +573,13 @@ export function updateOpponent(
   const now = new Date().toISOString();
   db.prepare(`
     UPDATE opponents
-    SET name = ?, league = ?, typical_formation = ?, strengths = ?,
+    SET name = ?, league = ?, catalog_club_id = ?, typical_formation = ?, strengths = ?,
         weaknesses = ?, dangerous_channels = ?, notes = ?, updated_at = ?
     WHERE id = ?
   `).run(
     input.name?.trim() ?? existing.name,
     input.league?.trim() ?? existing.league,
+    input.catalogClubId !== undefined ? input.catalogClubId : existing.catalogClubId,
     input.typicalFormation?.trim() ?? existing.typicalFormation,
     input.strengths?.trim() ?? existing.strengths,
     input.weaknesses?.trim() ?? existing.weaknesses,
@@ -601,6 +724,21 @@ export function createMatch(input: {
   const matchId = crypto.randomUUID();
   const configId = crypto.randomUUID();
   const now = new Date().toISOString();
+
+  // Enforce verified FC 26 Role-Position and Role-Focus compatibility before persisting
+  for (const assignment of input.tacticalSetup.playerAssignments) {
+    if (assignment.role.trim() || assignment.focus.trim()) {
+      const check = validatePlayerRoleFocus(
+        assignment.positionCode,
+        assignment.role,
+        assignment.focus,
+        db
+      );
+      if (!check.valid) {
+        throw new Error(`Slot #${assignment.slotIndex + 1} (${assignment.positionCode}): ${check.reason}`);
+      }
+    }
+  }
 
   let resolvedOpponentId = input.opponentId;
 

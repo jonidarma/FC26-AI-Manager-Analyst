@@ -1,8 +1,16 @@
 import { getFormationPositions } from '../../data/tacticalCatalog';
-import type { Player, PlayerRoleAssignment } from '../../types/domain';
+import type {
+  CatalogFormationSlot,
+  PitchNodePosition,
+  Player,
+  PlayerRoleAssignment,
+} from '../../types/domain';
 
 interface TacticalPitchSVGProps {
   formation: string;
+  formationSlots?: CatalogFormationSlot[];
+  layoutVerified?: boolean;
+  isUserAdjusted?: boolean;
   defensiveLineHeight?: number;
   assignments?: PlayerRoleAssignment[];
   players?: Player[];
@@ -13,10 +21,15 @@ interface TacticalPitchSVGProps {
   label?: string;
   variant?: 'current' | 'recommended';
   compact?: boolean;
+  selectedSlotOrder?: number | null;
+  onSelectSlot?: (slotOrder: number) => void;
 }
 
 export function TacticalPitchSVG({
   formation,
+  formationSlots,
+  layoutVerified = true,
+  isUserAdjusted = false,
   defensiveLineHeight = 50,
   assignments = [],
   players = [],
@@ -27,8 +40,22 @@ export function TacticalPitchSVG({
   label,
   variant = 'current',
   compact = false,
+  selectedSlotOrder = null,
+  onSelectSlot,
 }: TacticalPitchSVGProps) {
-  const baseNodes = getFormationPositions(formation);
+  const baseNodes: PitchNodePosition[] =
+    formationSlots && formationSlots.length === 11
+      ? formationSlots.map((slot) => ({
+          slotIndex: slot.slotOrder,
+          positionCode: slot.positionCode,
+          positionLabel: slot.positionLabel,
+          x: slot.x,
+          y: slot.y,
+          defaultRole: '',
+          defaultFocus: '',
+          isUserAdjusted: slot.isUserAdjusted,
+        }))
+      : getFormationPositions(formation);
   const playerById = new Map(players.map((p) => [p.id, p]));
 
   // Map defensive line height (1-100) to pitch Y coordinate (higher line moves toward top)
@@ -38,13 +65,21 @@ export function TacticalPitchSVG({
   const nodeFill = variant === 'recommended' ? '#065F46' : '#161C24';
   const nodeStroke = variant === 'recommended' ? '#34D399' : '#10B981';
 
+  const layoutStatusText = isUserAdjusted
+    ? 'User Adjusted Layout'
+    : formationSlots && formationSlots.length === 11
+      ? layoutVerified
+        ? 'Verified Catalog Layout'
+        : 'Unverified Layout'
+      : 'Reference Fallback Layout';
+
   return (
     <div className="w-full">
       {label && (
         <div className="flex items-center justify-between mb-2 text-[12px] text-[#9AA4B4]">
           <span className="font-medium text-[#E5E9F0]">{label}</span>
           <span className="font-mono tabular-nums">
-            {formation} · Line {defensiveLineHeight}
+            {formation} · Line {defensiveLineHeight} · {layoutStatusText}
           </span>
         </div>
       )}
@@ -231,8 +266,14 @@ export function TacticalPitchSVG({
               node.positionCode !== 'GK' &&
               (focusLabel === 'Attack' || focusLabel === 'Roaming');
 
+            const isSelected = selectedSlotOrder === node.slotIndex;
+
             return (
-              <g key={`${formation}-${node.slotIndex}`}>
+              <g
+                key={`${formation}-${node.slotIndex}`}
+                onClick={onSelectSlot ? () => onSelectSlot(node.slotIndex) : undefined}
+                className={onSelectSlot ? 'cursor-pointer' : undefined}
+              >
                 {hasForwardRun && (
                   <line
                     x1={cx}
@@ -246,13 +287,24 @@ export function TacticalPitchSVG({
                   />
                 )}
 
+                {isSelected && (
+                  <circle
+                    cx={cx}
+                    cy={cy}
+                    r="5.3"
+                    fill="none"
+                    stroke="#FBBF24"
+                    strokeWidth="0.65"
+                  />
+                )}
+
                 <circle
                   cx={cx}
                   cy={cy}
                   r="3.8"
                   fill={isVerifiedPlayer ? nodeFill : '#11161D'}
-                  stroke={isVerifiedPlayer ? nodeStroke : '#64748B'}
-                  strokeWidth={isVerifiedPlayer ? '0.75' : '0.55'}
+                  stroke={isSelected ? '#FBBF24' : isVerifiedPlayer ? nodeStroke : '#64748B'}
+                  strokeWidth={isVerifiedPlayer || isSelected ? '0.75' : '0.55'}
                   strokeDasharray={isVerifiedPlayer ? undefined : '1.3 0.9'}
                 />
 
@@ -265,7 +317,7 @@ export function TacticalPitchSVG({
                   fontWeight="600"
                   fontFamily="JetBrains Mono, monospace"
                 >
-                  {node.positionCode}
+                  {node.positionLabel || node.positionCode}
                 </text>
 
                 <text
@@ -283,7 +335,7 @@ export function TacticalPitchSVG({
                     : 'Unassigned'}
                 </text>
 
-                {!compact && (
+                {!compact && roleLabel && (
                   <text
                     x={cx}
                     y={cy + 9.6}
@@ -301,12 +353,14 @@ export function TacticalPitchSVG({
       </div>
 
       {/* Honest legend distinguishing verified squad assignments vs speculative formation slots */}
-      <div className="mt-2 flex flex-wrap items-center gap-4 text-[11px] text-[#8A94A6]">
+      <div className="mt-2 flex flex-wrap items-center gap-3 text-[11px] text-[#8A94A6]">
         <span>Solid ring: Verified squad player</span>
         <span aria-hidden="true">·</span>
-        <span>Dashed ring: Speculative unassigned formation slot</span>
+        <span>Dashed ring: Speculative unassigned slot</span>
         <span aria-hidden="true">·</span>
-        <span>Attack direction: Bottom to Top</span>
+        <span>{layoutStatusText}</span>
+        <span aria-hidden="true">·</span>
+        <span>Attack: Bottom to Top</span>
       </div>
     </div>
   );

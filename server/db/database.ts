@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { DEFAULT_TACTICAL_CATALOG_SEED } from '../../src/data/tacticalCatalog.ts';
 import type { ApplicationSettings } from '../../src/types/domain.ts';
+import { bootstrapLocalReferenceCatalogs } from '../services/catalogImporter.ts';
 import { runMigrations } from './migrations.ts';
 
 let dbInstance: Database.Database | null = null;
@@ -107,6 +108,7 @@ export function getDb(): Database.Database {
 
   runMigrations(db);
   seedDefaults(db);
+  bootstrapLocalReferenceCatalogs(db);
 
   dbInstance = db;
   return dbInstance;
@@ -124,96 +126,7 @@ export function closeDb(): void {
   }
 }
 
-export function getDatabaseMetadata(): {
-  dbFileName: string;
-  storageMode: 'electron-user-data' | 'workspace-preview';
-  dbDirectory: string;
-  sizeBytes: number;
-  schemaVersion: number;
-  tableCounts: Record<string, number>;
-} {
-  const db = getDb();
-  const { dataDir, dbPath, storageMode } = resolveDatabaseLocation();
-  const sizeBytes = fs.existsSync(dbPath) ? fs.statSync(dbPath).size : 0;
-  const versionRow = db
-    .prepare('SELECT MAX(version) as version FROM schema_migrations')
-    .get() as { version: number | null };
-
-  const tables = [
-    'clubs',
-    'career_profiles',
-    'players',
-    'opponents',
-    'matches',
-    'match_sessions',
-    'recording_segments',
-    'evidence_frames',
-    'match_observations',
-    'tactical_configurations',
-    'halftime_reports',
-    'tactical_recommendations',
-    'recommendation_feedback',
-    'second_half_reports',
-    'post_match_reports',
-    'tactical_memory',
-    'api_usage_logs',
-    'tactical_catalog',
-  ];
-
-  const tableCounts: Record<string, number> = {};
-  for (const table of tables) {
-    const row = db.prepare(`SELECT COUNT(*) as count FROM ${table}`).get() as { count: number };
-    tableCounts[table] = row.count;
-  }
-
-  return {
-    dbFileName: path.basename(dbPath),
-    storageMode,
-    dbDirectory: dataDir,
-    sizeBytes,
-    schemaVersion: versionRow?.version ?? 1,
-    tableCounts,
-  };
-}
-
-export function exportDatabaseBackup(): Record<string, unknown> {
-  const db = getDb();
-  const tables = [
-    'clubs',
-    'career_profiles',
-    'players',
-    'opponents',
-    'matches',
-    'match_sessions',
-    'recording_segments',
-    'evidence_frames',
-    'match_observations',
-    'tactical_configurations',
-    'halftime_reports',
-    'tactical_recommendations',
-    'recommendation_feedback',
-    'second_half_reports',
-    'post_match_reports',
-    'tactical_memory',
-    'application_settings',
-    'api_usage_logs',
-    'tactical_catalog',
-  ];
-
-  const data: Record<string, unknown[]> = {};
-  for (const table of tables) {
-    data[table] = db.prepare(`SELECT * FROM ${table}`).all();
-  }
-
-  return {
-    format: 'fc26-ai-manager-backup-v1',
-    exportedAt: new Date().toISOString(),
-    schemaVersion: 1,
-    tables: data,
-  };
-}
-
-const ALLOWED_RESTORE_TABLES = [
+const OPERATIONAL_TABLES = [
   'clubs',
   'career_profiles',
   'players',
@@ -235,17 +148,89 @@ const ALLOWED_RESTORE_TABLES = [
   'tactical_catalog',
 ] as const;
 
+const MASTER_CATALOG_TABLES = [
+  'catalog_sources',
+  'catalog_import_runs',
+  'catalog_nations',
+  'catalog_leagues',
+  'catalog_clubs',
+  'catalog_positions',
+  'catalog_players',
+  'catalog_player_positions',
+  'catalog_formations',
+  'catalog_formation_slots',
+  'catalog_player_roles',
+  'catalog_player_focuses',
+  'catalog_role_position_compatibility',
+  'catalog_role_focus_compatibility',
+] as const;
+
+const ALLOWED_RESTORE_TABLES = [...OPERATIONAL_TABLES, ...MASTER_CATALOG_TABLES] as const;
+
+export function getDatabaseMetadata(): {
+  dbFileName: string;
+  storageMode: 'electron-user-data' | 'workspace-preview';
+  dbDirectory: string;
+  sizeBytes: number;
+  schemaVersion: number;
+  tableCounts: Record<string, number>;
+} {
+  const db = getDb();
+  const { dataDir, dbPath, storageMode } = resolveDatabaseLocation();
+  const sizeBytes = fs.existsSync(dbPath) ? fs.statSync(dbPath).size : 0;
+  const versionRow = db
+    .prepare('SELECT MAX(version) as version FROM schema_migrations')
+    .get() as { version: number | null };
+
+  const tableCounts: Record<string, number> = {};
+  for (const table of ALLOWED_RESTORE_TABLES) {
+    if (table === 'application_settings') continue;
+    const row = db.prepare(`SELECT COUNT(*) as count FROM ${table}`).get() as { count: number };
+    tableCounts[table] = row.count;
+  }
+
+  return {
+    dbFileName: path.basename(dbPath),
+    storageMode,
+    dbDirectory: dataDir,
+    sizeBytes,
+    schemaVersion: versionRow?.version ?? 2,
+    tableCounts,
+  };
+}
+
+export function exportDatabaseBackup(): Record<string, unknown> {
+  const db = getDb();
+  const data: Record<string, unknown[]> = {};
+  for (const table of ALLOWED_RESTORE_TABLES) {
+    data[table] = db.prepare(`SELECT * FROM ${table}`).all();
+  }
+
+  return {
+    format: 'fc26-ai-manager-backup-v2',
+    exportedAt: new Date().toISOString(),
+    schemaVersion: 2,
+    tables: data,
+  };
+}
+
 export function restoreDatabaseBackup(payload: {
   format?: string;
   tables?: Record<string, Array<Record<string, unknown>>>;
 }): void {
-  if (payload.format !== 'fc26-ai-manager-backup-v1' || !payload.tables) {
-    throw new Error('Invalid backup format. Expected fc26-ai-manager-backup-v1.');
+  const isV1 = payload.format === 'fc26-ai-manager-backup-v1';
+  const isV2 = payload.format === 'fc26-ai-manager-backup-v2';
+
+  if ((!isV1 && !isV2) || !payload.tables) {
+    throw new Error(
+      'Invalid backup format. Expected fc26-ai-manager-backup-v2 or fc26-ai-manager-backup-v1.'
+    );
   }
 
   const db = getDb();
+  const targetTables = isV2 ? ALLOWED_RESTORE_TABLES : OPERATIONAL_TABLES;
   const tableColumns = new Map<string, Set<string>>();
-  for (const table of ALLOWED_RESTORE_TABLES) {
+  for (const table of targetTables) {
     const info = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
     tableColumns.set(table, new Set(info.map((c) => c.name)));
   }
@@ -253,11 +238,11 @@ export function restoreDatabaseBackup(payload: {
   const restoreTx = db.transaction(() => {
     db.pragma('foreign_keys = OFF');
     try {
-      for (const table of [...ALLOWED_RESTORE_TABLES].reverse()) {
+      for (const table of [...targetTables].reverse()) {
         db.prepare(`DELETE FROM ${table}`).run();
       }
 
-      for (const table of ALLOWED_RESTORE_TABLES) {
+      for (const table of targetTables) {
         const rows = payload.tables?.[table];
         if (!Array.isArray(rows) || rows.length === 0) continue;
         const validCols = tableColumns.get(table)!;
@@ -279,6 +264,7 @@ export function restoreDatabaseBackup(payload: {
 
   restoreTx();
   seedDefaults(db);
+  bootstrapLocalReferenceCatalogs(db);
 }
 
 export function deleteAllApplicationData(): void {
@@ -286,7 +272,7 @@ export function deleteAllApplicationData(): void {
   const clearTx = db.transaction(() => {
     db.pragma('foreign_keys = OFF');
     try {
-      for (const table of [...ALLOWED_RESTORE_TABLES].reverse()) {
+      for (const table of [...OPERATIONAL_TABLES].reverse()) {
         db.prepare(`DELETE FROM ${table}`).run();
       }
     } finally {

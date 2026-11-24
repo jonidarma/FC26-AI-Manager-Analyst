@@ -4,6 +4,7 @@ import { TopBar } from './components/layout/TopBar';
 import { AppProvider, useApp } from './context/AppContext';
 import { ClubsView } from './views/ClubsView';
 import { DashboardView } from './views/DashboardView';
+import { DatabaseCenterView } from './views/DatabaseCenterView';
 import { HalfTimeBriefingView } from './views/HalfTimeBriefingView';
 import { MatchCaptureView } from './views/MatchCaptureView';
 import { MatchHistoryView } from './views/MatchHistoryView';
@@ -31,6 +32,8 @@ function WorkspaceContent() {
         return <HalfTimeBriefingView />;
       case 'tactical-board':
         return <TacticalBoardView />;
+      case 'database-center':
+        return <DatabaseCenterView />;
       case 'opposition':
         return <OppositionView />;
       case 'match-reports':

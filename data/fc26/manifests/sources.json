@@ -1,0 +1,66 @@
+{
+  "schemaVersion": 2,
+  "edition": "EA SPORTS FC 26",
+  "generatedAt": "2026-11-23",
+  "sources": [
+    {
+      "sourceKey": "ea_fc26_pitch_notes",
+      "name": "EA SPORTS FC 26 Gameplay Deep Dive (Pitch Notes)",
+      "url": "https://www.ea.com/games/ea-sports-fc/fc-26/news/pitch-notes-fc26-gameplay-deep-dive",
+      "edition": "FC 26",
+      "licenseNotes": "Official EA gameplay rules documentation referenced for FC IQ Player Roles and Focuses compatibility."
+    },
+    {
+      "sourceKey": "futbin_fc26_roles",
+      "name": "FUTBIN FC 26 Roles Reference",
+      "url": "https://www.futbin.com/26/roles",
+      "edition": "FC 26",
+      "licenseNotes": "Cross-reference for FC IQ Role and Focus availability by position; no third-party images redistributed."
+    },
+    {
+      "sourceKey": "fifplay_fc26_formations",
+      "name": "FIFPlay FC 26 Formations Reference",
+      "url": "https://www.fifplay.com/fc-26/formations/",
+      "edition": "FC 26",
+      "licenseNotes": "Reference catalog of standard FC 26 tactical formations; game-mode applicability tracked per formation."
+    },
+    {
+      "sourceKey": "fifplay_fc26_clubs",
+      "name": "FIFPlay FC 26 Clubs Reference",
+      "url": "https://www.fifplay.com/fc-26/players/clubs/",
+      "edition": "FC 26",
+      "licenseNotes": "Reference structure for club-league-nation mappings. Full club roster imported via user-supplied CSV/JSON datasets."
+    },
+    {
+      "sourceKey": "futwiz_fc26_players",
+      "name": "FUTWIZ FC 26 Career Mode Players",
+      "url": "https://www.futwiz.com/fc26/career-mode/players",
+      "edition": "FC 26",
+      "licenseNotes": "Reference schema target for Career Mode players. Automated scraping is not performed; import full player dumps via CSV/JSON pipeline."
+    },
+    {
+      "sourceKey": "futwiz_fc26_leagues",
+      "name": "FUTWIZ FC 26 Career Mode Leagues",
+      "url": "https://www.futwiz.com/fc26/career-mode/leagues",
+      "edition": "FC 26",
+      "licenseNotes": "Reference schema for Career Mode leagues with men's and women's competition categories."
+    },
+    {
+      "sourceKey": "futwiz_fc26_nations",
+      "name": "FUTWIZ FC 26 Career Mode Nations",
+      "url": "https://www.futwiz.com/fc26/career-mode/nations",
+      "edition": "FC 26",
+      "licenseNotes": "Reference schema for nations preserving source naming alongside standardized ISO codes."
+    }
+  ],
+  "datasetStatus": {
+    "positions": "verified_complete",
+    "roles": "verified_complete",
+    "focuses": "verified_complete",
+    "formations": "verified_complete",
+    "nations": "partial_baseline",
+    "leagues": "partial_baseline",
+    "clubs": "partial_baseline",
+    "players": "empty_awaiting_user_import"
+  }
+}
