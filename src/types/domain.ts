@@ -411,6 +411,7 @@ export interface DesktopBridgeCapabilities {
   nativeDiskInspection: boolean;
   safeStorageAvailable: boolean;
   platform: string;
+  isPackaged?: boolean;
   notice: string;
 }
 

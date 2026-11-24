@@ -616,30 +616,38 @@ export function SettingsView() {
             </div>
 
             {systemStatus && (
-              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-[12px]">
-                <div className="border border-white/[0.07] bg-[#0E1116] rounded-md p-3">
-                  <div className="text-[#7D8798]">Database File</div>
-                  <div className="mt-1 font-mono text-white truncate">
-                    {systemStatus.database.dbFileName}
+              <div className="space-y-3">
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-[12px]">
+                  <div className="border border-white/[0.07] bg-[#0E1116] rounded-md p-3">
+                    <div className="text-[#7D8798]">Database File</div>
+                    <div className="mt-1 font-mono text-white truncate">
+                      {systemStatus.database.dbFileName}
+                    </div>
+                  </div>
+                  <div className="border border-white/[0.07] bg-[#0E1116] rounded-md p-3">
+                    <div className="text-[#7D8798]">Storage Mode</div>
+                    <div className="mt-1 font-mono text-white truncate">
+                      {systemStatus.database.storageMode === 'electron-user-data'
+                        ? 'Electron userData'
+                        : 'Workspace Preview'}
+                    </div>
+                  </div>
+                  <div className="border border-white/[0.07] bg-[#0E1116] rounded-md p-3">
+                    <div className="text-[#7D8798]">File Size / Schema</div>
+                    <div className="mt-1 font-mono tabular-nums text-white">
+                      {(systemStatus.database.sizeBytes / 1024).toFixed(1)} KB · v
+                      {systemStatus.database.schemaVersion}
+                    </div>
+                  </div>
+                  <div className="border border-white/[0.07] bg-[#0E1116] rounded-md p-3">
+                    <div className="text-[#7D8798]">Backend Binding</div>
+                    <div className="mt-1 font-mono tabular-nums text-white">
+                      {systemStatus.boundHost} · Bearer Auth
+                    </div>
                   </div>
                 </div>
-                <div className="border border-white/[0.07] bg-[#0E1116] rounded-md p-3">
-                  <div className="text-[#7D8798]">Schema Version</div>
-                  <div className="mt-1 font-mono tabular-nums text-white">
-                    v{systemStatus.database.schemaVersion}
-                  </div>
-                </div>
-                <div className="border border-white/[0.07] bg-[#0E1116] rounded-md p-3">
-                  <div className="text-[#7D8798]">File Size</div>
-                  <div className="mt-1 font-mono tabular-nums text-white">
-                    {(systemStatus.database.sizeBytes / 1024).toFixed(1)} KB
-                  </div>
-                </div>
-                <div className="border border-white/[0.07] bg-[#0E1116] rounded-md p-3">
-                  <div className="text-[#7D8798]">Normalized Tables</div>
-                  <div className="mt-1 font-mono tabular-nums text-white">
-                    {Object.keys(systemStatus.database.tableCounts).length}
-                  </div>
+                <div className="text-[11px] font-mono text-[#7D8798] break-all">
+                  Directory: {systemStatus.database.dbDirectory}
                 </div>
               </div>
             )}

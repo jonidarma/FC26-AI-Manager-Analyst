@@ -4,11 +4,23 @@ copyright: Copyright © 2026 FC26 AI Manager
 directories:
   output: release
   buildResources: build
+extraMetadata:
+  main: dist-electron/main.cjs
 files:
   - dist/**/*
   - dist-electron/**/*
-  - server/**/*
+  - dist-server/**/*
   - package.json
+  - "!node_modules/vite/**"
+  - "!node_modules/typescript/**"
+  - "!node_modules/tsx/**"
+  - "!node_modules/esbuild/**"
+  - "!node_modules/electron/**"
+  - "!node_modules/electron-builder/**"
+asar: true
+asarUnpack:
+  - "node_modules/better-sqlite3/**"
+  - "dist-server/**"
 win:
   target:
     - target: nsis
@@ -21,5 +33,3 @@ nsis:
   createDesktopShortcut: true
   createStartMenuShortcut: true
   shortcutName: FC26 AI Manager
-asarUnpack:
-  - "node_modules/better-sqlite3/**"

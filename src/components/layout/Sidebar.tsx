@@ -167,8 +167,10 @@ export function Sidebar() {
             : 'Browser Preview Mode'}
         </div>
         <div className="mt-0.5 text-[11px] text-[#7D8798] leading-snug">
-          {capabilities?.nativeWindowCapture
-            ? 'Electron desktopCapturer & local SQLite ready'
+          {capabilities?.environment === 'electron-native'
+            ? capabilities.localFfmpegRecording
+              ? 'Local SQLite & FFmpeg capture active'
+              : 'Local SQLite (userData) · Recording planned for Phase 2'
             : 'Local SQLite live · Native capture requires Windows Electron'}
         </div>
       </div>

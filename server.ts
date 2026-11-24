@@ -1,9 +1,11 @@
 import 'dotenv/config';
-import express from 'express';
+import express, { type NextFunction, type Request, type Response } from 'express';
+import crypto from 'node:crypto';
+import fs from 'node:fs';
 import path from 'node:path';
-import { createServer as createViteServer } from 'vite';
 import { z } from 'zod';
 import {
+  closeDb,
   deleteAllApplicationData,
   exportDatabaseBackup,
   getDatabaseMetadata,
@@ -13,7 +15,109 @@ import {
 import { getGeminiStatus } from './server/services/geminiService.ts';
 import * as repo from './server/services/repository.ts';
 
-const PORT = Number(process.env.PORT) || 3000;
+const IS_DESKTOP_MODE = process.env.FC26_DESKTOP_MODE === '1';
+const IS_PRODUCTION = process.env.NODE_ENV === 'production' || IS_DESKTOP_MODE;
+const IS_CLOUD_RUN = Boolean(process.env.K_SERVICE);
+
+// Desktop mode ALWAYS binds strictly to 127.0.0.1 (never exposed to LAN).
+// Local production also defaults to 127.0.0.1 unless running inside Cloud Run.
+const HOST = IS_DESKTOP_MODE
+  ? '127.0.0.1'
+  : process.env.FC26_HOST ||
+    process.env.HOST ||
+    (IS_PRODUCTION && !IS_CLOUD_RUN ? '127.0.0.1' : '0.0.0.0');
+
+const PORT = Number(process.env.FC26_PORT || process.env.PORT) || 3000;
+
+// In Electron desktop mode, main process supplies a fresh 256-bit per-session token via FC26_API_TOKEN.
+// In Browser Preview mode, an ephemeral in-memory token is generated per server boot.
+const API_SESSION_TOKEN =
+  process.env.FC26_API_TOKEN && process.env.FC26_API_TOKEN.trim().length >= 32
+    ? process.env.FC26_API_TOKEN.trim()
+    : crypto.randomBytes(32).toString('hex');
+
+function constantTimeEquals(a: string, b: string): boolean {
+  const bufA = Buffer.from(a, 'utf8');
+  const bufB = Buffer.from(b, 'utf8');
+  if (bufA.length !== bufB.length) return false;
+  return crypto.timingSafeEqual(bufA, bufB);
+}
+
+function isOriginAllowed(req: Request): boolean {
+  const originHeader = req.headers.origin;
+  if (!originHeader) {
+    // Same-origin non-CORS requests or server-side health checks have no Origin header
+    return true;
+  }
+
+  let parsedOrigin: URL;
+  try {
+    parsedOrigin = new URL(originHeader);
+  } catch {
+    return false;
+  }
+
+  if (parsedOrigin.protocol !== 'http:' && parsedOrigin.protocol !== 'https:') {
+    return false;
+  }
+
+  const expectedHosts = new Set<string>([
+    `127.0.0.1:${PORT}`,
+    `localhost:${PORT}`,
+  ]);
+
+  if (typeof req.headers.host === 'string' && req.headers.host.trim()) {
+    expectedHosts.add(req.headers.host.trim().toLowerCase());
+  }
+
+  const forwardedHost = req.headers['x-forwarded-host'];
+  if (typeof forwardedHost === 'string' && forwardedHost.trim()) {
+    expectedHosts.add(forwardedHost.split(',')[0].trim().toLowerCase());
+  }
+
+  return expectedHosts.has(parsedOrigin.host.toLowerCase());
+}
+
+function apiSecurityHeaders(_req: Request, res: Response, next: NextFunction): void {
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('Cache-Control', 'no-store');
+  res.setHeader('Referrer-Policy', 'same-origin');
+  next();
+}
+
+function validateOriginMiddleware(req: Request, res: Response, next: NextFunction): void {
+  if (!isOriginAllowed(req)) {
+    res.status(403).json({ error: 'Forbidden: request origin is not permitted.' });
+    return;
+  }
+  next();
+}
+
+function requireApiAuth(req: Request, res: Response, next: NextFunction): void {
+  const authHeader = req.headers.authorization;
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    res.status(401).json({ error: 'Unauthorized: missing Bearer session token.' });
+    return;
+  }
+
+  const suppliedToken = authHeader.slice('Bearer '.length).trim();
+  if (!constantTimeEquals(suppliedToken, API_SESSION_TOKEN)) {
+    res.status(401).json({ error: 'Unauthorized: invalid session token.' });
+    return;
+  }
+
+  next();
+}
+
+function requireDestructiveConfirmation(req: Request, res: Response, next: NextFunction): void {
+  if (req.headers['x-fc26-confirm-destructive'] !== 'true') {
+    res.status(403).json({
+      error: 'Forbidden: explicit destructive confirmation header is required.',
+    });
+    return;
+  }
+  next();
+}
 
 const clubSchema = z.object({
   name: z.string().trim().min(1).max(120),
@@ -149,19 +253,58 @@ const feedbackSchema = z.object({
 });
 
 async function startServer() {
-  // Initialize SQLite database and run migrations on startup
+  // Initialize SQLite database and run versioned migrations on startup
   getDb();
 
   const app = express();
+  app.disable('x-powered-by');
   app.use(express.json({ limit: '5mb' }));
 
-  // System & health endpoints
+  // Apply security headers & strict origin checks to all API routes
+  app.use('/api', apiSecurityHeaders, validateOriginMiddleware);
+
+  // Minimal readiness endpoint for Electron main process startup health checks (no sensitive data)
+  app.get('/api/health', (_req, res) => {
+    res.json({
+      ok: true,
+      mode: IS_DESKTOP_MODE ? 'electron-desktop' : 'browser-preview',
+      boundHost: HOST,
+    });
+  });
+
+  // Ephemeral session token bootstrap strictly for Browser Preview same-origin requests.
+  // Disabled in Electron desktop mode where the token is delivered solely via preload IPC.
+  app.get('/api/auth/session', (req, res) => {
+    if (IS_DESKTOP_MODE) {
+      res.status(403).json({
+        error: 'Session bootstrap is disabled in Electron desktop mode; use preload IPC.',
+      });
+      return;
+    }
+
+    const secFetchSite = req.headers['sec-fetch-site'];
+    if (secFetchSite && secFetchSite !== 'same-origin' && secFetchSite !== 'none') {
+      res.status(403).json({ error: 'Cross-site session bootstrap rejected.' });
+      return;
+    }
+
+    res.json({
+      token: API_SESSION_TOKEN,
+      mode: 'browser-preview',
+    });
+  });
+
+  // Protect ALL remaining /api/* routes with Bearer session authentication
+  app.use('/api', requireApiAuth);
+
+  // System & status endpoint
   app.get('/api/system/status', (_req, res) => {
     const settings = repo.getSettings();
     const dbMeta = getDatabaseMetadata();
     const gemini = getGeminiStatus(settings.ai.modelId);
     res.json({
-      runtime: 'server-web-preview',
+      runtime: IS_DESKTOP_MODE ? 'electron-desktop-backend' : 'server-web-preview',
+      boundHost: HOST,
       database: dbMeta,
       gemini,
     });
@@ -394,7 +537,7 @@ async function startServer() {
     res.json(repo.listApiUsageLogs());
   });
 
-  // Database Backup, Restore, and Explicit Deletion
+  // Database Backup, Restore, and Explicit Deletion (protected by Bearer auth + destructive header)
   app.get('/api/database/backup', (_req, res) => {
     const backup = exportDatabaseBackup();
     res.setHeader('Content-Type', 'application/json');
@@ -405,7 +548,7 @@ async function startServer() {
     res.json(backup);
   });
 
-  app.post('/api/database/restore', (req, res) => {
+  app.post('/api/database/restore', requireDestructiveConfirmation, (req, res) => {
     try {
       restoreDatabaseBackup(req.body);
       return res.json({ restored: true, metadata: getDatabaseMetadata() });
@@ -416,7 +559,7 @@ async function startServer() {
     }
   });
 
-  app.delete('/api/database/all', (req, res) => {
+  app.delete('/api/database/all', requireDestructiveConfirmation, (req, res) => {
     if (req.body?.confirmation !== 'DELETE') {
       return res
         .status(400)
@@ -426,27 +569,58 @@ async function startServer() {
     return res.json({ cleared: true });
   });
 
-  // Vite dev middleware or production static serving
-  if (process.env.NODE_ENV !== 'production') {
+  // Serve built static frontend in production / desktop mode (zero dependency on Vite dev server)
+  if (!IS_PRODUCTION && !IS_DESKTOP_MODE) {
+    const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: 'spa',
     });
     app.use(vite.middlewares);
   } else {
-    const distPath = path.resolve(process.cwd(), 'dist');
+    const distPath = process.env.FC26_STATIC_DIR
+      ? path.resolve(process.env.FC26_STATIC_DIR)
+      : path.resolve(process.cwd(), 'dist');
+
+    if (!fs.existsSync(path.join(distPath, 'index.html'))) {
+      throw new Error(`Built frontend not found at ${distPath}. Run "npm run build" first.`);
+    }
+
     app.use(express.static(distPath));
-    app.get('*', (_req, res) => {
+    app.get('*', (req, res) => {
+      if (req.path.startsWith('/api/')) {
+        res.status(404).json({ error: 'API route not found' });
+        return;
+      }
       res.sendFile(path.join(distPath, 'index.html'));
     });
   }
 
-  app.listen(PORT, '0.0.0.0', () => {
-    console.log(`FC26 AI Manager server running on http://0.0.0.0:${PORT}`);
+  const server = app.listen(PORT, HOST, () => {
+    console.log(
+      `FC26 AI Manager backend listening on http://${HOST}:${PORT} (${
+        IS_DESKTOP_MODE ? 'desktop-loopback' : IS_PRODUCTION ? 'production' : 'dev-preview'
+      })`
+    );
   });
+
+  const shutdown = () => {
+    server.close(() => {
+      closeDb();
+      process.exit(0);
+    });
+    setTimeout(() => {
+      closeDb();
+      process.exit(0);
+    }, 2500).unref();
+  };
+
+  process.on('SIGTERM', shutdown);
+  process.on('SIGINT', shutdown);
 }
 
 startServer().catch((err) => {
   console.error('Failed to start FC26 AI Manager server:', err);
+  closeDb();
   process.exit(1);
 });

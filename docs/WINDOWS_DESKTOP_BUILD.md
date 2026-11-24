@@ -1,52 +1,54 @@
-# FC26 AI Manager — Windows Desktop Build & Native Packaging Guide
+# FC26 AI Manager — Windows Desktop Build & Packaging Guide (Phase 1.1)
 
-This project runs in **two environments** via the `DesktopBridge` abstraction (`src/services/desktopBridge.ts`):
+This project runs in **two environments** via `DesktopBridge` (`src/services/desktopBridge.ts`):
 
-1. **Browser Preview Environment (Current AI Studio / Web Dev Runtime)**
-   - Full UI, local SQLite database (`./data/fc26_manager.db`), Career Mode club/squad management, Match Preparation, Tactical Board, Tactical Memory, and Settings.
-   - Native Windows `desktopCapturer` window enumeration and local FFmpeg segmented recording are **explicitly unavailable** in a browser sandbox and are never simulated.
+1. **Browser Preview Environment (Web Dev Runtime)**
+   - Runs Express + SQLite locally with same-origin Bearer session auth.
+   - Native Windows `desktopCapturer` window enumeration and Phase 2 FFmpeg video recording are unavailable and never simulated.
 
 2. **Native Windows Electron Environment (`FC26 AI Manager — Windows Setup.exe`)**
-   - Full Windows window/display detection for EA SPORTS FC 26 (`desktopCapturer`).
-   - Local H.264 MP4 segmented recording (2–5 minute crash-resilient segments, microphone permanently disabled).
-   - Main-process `safeStorage` credential management and local disk space inspection.
+   - Electron main process (`dist-electron/main.cjs`) detects `app.isPackaged`, spawns the packaged Express backend (`dist-server/server.mjs`) via `ELECTRON_RUN_AS_NODE=1` bound strictly to `127.0.0.1` on an ephemeral localhost port, authenticates renderer requests via a fresh 256-bit in-memory Bearer token delivered exclusively through `preload.cjs`, waits for `GET /api/health`, and stores SQLite persistently inside `app.getPath('userData')/database/fc26_manager.db`.
+   - Window/display source enumeration (`desktopCapturer`) and disk inspection are active in Phase 1.1; FFmpeg segmented video recording (`localFfmpegRecording: false`) is planned for Phase 2.
 
 ---
 
-## Building on Windows 10 / 11 (x64)
+## Reproducible Build Commands (Windows 10 / 11 x64)
 
 ### 1. Prerequisites
 - Node.js 22 LTS (x64)
-- Visual Studio Build Tools (C++ workload for `better-sqlite3` native rebuild)
-- FFmpeg Windows static binary (bundled in Phase 2 capture verification)
+- Visual Studio Build Tools (Desktop development with C++ workload for `better-sqlite3`)
 
-### 2. Install Desktop Packaging DevDependencies
-On your Windows workstation, install Electron and Electron Builder:
-
+### 2. Install Dependencies & Rebuild Native SQLite for Electron ABI
 ```bash
-npm install --save-dev electron electron-builder @electron/rebuild
+npm install
+npx electron-builder install-app-deps
 ```
 
-Rebuild `better-sqlite3` for Electron's Node ABI:
-
+### 3. Build Frontend, Server Bundle, and Electron Main/Preload
 ```bash
-npx @electron/rebuild -f -w better-sqlite3
+npm run build:desktop
 ```
 
-### 3. Run Locally in Native Electron Mode
-Start the local backend/renderer and launch Electron:
+This produces:
+- `dist/` — Vite production React bundle
+- `dist-server/server.mjs` — Bundled Express + SQLite backend (no Vite dev dependency)
+- `dist-electron/main.cjs` & `dist-electron/preload.cjs` — Compiled CommonJS Electron entrypoints
 
+### 4. Launch Locally in Electron Desktop Mode
 ```bash
-npm run electron:compile
-npx electron dist-electron/main.js
+npm run electron:start
 ```
 
-### 4. Package Windows Installer (`FC26 AI Manager — Windows Setup.exe`)
+### 5. Build Windows x64 NSIS Installer
 ```bash
 npm run electron:dist:win
 ```
 
-Output installer will be created inside `release/FC26 AI Manager — Windows Setup.exe`.
+Output installer path: `release/FC26 AI Manager — Windows Setup.exe`.
+
+### Persistent Windows Storage Paths
+- SQLite Database: `%APPDATA%\FC26 AI Manager\database\fc26_manager.db`
+- Recording Manifests / Future Segments: `%APPDATA%\FC26 AI Manager\recordings\`
 
 ### Recommended EA SPORTS FC 26 Display Mode
-For reliable window-only capture on Windows without exclusive fullscreen black frames, set EA SPORTS FC 26 video settings to **Borderless Windowed** mode.
+Set EA SPORTS FC 26 video settings to **Borderless Windowed** mode for reliable window-only capture on Windows.

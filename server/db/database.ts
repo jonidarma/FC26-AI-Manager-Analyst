@@ -6,10 +6,30 @@ import { DEFAULT_TACTICAL_CATALOG_SEED } from '../../src/data/tacticalCatalog.ts
 import type { ApplicationSettings } from '../../src/types/domain.ts';
 import { runMigrations } from './migrations.ts';
 
-const DATA_DIR = path.resolve(process.cwd(), 'data');
-const DB_PATH = path.join(DATA_DIR, 'fc26_manager.db');
-
 let dbInstance: Database.Database | null = null;
+
+export function resolveDatabaseLocation(): {
+  dataDir: string;
+  dbPath: string;
+  storageMode: 'electron-user-data' | 'workspace-preview';
+} {
+  const customUserDataDir = process.env.FC26_USER_DATA_DIR?.trim();
+  if (customUserDataDir) {
+    const resolvedDir = path.resolve(customUserDataDir);
+    return {
+      dataDir: resolvedDir,
+      dbPath: path.join(resolvedDir, 'fc26_manager.db'),
+      storageMode: 'electron-user-data',
+    };
+  }
+
+  const fallbackDir = path.resolve(process.cwd(), 'data');
+  return {
+    dataDir: fallbackDir,
+    dbPath: path.join(fallbackDir, 'fc26_manager.db'),
+    storageMode: 'workspace-preview',
+  };
+}
 
 export const DEFAULT_APP_SETTINGS: ApplicationSettings = {
   capture: {
@@ -75,11 +95,12 @@ export function getDb(): Database.Database {
     return dbInstance;
   }
 
-  if (!fs.existsSync(DATA_DIR)) {
-    fs.mkdirSync(DATA_DIR, { recursive: true });
+  const { dataDir, dbPath } = resolveDatabaseLocation();
+  if (!fs.existsSync(dataDir)) {
+    fs.mkdirSync(dataDir, { recursive: true });
   }
 
-  const db = new Database(DB_PATH);
+  const db = new Database(dbPath);
   db.pragma('journal_mode = WAL');
   db.pragma('foreign_keys = ON');
   db.pragma('busy_timeout = 5000');
@@ -91,14 +112,29 @@ export function getDb(): Database.Database {
   return dbInstance;
 }
 
+export function closeDb(): void {
+  if (dbInstance) {
+    try {
+      dbInstance.pragma('wal_checkpoint(TRUNCATE)');
+      dbInstance.close();
+    } catch {
+      // ignore close errors on shutdown
+    }
+    dbInstance = null;
+  }
+}
+
 export function getDatabaseMetadata(): {
   dbFileName: string;
+  storageMode: 'electron-user-data' | 'workspace-preview';
+  dbDirectory: string;
   sizeBytes: number;
   schemaVersion: number;
   tableCounts: Record<string, number>;
 } {
   const db = getDb();
-  const sizeBytes = fs.existsSync(DB_PATH) ? fs.statSync(DB_PATH).size : 0;
+  const { dataDir, dbPath, storageMode } = resolveDatabaseLocation();
+  const sizeBytes = fs.existsSync(dbPath) ? fs.statSync(dbPath).size : 0;
   const versionRow = db
     .prepare('SELECT MAX(version) as version FROM schema_migrations')
     .get() as { version: number | null };
@@ -131,7 +167,9 @@ export function getDatabaseMetadata(): {
   }
 
   return {
-    dbFileName: path.basename(DB_PATH),
+    dbFileName: path.basename(dbPath),
+    storageMode,
+    dbDirectory: dataDir,
     sizeBytes,
     schemaVersion: versionRow?.version ?? 1,
     tableCounts,
