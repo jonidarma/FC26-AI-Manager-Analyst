@@ -52,7 +52,7 @@ Investigation uncovered **four compounding root causes**:
 ### P4 — Durable Remote Media Cleanup, Heartbeats & Startup Recovery
 - `onRemoteFileUploaded` persists `remote_file_name` immediately after `files.upload` completes (prior to processing poll).
 - Implemented Migration v8 non-destructive table upgrade widening `ai_analysis_assets.cleanup_status` to `not_uploaded | uploaded | cleanup_pending | deleting | deleted | cleanup_failed | retained_by_policy` (mapping legacy `pending` -> `cleanup_pending`) and adding `original_size_bytes`, `processed_size_bytes`, `preprocessing_ms`, heartbeat/stage/diagnostics columns, and `gemini_model_capabilities_cache`.
-- Added 4-second job heartbeat updates, `reconcileStaleAnalysisJobs()`, `markInterruptedJobsOnStartup()` (never auto-restarting uploads), startup/shutdown `cleanupPendingRemoteFiles()` sweeps, and manual **Retry Remote Cleanup** (`POST /api/analysis/:jobId/cleanup`). Local gameplay recordings are never deleted.
+- Added 4-second job heartbeat updates, `reconcileStaleAnalysisJobs()`, `markInterruptedJobsOnStartup()` (never auto-restarting uploads), startup/shutdown `cleanupPendingRemoteFiles()` sweeps, and manual **Retry Remote Cleanup** (`POST /api/analysis-jobs/:jobId/retry-cleanup`). Local gameplay recordings are never deleted.
 
 ### P5 — Mode-Specific FFmpeg Analysis Proxies & UI Transparency
 - Implemented mode-specific FFmpeg proxies in `server/services/videoPreprocessingService.ts` (`quick`: 720p/15fps/CRF28/no audio; `balanced`: 1080p/24fps/CRF24; `deep`: <=1080p/30fps/CRF20) with smart skip for already-compliant clips and original recordings preserved untouched.

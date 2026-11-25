@@ -118,6 +118,12 @@ export const DEFAULT_APP_SETTINGS: ApplicationSettings = {
     dailyBudgetUsd: 5.0,
     minLiveGameplaySeconds: 15,
     autoAnalyzeAfterStop: false,
+    autoFailoverEnabled: true,
+    fallbackModelChain: [],
+    allowHigherCostFailover: false,
+    allowSequentialFrameFallback: false,
+    frameFallbackIntervalSeconds: 6,
+    maxFallbackFramesPerSegment: 24,
   },
   activeClubId: null,
   updatedAt: new Date().toISOString(),
@@ -223,6 +229,7 @@ const OPERATIONAL_TABLES = [
   'ai_recommendation_decisions',
   'ai_halftime_briefings',
   'ai_second_half_comparisons',
+  'ai_analysis_checkpoints',
   'application_settings',
   'api_usage_logs',
   'tactical_catalog',
@@ -304,7 +311,7 @@ export function getDatabaseMetadata(): {
     storageMode,
     dbDirectory: dataDir,
     sizeBytes,
-    schemaVersion: versionRow?.version ?? 8,
+    schemaVersion: versionRow?.version ?? 9,
     tableCounts,
   };
 }
@@ -322,9 +329,9 @@ export function exportDatabaseBackup(): Record<string, unknown> {
     .get() as { version: number | null };
 
   return {
-    format: 'fc26-ai-manager-backup-v8',
+    format: 'fc26-ai-manager-backup-v9',
     exportedAt: new Date().toISOString(),
-    schemaVersion: versionRow?.version ?? 8,
+    schemaVersion: versionRow?.version ?? 9,
     tables: data,
   };
 }
@@ -341,11 +348,12 @@ export function restoreDatabaseBackup(payload: {
     payload.format === 'fc26-ai-manager-backup-v5' ||
     payload.format === 'fc26-ai-manager-backup-v6' ||
     payload.format === 'fc26-ai-manager-backup-v7' ||
-    payload.format === 'fc26-ai-manager-backup-v8';
+    payload.format === 'fc26-ai-manager-backup-v8' ||
+    payload.format === 'fc26-ai-manager-backup-v9';
 
   if ((!isV1 && !isFullBackup) || !payload.tables) {
     throw new Error(
-      'Invalid backup format. Expected fc26-ai-manager-backup-v8 (or legacy v1–v7).'
+      'Invalid backup format. Expected fc26-ai-manager-backup-v9 (or legacy v1–v8).'
     );
   }
 

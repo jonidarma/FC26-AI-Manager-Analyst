@@ -1671,6 +1671,91 @@ export const MIGRATIONS: Migration[] = [
       `);
     },
   },
+  {
+    version: 9,
+    name: 'phase_3_0_3_validation_failover_checkpoints_v9',
+    sql: `
+      CREATE TABLE IF NOT EXISTS gemini_model_health (
+        model_id TEXT NOT NULL,
+        capability TEXT NOT NULL,
+        stage TEXT NOT NULL DEFAULT 'general',
+        status TEXT NOT NULL DEFAULT 'healthy' CHECK (status IN ('healthy', 'degraded', 'cooldown', 'unsupported')),
+        consecutive_failures INTEGER NOT NULL DEFAULT 0,
+        last_success_at TEXT,
+        last_failure_at TEXT,
+        last_error_code TEXT,
+        last_error_message TEXT,
+        cooldown_until TEXT,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (model_id, capability, stage)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_gemini_model_health_model
+      ON gemini_model_health(model_id, status);
+
+      CREATE TABLE IF NOT EXISTS ai_analysis_checkpoints (
+        id TEXT PRIMARY KEY,
+        job_id TEXT NOT NULL,
+        match_id TEXT NOT NULL,
+        session_id TEXT,
+        half TEXT NOT NULL CHECK (half IN ('first_half', 'second_half')),
+        stage_name TEXT NOT NULL CHECK (stage_name IN ('classifying_gameplay', 'analyzing_gameplay', 'generating_briefing')),
+        segment_id TEXT,
+        segment_index INTEGER NOT NULL DEFAULT 0,
+        segment_checksum TEXT NOT NULL DEFAULT '',
+        proxy_signature TEXT NOT NULL DEFAULT '',
+        model_used TEXT NOT NULL DEFAULT '',
+        prompt_version TEXT NOT NULL DEFAULT '',
+        schema_version TEXT NOT NULL DEFAULT '',
+        analysis_strategy TEXT NOT NULL DEFAULT 'native_video' CHECK (analysis_strategy IN ('native_video', 'sequential_frames')),
+        remote_file_name TEXT,
+        remote_file_uri TEXT,
+        payload_json TEXT NOT NULL DEFAULT '{}',
+        status TEXT NOT NULL DEFAULT 'valid' CHECK (status IN ('valid', 'invalidated')),
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        FOREIGN KEY (job_id) REFERENCES ai_analysis_jobs(id) ON DELETE CASCADE,
+        FOREIGN KEY (match_id) REFERENCES matches(id) ON DELETE CASCADE,
+        UNIQUE(job_id, stage_name, segment_index)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_ai_checkpoints_match_half
+      ON ai_analysis_checkpoints(match_id, half, status, updated_at DESC);
+    `,
+    afterSql: (db: Database.Database) => {
+      // 1. Extend gemini_model_capabilities_cache with separate per-capability verification states & timestamps
+      addColumnIfMissing(db, 'gemini_model_capabilities_cache', 'model_listed', 'INTEGER NOT NULL DEFAULT 1');
+      addColumnIfMissing(db, 'gemini_model_capabilities_cache', 'text_verified', 'INTEGER NOT NULL DEFAULT 0');
+      addColumnIfMissing(db, 'gemini_model_capabilities_cache', 'text_verified_at', 'TEXT');
+      addColumnIfMissing(db, 'gemini_model_capabilities_cache', 'structured_json_verified_at', 'TEXT');
+      addColumnIfMissing(db, 'gemini_model_capabilities_cache', 'image_verified', 'INTEGER NOT NULL DEFAULT 0');
+      addColumnIfMissing(db, 'gemini_model_capabilities_cache', 'image_verified_at', 'TEXT');
+      addColumnIfMissing(db, 'gemini_model_capabilities_cache', 'inline_video_verified', 'INTEGER NOT NULL DEFAULT 0');
+      addColumnIfMissing(db, 'gemini_model_capabilities_cache', 'inline_video_verified_at', 'TEXT');
+      addColumnIfMissing(db, 'gemini_model_capabilities_cache', 'files_api_video_verified', 'INTEGER NOT NULL DEFAULT 0');
+      addColumnIfMissing(db, 'gemini_model_capabilities_cache', 'files_api_video_verified_at', 'TEXT');
+
+      // Backfill existing verified structured JSON rows cleanly without assuming video/image verification
+      db.exec(`
+        UPDATE gemini_model_capabilities_cache
+        SET
+          text_verified = CASE WHEN structured_json_verified = 1 THEN 1 ELSE text_verified END,
+          text_verified_at = CASE WHEN structured_json_verified = 1 AND text_verified_at IS NULL THEN verified_at ELSE text_verified_at END,
+          structured_json_verified_at = CASE WHEN structured_json_verified = 1 AND structured_json_verified_at IS NULL THEN verified_at ELSE structured_json_verified_at END,
+          inline_video_verified = CASE WHEN video_verified = 1 THEN 1 ELSE inline_video_verified END,
+          inline_video_verified_at = CASE WHEN video_verified = 1 AND inline_video_verified_at IS NULL THEN verified_at ELSE inline_video_verified_at END
+      `);
+
+      // 2. Extend ai_analysis_jobs with Phase 3.0.3 strategy, per-stage model audit, failover history, validation summary, and checkpoint resume link
+      //    All existing CHECK constraints on ai_video_classifications, ai_gameplay_observations,
+      //    ai_tactical_vision_assessments, and ai_tactical_recommendations remain STRICTLY UNTOUCHED.
+      addColumnIfMissing(db, 'ai_analysis_jobs', 'analysis_strategy', "TEXT NOT NULL DEFAULT 'native_video'");
+      addColumnIfMissing(db, 'ai_analysis_jobs', 'stage_models_json', 'TEXT');
+      addColumnIfMissing(db, 'ai_analysis_jobs', 'fallback_history_json', 'TEXT');
+      addColumnIfMissing(db, 'ai_analysis_jobs', 'validation_summary_json', 'TEXT');
+      addColumnIfMissing(db, 'ai_analysis_jobs', 'checkpoint_resumed_from_job_id', 'TEXT');
+    },
+  },
 ];
 
 export function runMigrations(db: Database.Database): void {

@@ -620,6 +620,13 @@ export interface AiSettings {
   removeDuplicateFrames: boolean;
   requireUploadConfirmation: boolean;
   deleteRemoteAfterAnalysis: boolean;
+  // Phase 3.0.3 — Adaptive Model Failover & Sequential Frame Fallback
+  autoFailoverEnabled?: boolean;
+  fallbackModelChain?: string[];
+  allowHigherCostFailover?: boolean;
+  allowSequentialFrameFallback?: boolean;
+  frameFallbackIntervalSeconds?: number;
+  maxFallbackFramesPerSegment?: number;
 }
 
 export interface ApplicationSettings {
@@ -1730,6 +1737,22 @@ export interface VisionOptimizationResult {
 export type VideoAnalysisMode = 'quick' | 'balanced' | 'deep';
 export type AnalysisLanguage = 'en' | 'id';
 
+export type AnalysisStrategy = 'native_video' | 'sequential_frames';
+
+export type CapabilityProbeType =
+  | 'text_json'
+  | 'image'
+  | 'inline_video'
+  | 'files_api_video';
+
+export type ErrorDomain =
+  | 'gemini_api'
+  | 'network'
+  | 'ffmpeg'
+  | 'ai_validation'
+  | 'database'
+  | 'internal';
+
 export type GeminiErrorCode =
   | 'INVALID_API_KEY'
   | 'API_KEY_REVOKED'
@@ -1748,11 +1771,18 @@ export type GeminiErrorCode =
   | 'NETWORK_CONNECTION_FAILED'
   | 'UPSTREAM_SERVICE_UNAVAILABLE'
   | 'INVALID_MODEL_RESPONSE'
+  | 'AI_RESPONSE_SCHEMA_INVALID'
+  | 'AI_RESPONSE_ENUM_INVALID'
+  | 'AI_RESPONSE_REPAIR_FAILED'
+  | 'DATABASE_CONSTRAINT_VIOLATION'
+  | 'DATABASE_PERSISTENCE_FAILED'
+  | 'ANALYSIS_STAGE_VALIDATION_FAILED'
   | 'ANALYSIS_CANCELLED'
   | 'ANALYSIS_INTERRUPTED';
 
 export interface SanitizedGeminiErrorDiagnostic {
   code: GeminiErrorCode;
+  errorDomain?: ErrorDomain;
   httpStatus: number | null;
   apiStatus: string | null;
   upstreamMessage: string;
@@ -1763,6 +1793,10 @@ export interface SanitizedGeminiErrorDiagnostic {
   elapsedMs: number | null;
   retryable: boolean;
   retryAfterMs: number | null;
+  fieldName?: string | null;
+  expectedValues?: string[] | null;
+  receivedValuePreview?: string | null;
+  sqliteCode?: string | null;
   occurredAt: string;
 }
 
@@ -1772,17 +1806,125 @@ export type GeminiModelAccessStatus =
   | 'inaccessible'
   | 'unsupported';
 
+export type ModelHealthStatus = 'healthy' | 'degraded' | 'cooldown' | 'unsupported';
+
+export interface ModelHealthRecord {
+  modelId: string;
+  capability: CapabilityProbeType | 'video' | 'synthesis';
+  stage: string;
+  status: ModelHealthStatus;
+  consecutiveFailures: number;
+  lastSuccessAt: string | null;
+  lastFailureAt: string | null;
+  lastErrorCode: GeminiErrorCode | null;
+  lastErrorMessage: string | null;
+  cooldownUntil: string | null;
+  updatedAt: string;
+}
+
+export interface ModelFailoverEvent {
+  stage: string;
+  segmentIndex: number | null;
+  fromModelId: string;
+  toModelId: string;
+  reasonCode: GeminiErrorCode;
+  reasonMessage: string;
+  reusedRemoteMedia: boolean;
+  costDeltaAuthorized: boolean;
+  occurredAt: string;
+}
+
+export interface ValidationFieldNormalization {
+  stage: string;
+  segmentIndex: number | null;
+  itemIndex: number | null;
+  fieldName: string;
+  rawPreview: string;
+  normalizedValue: string;
+}
+
+export interface ValidationRejectedItem {
+  stage: string;
+  segmentIndex: number | null;
+  itemIndex: number;
+  code: GeminiErrorCode;
+  fieldName: string;
+  expectedValues: string[] | null;
+  receivedValuePreview: string;
+  reason: string;
+}
+
+export interface ValidationAuditSummary {
+  totalValidatedItems: number;
+  validItemsCount: number;
+  rejectedItemsCount: number;
+  repairedAttemptsCount: number;
+  normalizedFields: ValidationFieldNormalization[];
+  rejectedItems: ValidationRejectedItem[];
+  warnings: string[];
+  databaseErrors: Array<{
+    stage: string;
+    code: GeminiErrorCode;
+    sqliteCode: string | null;
+    message: string;
+    occurredAt: string;
+  }>;
+}
+
+export interface AnalysisCheckpointRecord {
+  id: string;
+  jobId: string;
+  matchId: string;
+  sessionId: string | null;
+  half: 'first_half' | 'second_half';
+  stageName: 'classifying_gameplay' | 'analyzing_gameplay' | 'generating_briefing';
+  segmentId: string | null;
+  segmentIndex: number;
+  segmentChecksum: string;
+  proxySignature: string;
+  modelUsed: string;
+  promptVersion: string;
+  schemaVersion: string;
+  analysisStrategy: AnalysisStrategy;
+  remoteFileName: string | null;
+  remoteFileUri: string | null;
+  status: 'valid' | 'invalidated';
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface AnalysisCheckpointResumeSummary {
+  canResume: boolean;
+  sourceJobId: string | null;
+  completedStageCount: number;
+  completedSegmentIndices: number[];
+  analysisStrategy: AnalysisStrategy;
+  requiresReuploadAuthorization: boolean;
+  invalidationReasons: string[];
+  checkpoints: AnalysisCheckpointRecord[];
+}
+
 export interface GeminiModelCapability {
   modelId: string;
   displayName: string;
   availability: 'available_default' | 'available_optional' | 'requires_paid_tier';
   source?: 'discovered' | 'configured' | 'registry';
   accessStatus?: GeminiModelAccessStatus;
+  modelListed?: boolean;
   supportsGenerateContent?: boolean;
   supportsVideoInput: boolean;
   supportsStructuredOutput: boolean;
-  videoVerified?: boolean;
+  textVerified?: boolean;
+  textVerifiedAt?: string | null;
   structuredJsonVerified?: boolean;
+  structuredJsonVerifiedAt?: string | null;
+  imageVerified?: boolean;
+  imageVerifiedAt?: string | null;
+  videoVerified?: boolean;
+  inlineVideoVerified?: boolean;
+  inlineVideoVerifiedAt?: string | null;
+  filesApiVideoVerified?: boolean;
+  filesApiVideoVerifiedAt?: string | null;
   inputTokenLimit?: number | null;
   outputTokenLimit?: number | null;
   recommendedStages: Array<'classification' | 'quick' | 'balanced' | 'deep' | 'synthesis'>;
@@ -1794,6 +1936,7 @@ export interface GeminiModelCapability {
   lastVerifiedAt?: string | null;
   lastErrorCode?: GeminiErrorCode | null;
   lastErrorMessage?: string | null;
+  health?: ModelHealthRecord[];
 }
 
 export interface EffectiveModelRouting {
@@ -1827,6 +1970,7 @@ export interface GeminiServiceStatus {
   models: GeminiModelCapability[];
   routing?: EffectiveModelRouting;
   discoveredAt?: string | null;
+  health?: ModelHealthRecord[];
   phaseNote: string;
 }
 
@@ -1834,13 +1978,22 @@ export interface GeminiConnectionTestResult {
   ok: boolean;
   configured: boolean;
   modelId: string;
+  probeType?: CapabilityProbeType;
   latencyMs: number;
+  textVerified?: boolean;
+  imageVerified?: boolean;
+  inlineVideoVerified?: boolean;
+  filesApiVideoVerified?: boolean;
   videoSupported: boolean;
   videoTested?: boolean;
   structuredOutputSupported: boolean;
+  visualRecognitionDetail?: string | null;
+  remoteCleanupConfirmed?: boolean | null;
   accessStatus?: GeminiModelAccessStatus;
   verifiedAt?: string | null;
   listedModelsCount?: number;
+  attemptsUsed?: number;
+  cooldownUntil?: string | null;
   message: string;
   errorCode?: string;
   diagnostic?: SanitizedGeminiErrorDiagnostic | null;
@@ -1988,6 +2141,11 @@ export interface AiAnalysisJobRecord {
   };
   modelVideoId: string;
   modelSynthesisId: string;
+  analysisStrategy?: AnalysisStrategy;
+  stageModelsUsed?: Record<string, string>;
+  fallbackHistory?: ModelFailoverEvent[];
+  validationSummary?: ValidationAuditSummary | null;
+  checkpointResumedFromJobId?: string | null;
   promptVersion: string;
   schemaVersion: string;
   tacticalVisionDatasetVersion: string;
@@ -2251,6 +2409,8 @@ export interface MatchAnalysisBundle {
   recommendations: AiTacticalRecommendationRecord[];
   assets: AiAnalysisAssetRecord[];
   secondHalfComparison: AiSecondHalfComparisonPayload | null;
+  checkpoints?: AnalysisCheckpointRecord[];
+  resumableCheckpoint?: AnalysisCheckpointResumeSummary | null;
 }
 
 // ============================================================

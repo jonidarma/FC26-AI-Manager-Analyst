@@ -14,3 +14,9 @@ coverage/
 /data/*.db-wal
 /data/*.db-shm
 /data/recordings/
+/data/temp_analysis/
+temp_analysis/
+**/temp_analysis/
+*analysis_proxy*.mp4
+*.fc26_proxy.mp4
+

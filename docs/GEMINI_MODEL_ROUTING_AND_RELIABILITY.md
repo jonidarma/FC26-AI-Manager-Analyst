@@ -49,7 +49,7 @@ Table: `gemini_model_capabilities_cache` (SQLite Migration v8)
   - If discovery fails (e.g., invalid key or offline), returns sanitized `discoveryError` without exposing secrets and never silently invents accessibility.
 - **Live Capability Verification (`verifyModelCapabilities()`):**
   - **Text & Structured JSON Probe (`POST /api/ai/models/test`):** Sends a lightweight JSON-schema `generateContent` request and validates structured JSON parsing.
-  - **Video Compatibility Probe (`POST /api/ai/models/test-video`):** Synthesizes a 1-second silent H.264 MP4 via local FFmpeg, uploads via Gemini Files API, polls to `ACTIVE`, runs a tiny structured JSON prompt against the uploaded video, immediately deletes the remote file (even on failure), and cleans up the local temp file.
+  - **Video Compatibility Probe (`POST /api/ai/models/test-video`):** Synthesizes a tiny 1-second silent H.264 MP4 via local FFmpeg, sends it to the target model as `video/mp4` (inline base64 for fast ~3 KB probes, or via Gemini Files API with automatic remote deletion if >4 MB), validates structured JSON output, and cleans up the local temp file.
   - Stores verified capabilities and error status in `gemini_model_capabilities_cache` with a 6-hour TTL for verified models and 10-minute TTL for failures.
 
 ---
@@ -130,7 +130,7 @@ States: `not_uploaded` -> `uploaded` -> `cleanup_pending` -> `deleting` -> `dele
 3. **Zero Local Deletion:** Remote cleanup never touches local gameplay MP4 recordings; only temporary analysis proxy files under `temp_analysis/` are removed.
 4. **Durable Recovery & Manual Retry:**
    - Failed deletions transition to `cleanup_failed` with incremented `cleanup_attempts` and `last_cleanup_error`.
-   - Startup sweep (`cleanupPendingRemoteFiles()`), graceful shutdown sweep (`shutdownAnalysisOrchestrator()`), and the UI **Retry Remote Cleanup** button (`POST /api/analysis/:jobId/cleanup`) retry any `uploaded`, `cleanup_pending`, or `cleanup_failed` remote assets.
+   - Startup sweep (`cleanupPendingRemoteFiles()`), graceful shutdown sweep (`shutdownAnalysisOrchestrator()`), and the UI **Retry Remote Cleanup** button (`POST /api/analysis-jobs/:jobId/retry-cleanup`) retry any `uploaded`, `cleanup_pending`, or `cleanup_failed` remote assets.
 
 ---
 
