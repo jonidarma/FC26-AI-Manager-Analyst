@@ -142,19 +142,25 @@ export const ACTIVE_GEMINI_MODELS = [
   {
     id: 'gemini-4-hydrogen',
     label: 'Gemini 4 Hydrogen (Fast Multimodal Default)',
-    description: 'High-speed multimodal frame & tactical analysis with structured JSON support.',
+    description: 'High-speed multimodal video & tactical analysis with structured JSON support.',
     tier: 'Standard',
   },
   {
+    id: 'gemini-3.1-flash-lite',
+    label: 'Gemini 3.1 Flash-Lite (Quick / Low-Cost Video Triage)',
+    description: 'Fast, cost-efficient multimodal model ideal for Quick mode and Stage 1 classification.',
+    tier: 'Budget',
+  },
+  {
     id: 'gemini-4-neon',
-    label: 'Gemini 4 Neon (Advanced Tactical Reasoning)',
+    label: 'Gemini 4 Neon (Advanced Tactical Reasoning — Paid Tier)',
     description: 'Deep tactical synthesis for complex opposition breakdown and multi-stage game plans.',
     tier: 'Advanced',
   },
   {
     id: 'gemini-4-carbon',
-    label: 'Gemini 4 Carbon (Deep Strategic Reasoning)',
-    description: 'Maximum reasoning depth for multi-match tactical memory synthesis.',
+    label: 'Gemini 4 Carbon (Deep Strategic Reasoning — Paid Tier)',
+    description: 'Maximum reasoning depth for deep match analysis and multi-match tactical memory.',
     tier: 'Deep Reasoning',
   },
 ] as const;

@@ -5,6 +5,7 @@ import path from 'node:path';
 import { DEFAULT_TACTICAL_CATALOG_SEED } from '../../src/data/tacticalCatalog.ts';
 import type { ApplicationSettings } from '../../src/types/domain.ts';
 import { bootstrapLocalReferenceCatalogs } from '../services/catalogImporter.ts';
+import { seedTacticalVisionCatalog } from '../services/tacticalVisionService.ts';
 import { runMigrations } from './migrations.ts';
 
 let dbInstance: Database.Database | null = null;
@@ -54,6 +55,23 @@ export const DEFAULT_APP_SETTINGS: ApplicationSettings = {
     removeDuplicateFrames: true,
     requireUploadConfirmation: true,
     deleteRemoteAfterAnalysis: true,
+    quickAnalysisModelId: 'gemini-4-hydrogen',
+    balancedAnalysisModelId: 'gemini-4-hydrogen',
+    deepAnalysisModelId: 'gemini-4-hydrogen',
+    tacticalSynthesisModelId: 'gemini-4-hydrogen',
+    defaultAnalysisMode: 'quick',
+    defaultLanguage: 'en',
+    samplingFpsQuick: 0.5,
+    samplingFpsBalanced: 1.0,
+    samplingFpsDeep: 2.0,
+    downscaleForAnalysis: false,
+    maxConcurrentRequests: 1,
+    maxAnalysisDurationSeconds: 180,
+    maxRetryAttempts: 2,
+    perMatchBudgetUsd: 1.5,
+    dailyBudgetUsd: 5.0,
+    minLiveGameplaySeconds: 15,
+    autoAnalyzeAfterStop: false,
   },
   activeClubId: null,
   updatedAt: new Date().toISOString(),
@@ -109,6 +127,7 @@ export function getDb(): Database.Database {
   runMigrations(db);
   seedDefaults(db);
   bootstrapLocalReferenceCatalogs(db);
+  seedTacticalVisionCatalog(db);
 
   dbInstance = db;
   return dbInstance;
@@ -129,7 +148,9 @@ export function closeDb(): void {
 const OPERATIONAL_TABLES = [
   'clubs',
   'career_profiles',
+  'club_coaches',
   'players',
+  'player_role_familiarities',
   'tactical_presets',
   'tactical_preset_assignments',
   'opponents',
@@ -147,6 +168,15 @@ const OPERATIONAL_TABLES = [
   'second_half_reports',
   'post_match_reports',
   'tactical_memory',
+  'ai_analysis_jobs',
+  'ai_analysis_assets',
+  'ai_video_classifications',
+  'ai_gameplay_observations',
+  'ai_tactical_vision_assessments',
+  'ai_tactical_recommendations',
+  'ai_recommendation_decisions',
+  'ai_halftime_briefings',
+  'ai_second_half_comparisons',
   'application_settings',
   'api_usage_logs',
   'tactical_catalog',
@@ -168,9 +198,38 @@ const MASTER_CATALOG_TABLES = [
   'catalog_player_focuses',
   'catalog_role_position_compatibility',
   'catalog_role_focus_compatibility',
+  'catalog_tactical_vision_sources',
+  'catalog_tactical_visions',
+  'catalog_tactical_vision_aliases',
+  'catalog_tactical_vision_requirements',
+  'catalog_tactical_vision_role_affinities',
+  'catalog_tactical_vision_setting_affinities',
 ] as const;
 
 const ALLOWED_RESTORE_TABLES = [...OPERATIONAL_TABLES, ...MASTER_CATALOG_TABLES] as const;
+
+function sanitizeSettingsRowForBackup(row: Record<string, unknown>): Record<string, unknown> {
+  if (typeof row.value_json !== 'string') return row;
+  try {
+    const parsed = JSON.parse(row.value_json) as Record<string, unknown>;
+    const forbiddenKeys = new Set(['apiKey', 'geminiApiKey', 'GEMINI_API_KEY', 'secret', 'token']);
+    const scrub = (obj: unknown): unknown => {
+      if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return obj;
+      const out: Record<string, unknown> = {};
+      for (const [k, v] of Object.entries(obj as Record<string, unknown>)) {
+        if (forbiddenKeys.has(k)) continue;
+        out[k] = scrub(v);
+      }
+      return out;
+    };
+    return {
+      ...row,
+      value_json: JSON.stringify(scrub(parsed)),
+    };
+  } catch {
+    return row;
+  }
+}
 
 export function getDatabaseMetadata(): {
   dbFileName: string;
@@ -199,7 +258,7 @@ export function getDatabaseMetadata(): {
     storageMode,
     dbDirectory: dataDir,
     sizeBytes,
-    schemaVersion: versionRow?.version ?? 5,
+    schemaVersion: versionRow?.version ?? 6,
     tableCounts,
   };
 }
@@ -208,16 +267,18 @@ export function exportDatabaseBackup(): Record<string, unknown> {
   const db = getDb();
   const data: Record<string, unknown[]> = {};
   for (const table of ALLOWED_RESTORE_TABLES) {
-    data[table] = db.prepare(`SELECT * FROM ${table}`).all();
+    const rows = db.prepare(`SELECT * FROM ${table}`).all() as Array<Record<string, unknown>>;
+    data[table] =
+      table === 'application_settings' ? rows.map(sanitizeSettingsRowForBackup) : rows;
   }
   const versionRow = db
     .prepare('SELECT MAX(version) as version FROM schema_migrations')
     .get() as { version: number | null };
 
   return {
-    format: 'fc26-ai-manager-backup-v5',
+    format: 'fc26-ai-manager-backup-v6',
     exportedAt: new Date().toISOString(),
-    schemaVersion: versionRow?.version ?? 5,
+    schemaVersion: versionRow?.version ?? 6,
     tables: data,
   };
 }
@@ -231,11 +292,12 @@ export function restoreDatabaseBackup(payload: {
     payload.format === 'fc26-ai-manager-backup-v2' ||
     payload.format === 'fc26-ai-manager-backup-v3' ||
     payload.format === 'fc26-ai-manager-backup-v4' ||
-    payload.format === 'fc26-ai-manager-backup-v5';
+    payload.format === 'fc26-ai-manager-backup-v5' ||
+    payload.format === 'fc26-ai-manager-backup-v6';
 
   if ((!isV1 && !isFullBackup) || !payload.tables) {
     throw new Error(
-      'Invalid backup format. Expected fc26-ai-manager-backup-v5 (or legacy v1/v2/v3/v4).'
+      'Invalid backup format. Expected fc26-ai-manager-backup-v6 (or legacy v1/v2/v3/v4/v5).'
     );
   }
 
@@ -248,49 +310,59 @@ export function restoreDatabaseBackup(payload: {
   }
 
   const restoreTx = db.transaction(() => {
-    db.pragma('foreign_keys = OFF');
-    try {
-      for (const table of [...targetTables].reverse()) {
-        db.prepare(`DELETE FROM ${table}`).run();
-      }
+    for (const table of [...targetTables].reverse()) {
+      db.prepare(`DELETE FROM ${table}`).run();
+    }
 
-      for (const table of targetTables) {
-        const rows = payload.tables?.[table];
-        if (!Array.isArray(rows) || rows.length === 0) continue;
-        const validCols = tableColumns.get(table)!;
+    for (const table of targetTables) {
+      const rows = payload.tables?.[table];
+      if (!Array.isArray(rows) || rows.length === 0) continue;
+      const validCols = tableColumns.get(table)!;
 
-        for (const row of rows) {
-          const keys = Object.keys(row).filter((k) => validCols.has(k));
-          if (keys.length === 0) continue;
-          const placeholders = keys.map(() => '?').join(', ');
-          const values = keys.map((k) => row[k]);
-          db.prepare(
-            `INSERT INTO ${table} (${keys.join(', ')}) VALUES (${placeholders})`
-          ).run(...values);
-        }
+      for (const rawRow of rows) {
+        const row =
+          table === 'application_settings' ? sanitizeSettingsRowForBackup(rawRow) : rawRow;
+        const keys = Object.keys(row).filter((k) => validCols.has(k));
+        if (keys.length === 0) continue;
+        const placeholders = keys.map(() => '?').join(', ');
+        const values = keys.map((k) => row[k]);
+        db.prepare(
+          `INSERT INTO ${table} (${keys.join(', ')}) VALUES (${placeholders})`
+        ).run(...values);
       }
-    } finally {
-      db.pragma('foreign_keys = ON');
+    }
+
+    const fkViolations = db.pragma('foreign_key_check') as Array<Record<string, unknown>>;
+    if (fkViolations.length > 0) {
+      throw new Error(
+        `Backup restore aborted: ${fkViolations.length} foreign key integrity violation(s) detected (first table: ${String(fkViolations[0].table ?? 'unknown')}).`
+      );
     }
   });
 
-  restoreTx();
+  db.pragma('foreign_keys = OFF');
+  try {
+    restoreTx();
+  } finally {
+    db.pragma('foreign_keys = ON');
+  }
   seedDefaults(db);
   bootstrapLocalReferenceCatalogs(db);
+  seedTacticalVisionCatalog(db);
 }
 
 export function deleteAllApplicationData(): void {
   const db = getDb();
   const clearTx = db.transaction(() => {
-    db.pragma('foreign_keys = OFF');
-    try {
-      for (const table of [...OPERATIONAL_TABLES].reverse()) {
-        db.prepare(`DELETE FROM ${table}`).run();
-      }
-    } finally {
-      db.pragma('foreign_keys = ON');
+    for (const table of [...OPERATIONAL_TABLES].reverse()) {
+      db.prepare(`DELETE FROM ${table}`).run();
     }
   });
-  clearTx();
+  db.pragma('foreign_keys = OFF');
+  try {
+    clearTx();
+  } finally {
+    db.pragma('foreign_keys = ON');
+  }
   seedDefaults(db);
 }

@@ -212,6 +212,19 @@
       "sourceReference": "EA FC 26 Gameplay Deep Dive Pitch Notes"
     },
     {
+      "externalSourceId": "role_cdm_wide_half",
+      "name": "Wide Half",
+      "description": "Defensive midfielder who drifts into wide channels during possession to cover flanks behind advancing fullbacks or create wide build-up angles.",
+      "positionCategory": "Midfielder",
+      "eligiblePositions": ["CDM"],
+      "tacticalBehavior": "Shifts horizontally toward the touchline to support wide progression and protect flank transitions.",
+      "attackingBehavior": "Creates wide passing relief and diagonal delivery angles from deep.",
+      "defensiveBehavior": "Covers wide spaces behind overlapping fullbacks and guards outer channels.",
+      "isFc26New": false,
+      "verificationStatus": "verified",
+      "sourceReference": "EA FC 26 Pitch Notes & User Tactical Vision Matrix"
+    },
+    {
       "externalSourceId": "role_cm_box_to_box",
       "name": "Box-to-Box",
       "description": "All-action central midfielder contributing across defensive, progression, and final-third phases.",

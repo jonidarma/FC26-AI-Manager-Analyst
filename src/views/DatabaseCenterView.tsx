@@ -12,6 +12,7 @@ import {
 } from 'lucide-react';
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { SortableTh } from '../components/common/SortableTh';
+import { TacticalVisionsTab } from '../components/database/TacticalVisionsTab';
 import { TacticalPitchSVG } from '../components/pitch/TacticalPitchSVG';
 import { useApp } from '../context/AppContext';
 import { type SortDirection, useTableSort } from '../hooks/useTableSort';
@@ -36,6 +37,7 @@ import type {
   DatasetCompleteness,
   ImportPreviewResult,
   PaginatedResult,
+  TacticalVisionCatalogResponse,
 } from '../types/domain';
 
 type DatabaseTab =
@@ -48,6 +50,7 @@ type DatabaseTab =
   | 'positions'
   | 'roles'
   | 'focuses'
+  | 'tactical_visions'
   | 'imports';
 
 type PlayerServerSortKey =
@@ -109,6 +112,7 @@ const TABS: Array<{ id: DatabaseTab; label: string }> = [
   { id: 'positions', label: 'Positions' },
   { id: 'roles', label: 'Player Roles' },
   { id: 'focuses', label: 'Player Focuses' },
+  { id: 'tactical_visions', label: 'Tactical Visions' },
   { id: 'imports', label: 'Import & History' },
 ];
 
@@ -160,6 +164,7 @@ export function DatabaseCenterView() {
   const [focuses, setFocuses] = useState<CatalogFocus[]>([]);
   const [compatMatrix, setCompatMatrix] = useState<CatalogCompatibilityRow[]>([]);
   const [importRuns, setImportRuns] = useState<CatalogImportRun[]>([]);
+  const [visionCatalog, setVisionCatalog] = useState<TacticalVisionCatalogResponse | null>(null);
 
   // Players tab state
   const [playerQuery, setPlayerQuery] = useState('');
@@ -236,7 +241,7 @@ export function DatabaseCenterView() {
   const loadCoreCatalogs = useCallback(async () => {
     setLoadingOverview(true);
     try {
-      const [ov, nat, lgs, pos, forms, rls, fcs, compat, runs, cov] = await Promise.all([
+      const [ov, nat, lgs, pos, forms, rls, fcs, compat, runs, cov, visions] = await Promise.all([
         desktopBridge.getCatalogOverview(),
         desktopBridge.listCatalogNations(),
         desktopBridge.listCatalogLeagues(),
@@ -247,6 +252,7 @@ export function DatabaseCenterView() {
         desktopBridge.getRoleFocusCompatibility(),
         desktopBridge.listCatalogImportRuns(),
         desktopBridge.getCatalogCoverageReport().catch(() => null),
+        desktopBridge.getTacticalVisionCatalog().catch(() => null),
       ]);
       setOverview(ov);
       setNations(nat);
@@ -258,6 +264,7 @@ export function DatabaseCenterView() {
       setCompatMatrix(compat);
       setImportRuns(runs);
       setCoverageReport(cov);
+      setVisionCatalog(visions);
       if (forms.length > 0) {
         setSelectedFormationId((prev) => prev || forms[0].id);
       }
@@ -2864,6 +2871,9 @@ export function DatabaseCenterView() {
           </div>
         </div>
       )}
+
+      {/* TAB: TACTICAL VISIONS */}
+      {activeTab === 'tactical_visions' && <TacticalVisionsTab catalog={visionCatalog} />}
     </div>
   );
 }

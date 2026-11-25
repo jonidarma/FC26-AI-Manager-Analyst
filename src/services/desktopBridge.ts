@@ -1,5 +1,9 @@
 import type {
+  AiAnalysisAssetRecord,
+  AiAnalysisJobRecord,
   AiMatchTacticalContext,
+  AiRecommendationDecisionRecord,
+  AnalysisLanguage,
   ApiUsageLog,
   ApplicationSettings,
   CaptureManifest,
@@ -20,6 +24,7 @@ import type {
   CatalogReconcileResult,
   CatalogRole,
   CatalogSource,
+  ClubCoachRecord,
   ClubWithProfile,
   ConfidenceLevel,
   DashboardSummary,
@@ -29,9 +34,13 @@ import type {
   DesktopBridgeCapabilities,
   DiskSpaceInfo,
   FeedbackChoice,
+  GeminiConnectionTestResult,
+  GeminiModelCapability,
+  GeminiServiceStatus,
   HalftimeReportData,
   ImportExecuteResult,
   ImportPreviewResult,
+  MatchAnalysisBundle,
   MatchRecord,
   MatchSessionWithSegments,
   MatchStatus,
@@ -42,7 +51,9 @@ import type {
   Player,
   PlayerAvailability,
   PlayerRoleAssignment,
+  PlayerRoleFamiliarityRecord,
   PostMatchReportRecord,
+  RecommendationDecisionStatus,
   RecommendationFeedbackRecord,
   RecoverableSessionSummary,
   RecordingChunkSendResult,
@@ -50,13 +61,21 @@ import type {
   RecordingTelemetry,
   RecoveryExecutionResult,
   RendererCaptureDiagnostics,
+  RoleFamiliarityTier,
   RoleFocusValidationResult,
   SquadStatus,
   TacticalCatalogItem,
+  TacticalFlexibility,
   TacticalMemoryEntry,
   TacticalPreset,
   TacticalPresetAssignment,
   TacticalPresetStatus,
+  TacticalVisionCatalogResponse,
+  TacticalVisionRecord,
+  ThreeLayerTacticalEvaluation,
+  VideoAnalysisMode,
+  VisionOptimizationMode,
+  VisionOptimizationResult,
 } from '../types/domain';
 
 interface ElectronBackendConnection {
@@ -577,6 +596,13 @@ class DesktopBridgeService {
     alternativeFormation: string;
     preferredAttackingStyle: string;
     preferredDefensiveStyle: string;
+    primaryTacticalVisionKey?: string;
+    alternativeTacticalVisionKey?: string | null;
+    preferredBuildUpStyle?: string;
+    preferredDefensiveApproach?: string;
+    preferredDefensiveLineHeight?: number;
+    tacticalPhilosophyNotes?: string;
+    tacticalFlexibility?: TacticalFlexibility;
     setActive?: boolean;
     rosterInitMode?: 'default_roster' | 'empty';
   }): Promise<ClubWithProfile & { defaultRosterImport?: DefaultRosterImportResult | null }> {
@@ -622,6 +648,13 @@ class DesktopBridgeService {
       alternativeFormation: string;
       preferredAttackingStyle: string;
       preferredDefensiveStyle: string;
+      primaryTacticalVisionKey: string;
+      alternativeTacticalVisionKey: string | null;
+      preferredBuildUpStyle: string;
+      preferredDefensiveApproach: string;
+      preferredDefensiveLineHeight: number;
+      tacticalPhilosophyNotes: string;
+      tacticalFlexibility: TacticalFlexibility;
     }>
   ): Promise<ClubWithProfile> {
     return this.apiFetch<ClubWithProfile>(`/api/clubs/${clubId}`, {
@@ -732,6 +765,7 @@ class DesktopBridgeService {
       name: string;
       formationId?: string | null;
       formationName: string;
+      tacticalVisionKey?: string;
       buildUpStyle: string;
       defensiveApproach: string;
       defensiveLineHeight: number;
@@ -755,6 +789,7 @@ class DesktopBridgeService {
       name: string;
       formationId: string | null;
       formationName: string;
+      tacticalVisionKey: string;
       buildUpStyle: string;
       defensiveApproach: string;
       defensiveLineHeight: number;
@@ -854,6 +889,7 @@ class DesktopBridgeService {
     preMatchNotes: string;
     tacticalSetup: {
       formationId?: string | null;
+      tacticalVisionKey?: string;
       buildUpStyle: string;
       defensiveApproach: string;
       defensiveLineHeight: number;
@@ -878,6 +914,7 @@ class DesktopBridgeService {
       sourcePresetId?: string | null;
       formationId?: string | null;
       formationName: string;
+      tacticalVisionKey?: string;
       buildUpStyle: string;
       defensiveApproach: string;
       defensiveLineHeight: number;
@@ -901,12 +938,14 @@ class DesktopBridgeService {
     payload: {
       formationId?: string | null;
       formationName: string;
+      tacticalVisionKey?: string;
       buildUpStyle: string;
       defensiveApproach: string;
       defensiveLineHeight: number;
       playerAssignments: PlayerRoleAssignment[];
       benchIds?: string[];
       confirmedDoubtfulPlayerIds?: string[];
+      appliedInGameConfirmed?: boolean;
       notes?: string;
     }
   ): Promise<MatchTacticalSnapshot> {
@@ -1334,6 +1373,362 @@ class DesktopBridgeService {
     if (res.status === 404) return null;
     if (!res.ok) throw new Error('Failed to load recording diagnostics');
     return (await res.json()) as RecordingDiagnosticsRecord;
+  }
+
+  // ============================================================
+  // Phase 3 — Tactical Vision Engine, Coaching Staff & Familiarity
+  // ============================================================
+
+  public getTacticalVisionCatalog(): Promise<TacticalVisionCatalogResponse> {
+    return this.apiFetch<TacticalVisionCatalogResponse>('/api/tactical-visions');
+  }
+
+  public getTacticalVisionByKey(key: string): Promise<TacticalVisionRecord> {
+    return this.apiFetch<TacticalVisionRecord>(
+      `/api/tactical-visions/${encodeURIComponent(key)}`
+    );
+  }
+
+  public evaluateThreeLayerTactics(payload: {
+    clubId?: string | null;
+    tacticalVisionKey?: string | null;
+    formationName: string;
+    buildUpStyle: string;
+    defensiveApproach: string;
+    defensiveLineHeight: number;
+    assignments: Array<{
+      slotOrder: number;
+      slotId?: string | null;
+      positionCode: string;
+      playerId: string | null;
+      playerDisplayName?: string | null;
+      role: string;
+      focus: string;
+    }>;
+    benchPlayerIds?: string[];
+    confirmedDoubtfulPlayerIds?: string[];
+  }): Promise<ThreeLayerTacticalEvaluation> {
+    return this.apiFetch<ThreeLayerTacticalEvaluation>('/api/tactical-visions/evaluate', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  }
+
+  public compareTacticalVisions(payload: {
+    visionKeyA: string;
+    visionKeyB: string;
+    config: {
+      clubId?: string | null;
+      formationName: string;
+      buildUpStyle: string;
+      defensiveApproach: string;
+      defensiveLineHeight: number;
+      assignments: Array<{
+        slotOrder: number;
+        slotId?: string | null;
+        positionCode: string;
+        playerId: string | null;
+        playerDisplayName?: string | null;
+        role: string;
+        focus: string;
+      }>;
+      benchPlayerIds?: string[];
+      confirmedDoubtfulPlayerIds?: string[];
+    };
+  }): Promise<{
+    visionA: ThreeLayerTacticalEvaluation;
+    visionB: ThreeLayerTacticalEvaluation;
+    roleAffinityDelta: number;
+    summary: string;
+  }> {
+    return this.apiFetch('/api/tactical-visions/compare', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  }
+
+  public optimizeForTacticalVision(payload: {
+    clubId?: string | null;
+    tacticalVisionKey?: string | null;
+    targetVisionKey: string;
+    mode: VisionOptimizationMode;
+    formationName: string;
+    buildUpStyle: string;
+    defensiveApproach: string;
+    defensiveLineHeight: number;
+    assignments: Array<{
+      slotOrder: number;
+      slotId?: string | null;
+      positionCode: string;
+      playerId: string | null;
+      playerDisplayName?: string | null;
+      role: string;
+      focus: string;
+    }>;
+    benchPlayerIds?: string[];
+    confirmedDoubtfulPlayerIds?: string[];
+  }): Promise<VisionOptimizationResult> {
+    return this.apiFetch<VisionOptimizationResult>('/api/tactical-visions/optimize', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  }
+
+  public listClubCoaches(clubId: string): Promise<ClubCoachRecord[]> {
+    return this.apiFetch<ClubCoachRecord[]>(
+      `/api/clubs/${encodeURIComponent(clubId)}/coaches`
+    );
+  }
+
+  public saveClubCoach(
+    clubId: string,
+    payload: {
+      id?: string;
+      name: string;
+      department: ClubCoachRecord['department'];
+      tacticalVisionKey: string;
+      qualificationLevel: ClubCoachRecord['qualificationLevel'];
+      starRating: number;
+      notes?: string;
+    }
+  ): Promise<ClubCoachRecord> {
+    return this.apiFetch<ClubCoachRecord>(
+      `/api/clubs/${encodeURIComponent(clubId)}/coaches`,
+      {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      }
+    );
+  }
+
+  public deleteClubCoach(coachId: string): Promise<{ deleted: boolean }> {
+    return this.apiFetch<{ deleted: boolean }>(
+      `/api/coaches/${encodeURIComponent(coachId)}`,
+      { method: 'DELETE' }
+    );
+  }
+
+  public listClubRoleFamiliarities(clubId: string): Promise<PlayerRoleFamiliarityRecord[]> {
+    return this.apiFetch<PlayerRoleFamiliarityRecord[]>(
+      `/api/clubs/${encodeURIComponent(clubId)}/role-familiarities`
+    );
+  }
+
+  public savePlayerRoleFamiliarity(
+    playerId: string,
+    payload: {
+      positionCode: string;
+      roleName: string;
+      baseFamiliarity?: RoleFamiliarityTier;
+      potentialCoachFamiliarity?: RoleFamiliarityTier;
+      confirmedFamiliarity?: RoleFamiliarityTier;
+      notes?: string;
+    }
+  ): Promise<PlayerRoleFamiliarityRecord> {
+    return this.apiFetch<PlayerRoleFamiliarityRecord>(
+      `/api/players/${encodeURIComponent(playerId)}/role-familiarities`,
+      {
+        method: 'PUT',
+        body: JSON.stringify(payload),
+      }
+    );
+  }
+
+  public confirmSnapshotAppliedInGame(
+    matchId: string,
+    snapshotId: string,
+    confirmed = true
+  ): Promise<MatchTacticalSnapshot> {
+    return this.apiFetch<MatchTacticalSnapshot>(
+      `/api/matches/${encodeURIComponent(matchId)}/tactical-snapshots/${encodeURIComponent(snapshotId)}/confirm-applied`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ confirmed }),
+      }
+    );
+  }
+
+  // ============================================================
+  // Phase 3 — Gemini Video Intelligence & Half-Time Analyst API
+  // ============================================================
+
+  public getAiModelRegistry(): Promise<{
+    models: GeminiModelCapability[];
+    status: GeminiServiceStatus;
+  }> {
+    return this.apiFetch('/api/ai/models');
+  }
+
+  public testGeminiConnection(modelId?: string): Promise<GeminiConnectionTestResult> {
+    return this.apiFetch<GeminiConnectionTestResult>('/api/ai/test-connection', {
+      method: 'POST',
+      body: JSON.stringify({ modelId }),
+    });
+  }
+
+  public getAiBudgetSummary(): Promise<{
+    datePrefix: string;
+    spentUsd: number;
+    requestCount: number;
+    dailyBudgetUsd: number;
+    perMatchBudgetUsd: number;
+    remainingDailyUsd: number;
+  }> {
+    return this.apiFetch('/api/ai/budget-summary');
+  }
+
+  public getMatchAnalysisBundle(
+    matchId: string,
+    jobId?: string
+  ): Promise<MatchAnalysisBundle> {
+    const qs = jobId ? `?jobId=${encodeURIComponent(jobId)}` : '';
+    return this.apiFetch<MatchAnalysisBundle>(
+      `/api/matches/${encodeURIComponent(matchId)}/analysis${qs}`
+    );
+  }
+
+  public startMatchVideoAnalysis(
+    matchId: string,
+    payload: {
+      sessionId?: string | null;
+      half: 'first_half' | 'second_half';
+      analysisMode?: VideoAnalysisMode;
+      language?: AnalysisLanguage;
+      privacyAuthorized: boolean;
+      entireDisplayAcknowledged?: boolean;
+      forceReanalyze?: boolean;
+    }
+  ): Promise<{ job: AiAnalysisJobRecord; reusedFromCache: boolean }> {
+    return this.apiFetch(`/api/matches/${encodeURIComponent(matchId)}/analysis/start`, {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  }
+
+  public getAnalysisJob(jobId: string): Promise<AiAnalysisJobRecord> {
+    return this.apiFetch<AiAnalysisJobRecord>(
+      `/api/analysis-jobs/${encodeURIComponent(jobId)}`
+    );
+  }
+
+  public cancelAnalysisJob(jobId: string): Promise<AiAnalysisJobRecord> {
+    return this.apiFetch<AiAnalysisJobRecord>(
+      `/api/analysis-jobs/${encodeURIComponent(jobId)}/cancel`,
+      { method: 'POST' }
+    );
+  }
+
+  public retryAnalysisRemoteCleanup(
+    jobId: string
+  ): Promise<{ assets: AiAnalysisAssetRecord[] }> {
+    return this.apiFetch(`/api/analysis-jobs/${encodeURIComponent(jobId)}/retry-cleanup`, {
+      method: 'POST',
+    });
+  }
+
+  public saveRecommendationDecision(
+    matchId: string,
+    recommendationId: string,
+    payload: {
+      decisionStatus: RecommendationDecisionStatus;
+      modifiedValue?: string | null;
+      appliedInGame?: boolean;
+      userNotes?: string;
+    }
+  ): Promise<AiRecommendationDecisionRecord> {
+    return this.apiFetch<AiRecommendationDecisionRecord>(
+      `/api/matches/${encodeURIComponent(matchId)}/analysis/recommendations/${encodeURIComponent(recommendationId)}/decision`,
+      {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      }
+    );
+  }
+
+  public applyAcceptedRecommendationsToAdjustment(
+    matchId: string,
+    payload: {
+      jobId: string;
+      recommendationIds: string[];
+      appliedInGameConfirmed?: boolean;
+      notes?: string;
+    }
+  ): Promise<MatchTacticalSnapshot> {
+    return this.apiFetch<MatchTacticalSnapshot>(
+      `/api/matches/${encodeURIComponent(matchId)}/analysis/apply-adjustment`,
+      {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      }
+    );
+  }
+
+  public saveAdjustmentAsNewClubPreset(
+    matchId: string,
+    payload: {
+      snapshotId: string;
+      presetName: string;
+    }
+  ): Promise<TacticalPreset> {
+    return this.apiFetch<TacticalPreset>(
+      `/api/matches/${encodeURIComponent(matchId)}/analysis/save-preset`,
+      {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      }
+    );
+  }
+
+  public async importBrowserPreviewTestClip(
+    matchId: string,
+    half: 'first_half' | 'second_half',
+    file: File
+  ): Promise<{
+    sessionId: string;
+    segmentId: string;
+    filePath: string;
+    durationSeconds: number;
+    sizeBytes: number;
+    resolution: string | null;
+  }> {
+    const buffer = await file.arrayBuffer();
+    const res = await this.authorizedFetch(
+      `/api/matches/${encodeURIComponent(matchId)}/test-video-import?half=${encodeURIComponent(half)}`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'video/mp4',
+          'X-File-Name': file.name || 'test-clip.mp4',
+        },
+        body: buffer,
+      }
+    );
+    if (!res.ok) {
+      let msg = `Import failed (${res.status})`;
+      try {
+        const errBody = (await res.json()) as { error?: string };
+        if (errBody.error) msg = errBody.error;
+      } catch {
+        // ignore
+      }
+      throw new Error(msg);
+    }
+    return res.json();
+  }
+
+  public async fetchEvidenceFrameObjectUrl(
+    matchId: string,
+    fileName: string
+  ): Promise<string> {
+    const res = await this.authorizedFetch(
+      `/api/evidence-frames/${encodeURIComponent(matchId)}/${encodeURIComponent(fileName)}`,
+      { method: 'GET' }
+    );
+    if (!res.ok) {
+      throw new Error(`Failed to load evidence frame (${res.status})`);
+    }
+    const blob = await res.blob();
+    return URL.createObjectURL(blob);
   }
 }
 

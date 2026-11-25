@@ -30,20 +30,30 @@ export function MatchReportsView() {
         <h2 className="text-[16px] font-semibold text-white mb-4">Saved Half-Time Briefings</h2>
         {halftimeReports.length > 0 ? (
           <div className="divide-y divide-white/[0.06]">
-            {halftimeReports.map((item) => (
-              <div
-                key={item.matchId}
-                className="py-3.5 flex flex-wrap items-center justify-between gap-4 text-[13px]"
-              >
-                <div>
-                  <div className="font-medium text-white">
-                    vs {item.opponentName} · {item.competition}
+            {halftimeReports.map((item) => {
+              const matched = matches.find((m) => m.id === item.matchId);
+              const visionKey = matched?.tacticalConfiguration?.tacticalVisionKey;
+              return (
+                <div
+                  key={item.matchId}
+                  className="py-3.5 flex flex-wrap items-center justify-between gap-4 text-[13px]"
+                >
+                  <div>
+                    <div className="font-medium text-white flex items-center gap-2 flex-wrap">
+                      <span>
+                        vs {item.opponentName} · {item.competition}
+                      </span>
+                      {visionKey && visionKey !== 'unspecified' && (
+                        <span className="px-2 py-0.5 rounded bg-emerald-500/10 border border-emerald-500/30 text-[10px] font-mono text-emerald-300 uppercase">
+                          {visionKey.replace(/_/g, ' ')}
+                        </span>
+                      )}
+                    </div>
+                    <div className="text-[12px] text-[#8A94A6] font-mono tabular-nums mt-0.5">
+                      {item.matchDate} · Score {item.report.section1MatchSituation.scoreLabel} ·
+                      Model {item.report.modelUsed}
+                    </div>
                   </div>
-                  <div className="text-[12px] text-[#8A94A6] font-mono tabular-nums mt-0.5">
-                    {item.matchDate} · Score {item.report.section1MatchSituation.scoreLabel} ·
-                    Model {item.report.modelUsed}
-                  </div>
-                </div>
 
                 <div className="flex items-center gap-2">
                   <button
@@ -74,7 +84,8 @@ export function MatchReportsView() {
                   </button>
                 </div>
               </div>
-            ))}
+              );
+            })}
           </div>
         ) : (
           <div className="py-6 text-[13px] text-[#8A94A6]">

@@ -4,16 +4,21 @@ import {
   Copy,
   Eye,
   EyeOff,
+  GitCompare,
   Plus,
   RotateCcw,
   Save,
   Search,
   ShieldAlert,
+  Sparkles,
   Star,
   Trash2,
+  Wrench,
 } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { TacticalPitchSVG } from '../components/pitch/TacticalPitchSVG';
+import { SearchablePlayerSelect } from '../components/tactics/SearchablePlayerSelect';
+import { CompareVisionsModal, OptimizeVisionModal } from '../components/tactics/VisionModals';
 import { useApp } from '../context/AppContext';
 import { getFormationPositions } from '../data/tacticalCatalog';
 import { desktopBridge } from '../services/desktopBridge';
@@ -21,8 +26,14 @@ import type {
   CatalogFormation,
   CatalogRole,
   PlayerRoleAssignment,
+  PlayerRoleFamiliarityRecord,
+  RoleFamiliarityTier,
   TacticalPreset,
   TacticalPresetStatus,
+  TacticalVisionKey,
+  TacticalVisionRecord,
+  ThreeLayerTacticalEvaluation,
+  VisionOptimizationResult,
 } from '../types/domain';
 import {
   deriveStableSlotId,
@@ -43,6 +54,7 @@ interface PresetDraft {
   name: string;
   formationId: string | null;
   formationName: string;
+  tacticalVisionKey: TacticalVisionKey | 'unspecified';
   buildUpStyle: string;
   defensiveApproach: string;
   defensiveLineHeight: number;
@@ -57,6 +69,7 @@ function serializeDraft(d: PresetDraft): string {
   return JSON.stringify({
     name: d.name.trim(),
     formationName: d.formationName,
+    tacticalVisionKey: d.tacticalVisionKey,
     buildUpStyle: d.buildUpStyle,
     defensiveApproach: d.defensiveApproach,
     defensiveLineHeight: d.defensiveLineHeight,
@@ -88,6 +101,11 @@ export function TacticalSetupView() {
 
   const [catalogFormations, setCatalogFormations] = useState<CatalogFormation[]>([]);
   const [catalogRoles, setCatalogRoles] = useState<CatalogRole[]>([]);
+  const [tacticalVisions, setTacticalVisions] = useState<TacticalVisionRecord[]>([]);
+  const [familiarities, setFamiliarities] = useState<PlayerRoleFamiliarityRecord[]>([]);
+  const [threeLayerEval, setThreeLayerEval] = useState<ThreeLayerTacticalEvaluation | null>(null);
+  const [showCompareModal, setShowCompareModal] = useState(false);
+  const [showOptimizeModal, setShowOptimizeModal] = useState(false);
   const [selectedPresetId, setSelectedPresetId] = useState<string | null>(null);
   const [draft, setDraft] = useState<PresetDraft | null>(null);
   const [savedSignature, setSavedSignature] = useState<string>('');
@@ -100,17 +118,41 @@ export function TacticalSetupView() {
 
   useEffect(() => {
     let active = true;
-    Promise.all([desktopBridge.listCatalogFormations(), desktopBridge.listCatalogRoles()])
-      .then(([fList, rList]) => {
+    Promise.all([
+      desktopBridge.listCatalogFormations(),
+      desktopBridge.listCatalogRoles(),
+      desktopBridge.getTacticalVisionCatalog().catch(() => null),
+    ])
+      .then(([fList, rList, vCat]) => {
         if (!active) return;
         setCatalogFormations(fList);
         setCatalogRoles(rList);
+        if (vCat) setTacticalVisions(vCat.visions);
       })
       .catch(() => {});
     return () => {
       active = false;
     };
   }, []);
+
+  useEffect(() => {
+    if (!activeClub) {
+      setFamiliarities([]);
+      return;
+    }
+    let active = true;
+    desktopBridge
+      .listClubRoleFamiliarities(activeClub.id)
+      .then((list) => {
+        if (active) setFamiliarities(list);
+      })
+      .catch(() => {
+        if (active) setFamiliarities([]);
+      });
+    return () => {
+      active = false;
+    };
+  }, [activeClub?.id]);
 
   const formations = useMemo(() => {
     if (catalogFormations.length > 0) return catalogFormations.map((f) => f.name);
@@ -255,6 +297,7 @@ export function TacticalSetupView() {
         name: preset.name,
         formationId: preset.formationId,
         formationName: preset.formationName,
+        tacticalVisionKey: preset.tacticalVisionKey ?? 'unspecified',
         buildUpStyle: preset.buildUpStyle,
         defensiveApproach: preset.defensiveApproach,
         defensiveLineHeight: preset.defensiveLineHeight,
@@ -279,9 +322,16 @@ export function TacticalSetupView() {
           : `Tactical Setup #${tacticalPresets.length + 1}`,
       formationId: catForm?.id ?? null,
       formationName,
-      buildUpStyle: activeClub?.profile.preferredAttackingStyle || 'Balanced',
-      defensiveApproach: activeClub?.profile.preferredDefensiveStyle || 'Balanced',
-      defensiveLineHeight: 55,
+      tacticalVisionKey: activeClub?.profile.primaryTacticalVisionKey || 'standard',
+      buildUpStyle:
+        activeClub?.profile.preferredBuildUpStyle ||
+        activeClub?.profile.preferredAttackingStyle ||
+        'Balanced',
+      defensiveApproach:
+        activeClub?.profile.preferredDefensiveApproach ||
+        activeClub?.profile.preferredDefensiveStyle ||
+        'Balanced',
+      defensiveLineHeight: activeClub?.profile.preferredDefensiveLineHeight ?? 55,
       isDefault: tacticalPresets.length === 0,
       presetStatus: 'match_ready',
       benchPlayerIds: [],
@@ -364,6 +414,47 @@ export function TacticalSetupView() {
     });
   }, [draft, players, confirmedDoubtfulIds]);
 
+  // Live debounced 3-Layer Tactical Vision Evaluation
+  useEffect(() => {
+    if (!draft || !activeClub) {
+      setThreeLayerEval(null);
+      return;
+    }
+    let active = true;
+    const timer = window.setTimeout(() => {
+      desktopBridge
+        .evaluateThreeLayerTactics({
+          clubId: activeClub.id,
+          tacticalVisionKey: draft.tacticalVisionKey,
+          formationName: draft.formationName,
+          buildUpStyle: draft.buildUpStyle,
+          defensiveApproach: draft.defensiveApproach,
+          defensiveLineHeight: draft.defensiveLineHeight,
+          assignments: draft.assignments.map((a) => ({
+            slotOrder: a.slotIndex,
+            slotId: a.slotId,
+            positionCode: toCanonicalFc26Position(a.positionCode) ?? a.positionCode.toUpperCase(),
+            playerId: a.playerId,
+            playerDisplayName: a.playerName,
+            role: a.role,
+            focus: a.focus,
+          })),
+          benchPlayerIds: draft.benchPlayerIds,
+          confirmedDoubtfulPlayerIds: confirmedDoubtfulIds,
+        })
+        .then((ev) => {
+          if (active) setThreeLayerEval(ev);
+        })
+        .catch(() => {
+          // keep previous evaluation if transient
+        });
+    }, 180);
+    return () => {
+      active = false;
+      window.clearTimeout(timer);
+    };
+  }, [draft, activeClub?.id, confirmedDoubtfulIds, familiarities]);
+
   const isDirty = useMemo(() => {
     if (!draft) return false;
     if (draft.id === null) {
@@ -423,6 +514,7 @@ export function TacticalSetupView() {
           formationId:
             catalogFormations.find((f) => f.name === draft.formationName)?.id ?? draft.formationId,
           formationName: draft.formationName,
+          tacticalVisionKey: draft.tacticalVisionKey,
           buildUpStyle: draft.buildUpStyle,
           defensiveApproach: draft.defensiveApproach,
           defensiveLineHeight: draft.defensiveLineHeight,
@@ -762,6 +854,113 @@ export function TacticalSetupView() {
       ...draft,
       benchPlayerIds: [...draft.benchPlayerIds, playerId].slice(0, 9),
     });
+  }
+
+  function handleFixLayer2Conflicts() {
+    if (!draft || !threeLayerEval) return;
+    const conflicts = threeLayerEval.layer2OfficialRequirements.conflicts;
+    if (conflicts.length === 0) return;
+    let nextBuildUp = draft.buildUpStyle;
+    let nextDefensive = draft.defensiveApproach;
+    for (const c of conflicts) {
+      if (c.parameterType === 'build_up_style') nextBuildUp = c.suggestedCorrectionValue;
+      if (c.parameterType === 'defensive_approach') nextDefensive = c.suggestedCorrectionValue;
+    }
+    setDraft({
+      ...draft,
+      buildUpStyle: nextBuildUp,
+      defensiveApproach: nextDefensive,
+    });
+    notify(
+      'success',
+      `Applied official ${threeLayerEval.tacticalVisionName} Layer 2 setting(s). Save preset when ready.`
+    );
+  }
+
+  async function handleFamiliarityChange(
+    playerId: string,
+    positionCode: string,
+    roleName: string,
+    confirmedFamiliarity: RoleFamiliarityTier
+  ) {
+    try {
+      const saved = await desktopBridge.savePlayerRoleFamiliarity(playerId, {
+        positionCode,
+        roleName,
+        confirmedFamiliarity,
+      });
+      setFamiliarities((prev) => {
+        const filtered = prev.filter(
+          (f) =>
+            !(
+              f.playerId === saved.playerId &&
+              f.positionCode === saved.positionCode &&
+              f.roleName === saved.roleName
+            )
+        );
+        return [...filtered, saved];
+      });
+      notify('success', `Saved confirmed familiarity (${confirmedFamiliarity.replace(/_/g, ' ')}) for ${roleName}.`);
+    } catch (err) {
+      notify('error', err instanceof Error ? err.message : 'Failed to save role familiarity');
+    }
+  }
+
+  function handleApplyOptimizationChanges(
+    result: VisionOptimizationResult,
+    selectedChangeIndices: number[]
+  ) {
+    if (!draft) return;
+    const selectedSet = new Set(selectedChangeIndices);
+    let nextBuildUp = draft.buildUpStyle;
+    let nextDefensive = draft.defensiveApproach;
+    let nextLineHeight = draft.defensiveLineHeight;
+    let nextAssignments = [...draft.assignments];
+
+    result.proposals.forEach((change, idx) => {
+      if (!selectedSet.has(idx)) return;
+      if (change.category === 'build_up_style') {
+        nextBuildUp = change.proposedValue;
+      } else if (change.category === 'defensive_approach') {
+        nextDefensive = change.proposedValue;
+      } else if (change.category === 'defensive_line_height') {
+        const parsed = Number(change.proposedValue);
+        if (!Number.isNaN(parsed)) nextLineHeight = parsed;
+      } else if (change.slotOrder !== undefined) {
+        const proposedSlot = result.afterPreview.assignments.find(
+          (s) => s.slotOrder === change.slotOrder
+        );
+        if (!proposedSlot) return;
+        nextAssignments = nextAssignments.map((slot) => {
+          if (slot.slotIndex !== change.slotOrder) return slot;
+          if (change.category === 'role_focus') {
+            return { ...slot, role: proposedSlot.role, focus: proposedSlot.focus };
+          }
+          if (change.category === 'player_swap') {
+            const p = proposedSlot.playerId ? playerById.get(proposedSlot.playerId) : undefined;
+            return {
+              ...slot,
+              playerId: proposedSlot.playerId,
+              playerName: p ? resolvePlayerDisplayName(p) : proposedSlot.playerName ?? null,
+            };
+          }
+          return slot;
+        });
+      }
+    });
+
+    setDraft({
+      ...draft,
+      tacticalVisionKey: result.targetVisionKey,
+      buildUpStyle: nextBuildUp,
+      defensiveApproach: nextDefensive,
+      defensiveLineHeight: nextLineHeight,
+      assignments: nextAssignments,
+    });
+    notify(
+      'success',
+      `Applied ${selectedChangeIndices.length} selected optimization change(s) to draft. Review and click Save Tactical Setup.`
+    );
   }
 
   const canSaveMatchReady = Boolean(
@@ -1115,6 +1314,133 @@ export function TacticalSetupView() {
                 </div>
               </div>
 
+              {/* Phase 3 — Tactical Vision Selector & Comparison/Optimizer Controls */}
+              <div className="rounded-md border border-white/[0.08] bg-[#0C0F14] p-4 space-y-3">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div>
+                    <div className="text-[13px] font-semibold text-white">
+                      EA SPORTS FC 26 Tactical Vision
+                    </div>
+                    <div className="text-[11px] text-[#7D8798]">
+                      Selecting a Tactical Vision never silently overwrites your Build-Up,
+                      Defensive Approach, or player roles.
+                    </div>
+                  </div>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <button
+                      type="button"
+                      disabled={tacticalVisions.length < 2}
+                      onClick={() => setShowCompareModal(true)}
+                      className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded border border-white/[0.12] hover:border-emerald-500/50 text-[11px] text-[#D7DDE7]"
+                    >
+                      <GitCompare className="w-3.5 h-3.5 text-emerald-400" />
+                      Compare Visions
+                    </button>
+                    <button
+                      type="button"
+                      disabled={tacticalVisions.length === 0}
+                      onClick={() => setShowOptimizeModal(true)}
+                      className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded border border-emerald-500/40 bg-emerald-600/15 hover:bg-emerald-600/25 text-[11px] text-emerald-200 font-medium"
+                    >
+                      <Sparkles className="w-3.5 h-3.5" />
+                      Optimize for Vision
+                    </button>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-3 items-center">
+                  <select
+                    value={draft.tacticalVisionKey}
+                    onChange={(e) =>
+                      setDraft({
+                        ...draft,
+                        tacticalVisionKey: e.target.value as TacticalVisionKey | 'unspecified',
+                      })
+                    }
+                    className="w-full bg-[#12151B] border border-white/[0.12] rounded-md px-3 py-2 text-[13px] text-white"
+                  >
+                    <option value="unspecified">Unspecified (No Tactical Vision Target)</option>
+                    {tacticalVisions.map((v) => (
+                      <option key={v.internalKey} value={v.internalKey}>
+                        {v.displayName}
+                        {v.aliases.length > 0 ? ` (${v.aliases[0]})` : ''}
+                      </option>
+                    ))}
+                  </select>
+
+                  {threeLayerEval && (
+                    <div className="text-[11px] font-mono text-[#C5CCD7] flex flex-wrap items-center gap-3">
+                      <span
+                        className={
+                          threeLayerEval.layer1FcIqLegality.valid
+                            ? 'text-emerald-400'
+                            : 'text-red-400'
+                        }
+                      >
+                        L1 Legality: {threeLayerEval.layer1FcIqLegality.valid ? 'OK' : 'Blocked'}
+                      </span>
+                      <span
+                        className={
+                          threeLayerEval.layer2OfficialRequirements.verifiedVisionCompliant
+                            ? 'text-emerald-400'
+                            : 'text-amber-300'
+                        }
+                      >
+                        L2 Vision Req:{' '}
+                        {threeLayerEval.layer2OfficialRequirements.verifiedVisionCompliant
+                          ? 'Compliant'
+                          : `${threeLayerEval.layer2OfficialRequirements.conflicts.length} Conflict(s)`}
+                      </span>
+                      <span className="text-sky-300">
+                        L3 Affinity: {threeLayerEval.layer3RoleAffinity.matchedCount} of{' '}
+                        {threeLayerEval.layer3RoleAffinity.assignedRoleCount}
+                        {threeLayerEval.layer3RoleAffinity.unknownCount > 0
+                          ? ` (${threeLayerEval.layer3RoleAffinity.unknownCount} unknown)`
+                          : ''}
+                      </span>
+                    </div>
+                  )}
+                </div>
+
+                {/* Layer 2 Official Conflict Banner with Explicit 1-Click Fix */}
+                {threeLayerEval &&
+                  !threeLayerEval.layer2OfficialRequirements.verifiedVisionCompliant &&
+                  threeLayerEval.layer2OfficialRequirements.conflicts.length > 0 && (
+                    <div className="rounded border border-amber-500/40 bg-amber-500/[0.08] p-3 flex flex-wrap items-start justify-between gap-3 text-[12px]">
+                      <div className="space-y-1 text-amber-100">
+                        <div className="font-semibold flex items-center gap-1.5">
+                          <AlertTriangle className="w-3.5 h-3.5 text-amber-400" />
+                          Layer 2 Official FC 26 Requirement Conflict (
+                          {threeLayerEval.tacticalVisionName})
+                        </div>
+                        <ul className="space-y-0.5 text-[11px] text-amber-200/90">
+                          {threeLayerEval.layer2OfficialRequirements.conflicts.map((c, idx) => (
+                            <li key={idx}>• {c.explanation}</li>
+                          ))}
+                        </ul>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={handleFixLayer2Conflicts}
+                        className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded bg-amber-600 hover:bg-amber-500 text-white text-[11px] font-medium shrink-0"
+                      >
+                        <Wrench className="w-3.5 h-3.5" />
+                        Fix Build-Up/Defensive Setting
+                      </button>
+                    </div>
+                  )}
+
+                {/* Layer 3 Advisory Role Affinity & Coach Potential Summary */}
+                {threeLayerEval && draft.tacticalVisionKey !== 'unspecified' && (
+                  <div className="text-[11px] text-[#9AA4B4] border-t border-white/[0.06] pt-2 space-y-0.5">
+                    <div>{threeLayerEval.layer3RoleAffinity.coachPotentialSummary.note}</div>
+                    <div className="text-[10px] text-[#7D8798]">
+                      {threeLayerEval.layer3RoleAffinity.disclaimer}
+                    </div>
+                  </div>
+                )}
+              </div>
+
               <div>
                 <div className="flex items-center justify-between mb-1.5">
                   <label className="text-[12px] text-[#9AA4B4]">Defensive Line Height</label>
@@ -1211,8 +1537,9 @@ export function TacticalSetupView() {
                       <tr className="border-b border-white/[0.08] text-[#7D8798]">
                         <th className="py-2 pr-2 font-medium">Position</th>
                         <th className="py-2 pr-2 font-medium">Assigned Player</th>
-                        <th className="py-2 pr-2 font-medium">FC IQ Role</th>
-                        <th className="py-2 font-medium">Compatible Focus</th>
+                        <th className="py-2 pr-2 font-medium">FC IQ Role &amp; Vision Affinity</th>
+                        <th className="py-2 pr-2 font-medium">Focus</th>
+                        <th className="py-2 font-medium">Familiarity</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-white/[0.06]">
@@ -1234,6 +1561,18 @@ export function TacticalSetupView() {
                         const currentEval = currentPlayer
                           ? evaluatePlayerEligibility(currentPlayer)
                           : null;
+
+                        const slotAffinity = threeLayerEval?.layer3RoleAffinity.slotAffinities.find(
+                          (s) => s.slotOrder === slot.slotIndex
+                        );
+                        const famRecord = currentPlayer
+                          ? familiarities.find(
+                              (f) =>
+                                f.playerId === currentPlayer.id &&
+                                f.positionCode === canonicalPos &&
+                                f.roleName === slot.role
+                            )
+                          : undefined;
 
                         const selectOptions =
                           currentPlayer &&
@@ -1269,43 +1608,15 @@ export function TacticalSetupView() {
                               )}
                             </td>
                             <td className="py-2 pr-2 align-top space-y-1">
-                              <select
-                                value={slot.playerId ?? ''}
-                                onChange={(e) => handleAssignPlayer(slot, e.target.value)}
-                                className={`w-full bg-[#0C0F14] border rounded px-2 py-1 text-[12px] text-white ${
-                                  currentEval && !currentEval.eligible
-                                    ? 'border-red-500/70'
-                                    : currentEval?.requiresConfirmation
-                                      ? 'border-amber-500/60'
-                                      : 'border-white/[0.1]'
-                                }`}
-                              >
-                                <option value="">Unassigned slot</option>
-                                {selectOptions.map((p) => {
-                                  const evalRes = evaluatePlayerEligibility(p);
-                                  const usedElsewhere =
-                                    assignedIds.has(p.id) && slot.playerId !== p.id;
-                                  const isBlockedOption =
-                                    !evalRes.eligible && slot.playerId !== p.id;
-                                  const statusSuffix = !evalRes.eligible
-                                    ? ` · [${evalRes.shortBadge.toUpperCase()}]`
-                                    : evalRes.requiresConfirmation
-                                      ? ' · [DOUBTFUL]'
-                                      : '';
-                                  return (
-                                    <option
-                                      key={p.id}
-                                      value={p.id}
-                                      disabled={usedElsewhere || isBlockedOption}
-                                    >
-                                      {resolvePlayerDisplayName(p)} ({p.position}
-                                      {p.overallRating ? ` · ${p.overallRating}` : ''})
-                                      {statusSuffix}
-                                      {usedElsewhere ? ' — In XI' : ''}
-                                    </option>
-                                  );
-                                })}
-                              </select>
+                              <SearchablePlayerSelect
+                                value={slot.playerId ?? null}
+                                options={selectOptions}
+                                assignedIds={assignedIds}
+                                slotPosition={canonicalPos}
+                                onChange={(nextPlayerId) => handleAssignPlayer(slot, nextPlayerId)}
+                                unassignedLabel="Unassigned slot"
+                                triggerBgClass="bg-[#0C0F14]"
+                              />
                               {currentEval && !currentEval.eligible && (
                                 <div className="text-[11px] text-red-300 space-y-1">
                                   <div>Invalid: {currentEval.reasons.join(' ')}</div>
@@ -1328,7 +1639,7 @@ export function TacticalSetupView() {
                                 </div>
                               )}
                             </td>
-                            <td className="py-2 pr-2 align-top">
+                            <td className="py-2 pr-2 align-top space-y-1">
                               <select
                                 value={slot.role}
                                 onChange={(e) => handleRoleChange(slot, e.target.value)}
@@ -1340,8 +1651,32 @@ export function TacticalSetupView() {
                                   </option>
                                 ))}
                               </select>
+                              {slotAffinity && draft.tacticalVisionKey !== 'unspecified' && (
+                                <div className="flex items-center gap-1.5 flex-wrap">
+                                  <span
+                                    className={`text-[10px] font-mono ${
+                                      slotAffinity.affinityStatus === 'associated'
+                                        ? 'text-emerald-400'
+                                        : slotAffinity.affinityStatus === 'not_associated'
+                                          ? 'text-[#8A94A6]'
+                                          : 'text-amber-300'
+                                    }`}
+                                  >
+                                    {slotAffinity.affinityStatus === 'associated'
+                                      ? 'Vision Associated'
+                                      : slotAffinity.affinityStatus === 'not_associated'
+                                        ? 'Not Associated (Legal)'
+                                        : 'Unknown Affinity'}
+                                  </span>
+                                  {slotAffinity.coachBonusNote && (
+                                    <span className="text-[10px] text-sky-300 font-mono">
+                                      · {slotAffinity.coachBonusNote}
+                                    </span>
+                                  )}
+                                </div>
+                              )}
                             </td>
-                            <td className="py-2 align-top">
+                            <td className="py-2 pr-2 align-top">
                               <select
                                 value={slot.focus}
                                 onChange={(e) => updateSlot(slot.slotIndex, { focus: e.target.value })}
@@ -1353,6 +1688,30 @@ export function TacticalSetupView() {
                                   </option>
                                 ))}
                               </select>
+                            </td>
+                            <td className="py-2 align-top">
+                              {currentPlayer ? (
+                                <select
+                                  value={famRecord?.confirmedFamiliarity ?? 'unknown'}
+                                  onChange={(e) =>
+                                    void handleFamiliarityChange(
+                                      currentPlayer.id,
+                                      canonicalPos,
+                                      slot.role,
+                                      e.target.value as RoleFamiliarityTier
+                                    )
+                                  }
+                                  title="User-confirmed FC 26 in-game role familiarity"
+                                  className="w-full bg-[#0C0F14] border border-white/[0.1] rounded px-1.5 py-1 text-[11px] text-[#D7DDE7]"
+                                >
+                                  <option value="unknown">Unknown</option>
+                                  <option value="none">None</option>
+                                  <option value="role_plus">Role+</option>
+                                  <option value="role_plus_plus">Role++</option>
+                                </select>
+                              ) : (
+                                <span className="text-[11px] text-[#647082]">—</span>
+                              )}
                             </td>
                           </tr>
                         );
@@ -1437,12 +1796,20 @@ export function TacticalSetupView() {
             />
             <div className="mt-4 pt-4 border-t border-white/[0.08] grid grid-cols-2 gap-3 text-[12px]">
               <div>
-                <div className="text-[#7D8798]">Build-Up Style</div>
-                <div className="text-white font-medium mt-0.5">{draft.buildUpStyle}</div>
+                <div className="text-[#7D8798]">Tactical Vision</div>
+                <div className="text-white font-medium mt-0.5">
+                  {tacticalVisions.find((v) => v.internalKey === draft.tacticalVisionKey)
+                    ?.displayName ?? 'Unspecified'}
+                </div>
               </div>
               <div>
-                <div className="text-[#7D8798]">Defensive Approach</div>
-                <div className="text-white font-medium mt-0.5">{draft.defensiveApproach}</div>
+                <div className="text-[#7D8798]">Build-Up / Defending</div>
+                <div className="text-white font-medium mt-0.5">
+                  {draft.buildUpStyle} · {draft.defensiveApproach}
+                </div>
+              </div>
+              <div className="col-span-2 text-[10px] text-[#7D8798]">
+                Arrows above show <strong className="text-[#C5CCD7]">Illustrative Role Movement (Pre-Match Setup)</strong> — not observed match video evidence.
               </div>
               <div className="col-span-2 flex items-center gap-2 pt-2 border-t border-white/[0.06] text-[11px]">
                 {eligibilityReport && !eligibilityReport.hasBlockingIssues ? (
@@ -1464,6 +1831,86 @@ export function TacticalSetupView() {
             </div>
           </div>
         </div>
+      )}
+
+      {/* Compare Tactical Visions Modal */}
+      {showCompareModal && draft && tacticalVisions.length >= 2 && (
+        <CompareVisionsModal
+          visions={tacticalVisions}
+          initialVisionA={
+            draft.tacticalVisionKey !== 'unspecified'
+              ? draft.tacticalVisionKey
+              : tacticalVisions[0].internalKey
+          }
+          initialVisionB={
+            tacticalVisions.find((v) => v.internalKey !== draft.tacticalVisionKey)?.internalKey ??
+            tacticalVisions[1].internalKey
+          }
+          onCompare={(visionKeyA, visionKeyB) =>
+            desktopBridge.compareTacticalVisions({
+              visionKeyA,
+              visionKeyB,
+              config: {
+                clubId: activeClub.id,
+                formationName: draft.formationName,
+                buildUpStyle: draft.buildUpStyle,
+                defensiveApproach: draft.defensiveApproach,
+                defensiveLineHeight: draft.defensiveLineHeight,
+                assignments: draft.assignments.map((a) => ({
+                  slotOrder: a.slotIndex,
+                  slotId: a.slotId,
+                  positionCode:
+                    toCanonicalFc26Position(a.positionCode) ?? a.positionCode.toUpperCase(),
+                  playerId: a.playerId,
+                  playerDisplayName: a.playerName,
+                  role: a.role,
+                  focus: a.focus,
+                })),
+                benchPlayerIds: draft.benchPlayerIds,
+                confirmedDoubtfulPlayerIds: confirmedDoubtfulIds,
+              },
+            })
+          }
+          onClose={() => setShowCompareModal(false)}
+        />
+      )}
+
+      {/* 4-Mode Vision Optimizer Modal */}
+      {showOptimizeModal && draft && tacticalVisions.length > 0 && (
+        <OptimizeVisionModal
+          visions={tacticalVisions}
+          initialTargetVision={
+            draft.tacticalVisionKey !== 'unspecified'
+              ? draft.tacticalVisionKey
+              : tacticalVisions[0].internalKey
+          }
+          onOptimize={(targetVisionKey, mode) =>
+            desktopBridge.optimizeForTacticalVision({
+              clubId: activeClub.id,
+              tacticalVisionKey: draft.tacticalVisionKey,
+              targetVisionKey,
+              mode,
+              formationName: draft.formationName,
+              buildUpStyle: draft.buildUpStyle,
+              defensiveApproach: draft.defensiveApproach,
+              defensiveLineHeight: draft.defensiveLineHeight,
+              assignments: draft.assignments.map((a) => ({
+                slotOrder: a.slotIndex,
+                slotId: a.slotId,
+                positionCode:
+                  toCanonicalFc26Position(a.positionCode) ?? a.positionCode.toUpperCase(),
+                playerId: a.playerId,
+                playerDisplayName: a.playerName,
+                role: a.role,
+                focus: a.focus,
+              })),
+              benchPlayerIds: draft.benchPlayerIds,
+              confirmedDoubtfulPlayerIds: confirmedDoubtfulIds,
+            })
+          }
+          onApplySelectedChanges={handleApplyOptimizationChanges}
+          onClose={() => setShowOptimizeModal(false)}
+        />
       )}
 
       {/* Confirm Reset Modal */}

@@ -100,10 +100,13 @@ export function buildAiMatchTacticalContext(
   const db = resolveDb(dbArg);
   const matchRow = db
     .prepare(`
-      SELECT m.*, c.name as club_name, o.name as opponent_name
+      SELECT m.*, c.name as club_name, o.name as opponent_name,
+             cp.primary_tactical_vision_key, cp.alternative_tactical_vision_key,
+             cp.tactical_flexibility, cp.tactical_philosophy_notes
       FROM matches m
       JOIN clubs c ON c.id = m.club_id
       JOIN opponents o ON o.id = m.opponent_id
+      LEFT JOIN career_profiles cp ON cp.id = m.career_profile_id
       WHERE m.id = ?
     `)
     .get(matchId) as Record<string, unknown> | undefined;
@@ -121,8 +124,14 @@ export function buildAiMatchTacticalContext(
     .get(matchId) as Record<string, unknown> | undefined;
 
   let formationName = String(matchRow.starting_formation);
+  let buildUpStyle = 'Balanced';
+  let defensiveApproach = 'Balanced';
+  let defensiveLineHeight = 55;
+  let tacticalVisionKey = 'unspecified';
+  let benchIdsFromSnapshot: string[] = [];
   let assignments: Array<{
     slotIndex: number;
+    slotId?: string | null;
     positionCode: string;
     playerId: string | null;
     playerName: string | null;
@@ -132,10 +141,15 @@ export function buildAiMatchTacticalContext(
 
   if (snapshotRow) {
     formationName = String(snapshotRow.formation_name || formationName);
+    buildUpStyle = String(snapshotRow.build_up_style || 'Balanced');
+    defensiveApproach = String(snapshotRow.defensive_approach || 'Balanced');
+    defensiveLineHeight = Number(snapshotRow.defensive_line_height ?? 55);
+    tacticalVisionKey = String(snapshotRow.tactical_vision_key || 'unspecified');
     try {
       const parsed = JSON.parse(String(snapshotRow.assignments_json || '[]')) as MatchTacticalSnapshotAssignment[];
       assignments = parsed.map((a, idx) => ({
         slotIndex: typeof a.slotOrder === 'number' ? a.slotOrder : idx,
+        slotId: a.slotId,
         positionCode: a.positionCode,
         playerId: a.playerId,
         playerName: a.playerDisplayName ?? a.playerFullName ?? null,
@@ -144,6 +158,14 @@ export function buildAiMatchTacticalContext(
       }));
     } catch {
       assignments = [];
+    }
+    try {
+      const parsedBench = JSON.parse(String(snapshotRow.bench_json || '[]')) as Array<{ playerId?: string }>;
+      benchIdsFromSnapshot = parsedBench
+        .map((b) => (typeof b === 'string' ? b : b?.playerId ?? ''))
+        .filter(Boolean);
+    } catch {
+      benchIdsFromSnapshot = [];
     }
   } else {
     const configRow = db
@@ -154,6 +176,9 @@ export function buildAiMatchTacticalContext(
 
     if (configRow) {
       formationName = String(configRow.formation || formationName);
+      buildUpStyle = String(configRow.build_up_style || 'Balanced');
+      defensiveApproach = String(configRow.defensive_approach || 'Balanced');
+      defensiveLineHeight = Number(configRow.defensive_line_height ?? 55);
       try {
         assignments = JSON.parse(String(configRow.player_assignments_json || '[]')) as PlayerRoleAssignment[];
       } catch {
@@ -161,6 +186,13 @@ export function buildAiMatchTacticalContext(
       }
     }
   }
+
+  const visionRow =
+    tacticalVisionKey !== 'unspecified'
+      ? (db
+          .prepare('SELECT display_name FROM catalog_tactical_visions WHERE internal_key = ?')
+          .get(tacticalVisionKey) as { display_name: string } | undefined)
+      : undefined;
 
   const catalogFormation = getCatalogFormationByIdOrName(formationName, db);
 
@@ -171,6 +203,10 @@ export function buildAiMatchTacticalContext(
   for (const p of squadRows) {
     squadById.set(String(p.id), p);
   }
+
+  const startingPlayerIds = new Set(
+    assignments.map((a) => a.playerId).filter((id): id is string => Boolean(id))
+  );
 
   const startingXi = assignments.map((a) => {
     const squadPlayer = a.playerId ? squadById.get(a.playerId) : undefined;
@@ -196,7 +232,9 @@ export function buildAiMatchTacticalContext(
 
     return {
       slotIndex: a.slotIndex,
+      slotId: a.slotId ?? undefined,
       positionCode: a.positionCode,
+      playerId: a.playerId,
       playerName: resolvedDisplayName,
       assignedRole: a.role,
       assignedFocus: a.focus,
@@ -227,6 +265,62 @@ export function buildAiMatchTacticalContext(
     };
   });
 
+  // Build bench candidates (from snapshot bench first, plus other eligible squad players not in Starting XI)
+  const benchCandidateIds = new Set<string>(benchIdsFromSnapshot);
+  if (benchCandidateIds.size === 0) {
+    try {
+      const matchBench = JSON.parse(String(matchRow.bench_json || '[]')) as string[];
+      for (const id of matchBench) benchCandidateIds.add(id);
+    } catch {
+      // ignore
+    }
+  }
+
+  const benchPlayers: NonNullable<AiMatchTacticalContext['benchPlayers']> = [];
+  for (const p of squadRows) {
+    const pid = String(p.id);
+    if (startingPlayerIds.has(pid)) continue;
+    const squadStatus = String(p.squad_status ?? 'active');
+    const availability = String(p.availability ?? 'available');
+    const seniorAuth = Boolean(p.senior_selection_authorized);
+    const eligibleForMatch =
+      (squadStatus === 'active' || (squadStatus === 'youth_academy' && seniorAuth)) &&
+      (availability === 'available' || availability === 'doubtful');
+    if (!benchCandidateIds.has(pid) && !eligibleForMatch) continue;
+
+    let secPos: string[] = [];
+    try {
+      secPos = JSON.parse(String(p.secondary_positions_json ?? '[]')) as string[];
+    } catch {
+      secPos = [];
+    }
+
+    benchPlayers.push({
+      playerId: pid,
+      displayName: resolvePlayerDisplayName({
+        displayNameOverride: p.display_name_override ? String(p.display_name_override) : null,
+        displayName: p.display_name ? String(p.display_name) : null,
+        shortName: p.short_name ? String(p.short_name) : null,
+        fullName: p.full_name ? String(p.full_name) : null,
+        name: String(p.name),
+      }),
+      position: String(p.position),
+      secondaryPositions: secPos,
+      overallRating: p.overall_rating === null ? null : Number(p.overall_rating),
+      squadStatus: squadStatus as NonNullable<AiMatchTacticalContext['benchPlayers']>[number]['squadStatus'],
+      availability: availability as NonNullable<AiMatchTacticalContext['benchPlayers']>[number]['availability'],
+      eligibleForMatch,
+    });
+  }
+
+  // Sort explicitly selected bench first, then by overall rating
+  benchPlayers.sort((a, b) => {
+    const aIn = benchCandidateIds.has(a.playerId) ? 0 : 1;
+    const bIn = benchCandidateIds.has(b.playerId) ? 0 : 1;
+    if (aIn !== bIn) return aIn - bIn;
+    return (b.overallRating ?? 0) - (a.overallRating ?? 0);
+  });
+
   // Build compact Role -> Focus lookup table scoped to positions in this formation
   const compatRows = getRoleFocusCompatibilityMatrix({}, db);
   const formationPositions = new Set(
@@ -250,10 +344,38 @@ export function buildAiMatchTacticalContext(
     validRolesByPosition[row.positionCode][row.roleName].push(row.focusName);
   }
 
+  const scoreline =
+    matchRow.halftime_score_for !== null && matchRow.halftime_score_against !== null
+      ? `${matchRow.halftime_score_for}-${matchRow.halftime_score_against}`
+      : null;
+
   return {
     matchId,
+    clubId: String(matchRow.club_id),
     clubName: String(matchRow.club_name),
     opponentName: String(matchRow.opponent_name),
+    competition: String(matchRow.competition ?? ''),
+    venue: String(matchRow.venue ?? ''),
+    scoreline,
+    snapshotId: snapshotRow ? String(snapshotRow.id) : null,
+    tacticalVisionKey: tacticalVisionKey as AiMatchTacticalContext['tacticalVisionKey'],
+    tacticalVisionName: visionRow?.display_name ?? 'Unspecified',
+    buildUpStyle,
+    defensiveApproach,
+    defensiveLineHeight,
+    clubTacticalIdentity: {
+      primaryTacticalVisionKey: String(
+        matchRow.primary_tactical_vision_key ?? 'unspecified'
+      ) as NonNullable<AiMatchTacticalContext['clubTacticalIdentity']>['primaryTacticalVisionKey'],
+      alternativeTacticalVisionKey: String(
+        matchRow.alternative_tactical_vision_key ?? 'unspecified'
+      ) as NonNullable<AiMatchTacticalContext['clubTacticalIdentity']>['alternativeTacticalVisionKey'],
+      tacticalFlexibility: (String(matchRow.tactical_flexibility ?? 'balanced') as
+        | 'strict'
+        | 'balanced'
+        | 'pragmatic'),
+      philosophyNotes: String(matchRow.tactical_philosophy_notes ?? ''),
+    },
     formation: catalogFormation
       ? {
           name: catalogFormation.name,
@@ -263,6 +385,7 @@ export function buildAiMatchTacticalContext(
         }
       : null,
     startingXi,
+    benchPlayers: benchPlayers.slice(0, 16),
     validRolesByPosition,
   };
 }

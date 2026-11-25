@@ -1025,6 +1025,513 @@ export const MIGRATIONS: Migration[] = [
       `);
     },
   },
+  {
+    version: 6,
+    name: 'phase_3_tactical_vision_and_video_intelligence_v6',
+    sql: `
+      -- 1. Tactical Vision Master Catalog (Workstream A)
+      CREATE TABLE IF NOT EXISTS catalog_tactical_vision_sources (
+        id TEXT PRIMARY KEY,
+        source_key TEXT NOT NULL UNIQUE,
+        title TEXT NOT NULL,
+        url TEXT NOT NULL DEFAULT '',
+        source_type TEXT NOT NULL CHECK (source_type IN (
+          'official_ea_documentation',
+          'user_provided_matrix',
+          'in_game_verification',
+          'internal_tactical_recommendation',
+          'unverified_assumption'
+        )),
+        reliability_tier TEXT NOT NULL DEFAULT 'secondary_reference',
+        notes TEXT NOT NULL DEFAULT '',
+        conflict_resolutions_json TEXT NOT NULL DEFAULT '[]',
+        verified_at TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS catalog_tactical_visions (
+        id TEXT PRIMARY KEY,
+        internal_key TEXT NOT NULL UNIQUE,
+        short_code TEXT NOT NULL UNIQUE,
+        display_name TEXT NOT NULL UNIQUE,
+        description TEXT NOT NULL DEFAULT '',
+        attacking_principles_json TEXT NOT NULL DEFAULT '[]',
+        defensive_principles_json TEXT NOT NULL DEFAULT '[]',
+        transition_principles_json TEXT NOT NULL DEFAULT '[]',
+        strengths_json TEXT NOT NULL DEFAULT '[]',
+        weaknesses_json TEXT NOT NULL DEFAULT '[]',
+        evaluation_criteria_json TEXT NOT NULL DEFAULT '[]',
+        source_type TEXT NOT NULL DEFAULT 'official_ea_documentation',
+        source_references_json TEXT NOT NULL DEFAULT '[]',
+        dataset_version TEXT NOT NULL DEFAULT 'fc26-tactical-visions-3.0.0',
+        verification_status TEXT NOT NULL DEFAULT 'verified',
+        last_verified_at TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS catalog_tactical_vision_aliases (
+        id TEXT PRIMARY KEY,
+        vision_id TEXT NOT NULL,
+        alias_key TEXT NOT NULL,
+        alias_label TEXT NOT NULL,
+        alias_type TEXT NOT NULL DEFAULT 'legacy_alias',
+        notes TEXT NOT NULL DEFAULT '',
+        FOREIGN KEY (vision_id) REFERENCES catalog_tactical_visions(id) ON DELETE CASCADE,
+        UNIQUE(vision_id, alias_key)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_tv_aliases_key ON catalog_tactical_vision_aliases(alias_key COLLATE NOCASE);
+
+      CREATE TABLE IF NOT EXISTS catalog_tactical_vision_requirements (
+        id TEXT PRIMARY KEY,
+        vision_id TEXT NOT NULL,
+        parameter_type TEXT NOT NULL CHECK (parameter_type IN ('build_up_style', 'defensive_approach')),
+        allowed_values_json TEXT NOT NULL DEFAULT '[]',
+        canonical_in_game_labels_json TEXT NOT NULL DEFAULT '[]',
+        is_mandatory INTEGER NOT NULL DEFAULT 1 CHECK (is_mandatory IN (0, 1)),
+        source_type TEXT NOT NULL DEFAULT 'official_ea_documentation',
+        source_reference TEXT NOT NULL DEFAULT '',
+        verification_status TEXT NOT NULL DEFAULT 'verified',
+        conflict_notes TEXT NOT NULL DEFAULT '',
+        FOREIGN KEY (vision_id) REFERENCES catalog_tactical_visions(id) ON DELETE CASCADE,
+        UNIQUE(vision_id, parameter_type)
+      );
+
+      CREATE TABLE IF NOT EXISTS catalog_tactical_vision_role_affinities (
+        id TEXT PRIMARY KEY,
+        vision_id TEXT NOT NULL,
+        position_code TEXT NOT NULL,
+        role_id TEXT,
+        role_name TEXT NOT NULL,
+        affinity_status TEXT NOT NULL DEFAULT 'associated' CHECK (affinity_status IN ('associated', 'not_associated', 'unknown')),
+        source_type TEXT NOT NULL DEFAULT 'user_provided_matrix',
+        source_reference TEXT NOT NULL DEFAULT '',
+        dataset_version TEXT NOT NULL DEFAULT 'fc26-tactical-visions-3.0.0',
+        verification_status TEXT NOT NULL DEFAULT 'secondary_reference',
+        FOREIGN KEY (vision_id) REFERENCES catalog_tactical_visions(id) ON DELETE CASCADE,
+        FOREIGN KEY (role_id) REFERENCES catalog_player_roles(id) ON DELETE SET NULL,
+        UNIQUE(vision_id, position_code, role_name)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_tv_role_aff_lookup
+      ON catalog_tactical_vision_role_affinities(vision_id, position_code, role_name COLLATE NOCASE);
+
+      CREATE TABLE IF NOT EXISTS catalog_tactical_vision_setting_affinities (
+        id TEXT PRIMARY KEY,
+        vision_id TEXT NOT NULL,
+        setting_type TEXT NOT NULL CHECK (setting_type IN ('build_up_style', 'defensive_height')),
+        setting_value TEXT NOT NULL,
+        is_associated INTEGER NOT NULL DEFAULT 0 CHECK (is_associated IN (0, 1)),
+        source_type TEXT NOT NULL DEFAULT 'user_provided_matrix',
+        source_reference TEXT NOT NULL DEFAULT '',
+        conflict_with_official INTEGER NOT NULL DEFAULT 0 CHECK (conflict_with_official IN (0, 1)),
+        conflict_note TEXT NOT NULL DEFAULT '',
+        dataset_version TEXT NOT NULL DEFAULT 'fc26-tactical-visions-3.0.0',
+        FOREIGN KEY (vision_id) REFERENCES catalog_tactical_visions(id) ON DELETE CASCADE,
+        UNIQUE(vision_id, setting_type, setting_value)
+      );
+
+      -- 2. Club Coaching Staff & Player Role Familiarity (Section 9)
+      CREATE TABLE IF NOT EXISTS club_coaches (
+        id TEXT PRIMARY KEY,
+        club_id TEXT NOT NULL,
+        name TEXT NOT NULL,
+        department TEXT NOT NULL CHECK (department IN ('attack', 'midfield', 'defense', 'goalkeeping', 'head_coach')),
+        tactical_vision_key TEXT NOT NULL DEFAULT 'standard',
+        qualification_level TEXT NOT NULL DEFAULT 'standard' CHECK (qualification_level IN ('bronze', 'silver', 'gold', 'standard')),
+        star_rating INTEGER NOT NULL DEFAULT 3 CHECK (star_rating >= 1 AND star_rating <= 5),
+        notes TEXT NOT NULL DEFAULT '',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        FOREIGN KEY (club_id) REFERENCES clubs(id) ON DELETE CASCADE
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_club_coaches_club ON club_coaches(club_id);
+
+      CREATE TABLE IF NOT EXISTS player_role_familiarities (
+        id TEXT PRIMARY KEY,
+        player_id TEXT NOT NULL,
+        position_code TEXT NOT NULL,
+        role_name TEXT NOT NULL,
+        base_familiarity TEXT NOT NULL DEFAULT 'unknown' CHECK (base_familiarity IN ('none', 'role_plus', 'role_plus_plus', 'unknown')),
+        potential_coach_familiarity TEXT NOT NULL DEFAULT 'unknown' CHECK (potential_coach_familiarity IN ('none', 'role_plus', 'role_plus_plus', 'unknown')),
+        confirmed_familiarity TEXT NOT NULL DEFAULT 'unknown' CHECK (confirmed_familiarity IN ('none', 'role_plus', 'role_plus_plus', 'unknown')),
+        confirmed_at TEXT,
+        notes TEXT NOT NULL DEFAULT '',
+        FOREIGN KEY (player_id) REFERENCES players(id) ON DELETE CASCADE,
+        UNIQUE(player_id, position_code, role_name)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_player_role_fam_player ON player_role_familiarities(player_id);
+
+      -- 3. Phase 3 AI Video Intelligence & Analysis Tables (Workstreams B, C, D)
+      CREATE TABLE IF NOT EXISTS ai_analysis_jobs (
+        id TEXT PRIMARY KEY,
+        match_id TEXT NOT NULL,
+        session_id TEXT,
+        half TEXT NOT NULL CHECK (half IN ('first_half', 'second_half')),
+        analysis_mode TEXT NOT NULL DEFAULT 'quick' CHECK (analysis_mode IN ('quick', 'balanced', 'deep')),
+        language TEXT NOT NULL DEFAULT 'en' CHECK (language IN ('en', 'id')),
+        status TEXT NOT NULL DEFAULT 'queued' CHECK (status IN (
+          'not_requested',
+          'queued',
+          'validating_recording',
+          'preprocessing',
+          'uploading',
+          'waiting_for_media_processing',
+          'classifying_gameplay',
+          'analyzing_gameplay',
+          'evaluating_tactics',
+          'generating_briefing',
+          'validating_results',
+          'completed',
+          'insufficient_gameplay',
+          'completed_with_limitations',
+          'failed',
+          'cancelled',
+          'interrupted'
+        )),
+        current_stage TEXT NOT NULL DEFAULT 'queued',
+        progress_detail_json TEXT NOT NULL DEFAULT '{}',
+        model_video_id TEXT NOT NULL,
+        model_synthesis_id TEXT NOT NULL,
+        prompt_version TEXT NOT NULL,
+        schema_version TEXT NOT NULL,
+        tactical_vision_dataset_version TEXT NOT NULL DEFAULT '',
+        request_fingerprint TEXT NOT NULL DEFAULT '',
+        privacy_authorized INTEGER NOT NULL DEFAULT 0 CHECK (privacy_authorized IN (0, 1)),
+        entire_display_acknowledged INTEGER NOT NULL DEFAULT 0 CHECK (entire_display_acknowledged IN (0, 1)),
+        estimated_cost_usd REAL NOT NULL DEFAULT 0,
+        actual_cost_usd REAL,
+        budget_cap_usd REAL NOT NULL DEFAULT 2.0,
+        segments_total INTEGER NOT NULL DEFAULT 0,
+        segments_processed INTEGER NOT NULL DEFAULT 0,
+        sampling_fps REAL NOT NULL DEFAULT 1.0,
+        coverage_summary TEXT NOT NULL DEFAULT '',
+        started_at TEXT,
+        completed_at TEXT,
+        elapsed_ms INTEGER NOT NULL DEFAULT 0,
+        timing_breakdown_json TEXT,
+        error_code TEXT,
+        error_message TEXT,
+        retry_count INTEGER NOT NULL DEFAULT 0,
+        cancel_requested INTEGER NOT NULL DEFAULT 0 CHECK (cancel_requested IN (0, 1)),
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        FOREIGN KEY (match_id) REFERENCES matches(id) ON DELETE CASCADE,
+        FOREIGN KEY (session_id) REFERENCES match_sessions(id) ON DELETE SET NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_ai_jobs_match ON ai_analysis_jobs(match_id, created_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_ai_jobs_status ON ai_analysis_jobs(status);
+      CREATE INDEX IF NOT EXISTS idx_ai_jobs_fingerprint ON ai_analysis_jobs(request_fingerprint);
+
+      CREATE TABLE IF NOT EXISTS ai_analysis_assets (
+        id TEXT PRIMARY KEY,
+        job_id TEXT NOT NULL,
+        match_id TEXT NOT NULL,
+        session_id TEXT,
+        segment_id TEXT,
+        local_file_path TEXT NOT NULL,
+        prepared_file_path TEXT,
+        is_temp_asset INTEGER NOT NULL DEFAULT 0 CHECK (is_temp_asset IN (0, 1)),
+        sha256_hash TEXT NOT NULL DEFAULT '',
+        file_size_bytes INTEGER NOT NULL DEFAULT 0,
+        duration_seconds REAL NOT NULL DEFAULT 0,
+        width INTEGER,
+        height INTEGER,
+        remote_file_name TEXT,
+        remote_file_uri TEXT,
+        remote_state TEXT,
+        cleanup_status TEXT NOT NULL DEFAULT 'not_uploaded' CHECK (cleanup_status IN (
+          'not_uploaded', 'pending', 'deleted', 'cleanup_failed', 'retained_by_policy'
+        )),
+        cleanup_attempted_at TEXT,
+        cleanup_confirmed_at TEXT,
+        cleanup_error TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        FOREIGN KEY (job_id) REFERENCES ai_analysis_jobs(id) ON DELETE CASCADE,
+        FOREIGN KEY (match_id) REFERENCES matches(id) ON DELETE CASCADE,
+        FOREIGN KEY (session_id) REFERENCES match_sessions(id) ON DELETE SET NULL,
+        FOREIGN KEY (segment_id) REFERENCES recording_segments(id) ON DELETE SET NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_ai_assets_job ON ai_analysis_assets(job_id);
+      CREATE INDEX IF NOT EXISTS idx_ai_assets_cleanup ON ai_analysis_assets(cleanup_status);
+
+      CREATE TABLE IF NOT EXISTS ai_video_classifications (
+        id TEXT PRIMARY KEY,
+        job_id TEXT NOT NULL,
+        match_id TEXT NOT NULL,
+        segment_id TEXT,
+        start_seconds REAL NOT NULL DEFAULT 0,
+        end_seconds REAL NOT NULL DEFAULT 0,
+        session_start_seconds REAL NOT NULL DEFAULT 0,
+        session_end_seconds REAL NOT NULL DEFAULT 0,
+        content_type TEXT NOT NULL CHECK (content_type IN (
+          'live_gameplay',
+          'set_piece',
+          'replay',
+          'cutscene',
+          'pre_match_menu',
+          'tactical_setup',
+          'squad_management',
+          'pause_menu',
+          'halftime_statistics',
+          'fulltime_statistics',
+          'loading_screen',
+          'non_game_content',
+          'obscured_or_black_screen',
+          'unknown'
+        )),
+        confidence TEXT NOT NULL CHECK (confidence IN ('High', 'Medium', 'Low')),
+        evidence_description TEXT NOT NULL DEFAULT '',
+        in_game_clock TEXT,
+        created_at TEXT NOT NULL,
+        FOREIGN KEY (job_id) REFERENCES ai_analysis_jobs(id) ON DELETE CASCADE,
+        FOREIGN KEY (match_id) REFERENCES matches(id) ON DELETE CASCADE
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_ai_classifications_job ON ai_video_classifications(job_id);
+
+      CREATE TABLE IF NOT EXISTS ai_gameplay_observations (
+        id TEXT PRIMARY KEY,
+        job_id TEXT NOT NULL,
+        match_id TEXT NOT NULL,
+        half TEXT NOT NULL CHECK (half IN ('first_half', 'second_half')),
+        segment_id TEXT,
+        start_seconds REAL NOT NULL DEFAULT 0,
+        end_seconds REAL NOT NULL DEFAULT 0,
+        session_start_seconds REAL NOT NULL DEFAULT 0,
+        session_end_seconds REAL NOT NULL DEFAULT 0,
+        in_game_clock TEXT,
+        category_group TEXT NOT NULL CHECK (category_group IN ('attacking', 'defensive', 'possession', 'match_events')),
+        category TEXT NOT NULL,
+        team_attribution TEXT NOT NULL DEFAULT 'unknown' CHECK (team_attribution IN ('user_team', 'opponent', 'both', 'unknown')),
+        player_attribution TEXT NOT NULL DEFAULT 'Unknown',
+        description TEXT NOT NULL,
+        supporting_visual_evidence TEXT NOT NULL DEFAULT '',
+        evidence_type TEXT NOT NULL DEFAULT 'directly_observed' CHECK (evidence_type IN (
+          'directly_observed',
+          'hud_or_statistics_screen',
+          'user_confirmed',
+          'tactical_inference',
+          'master_database_attribute'
+        )),
+        confidence TEXT NOT NULL CHECK (confidence IN ('High', 'Medium', 'Low')),
+        severity TEXT NOT NULL DEFAULT 'Medium' CHECK (severity IN ('Critical', 'High', 'Medium', 'Low', 'Positive')),
+        limitations TEXT NOT NULL DEFAULT '',
+        evidence_frame_path TEXT,
+        is_from_replay INTEGER NOT NULL DEFAULT 0 CHECK (is_from_replay IN (0, 1)),
+        created_at TEXT NOT NULL,
+        FOREIGN KEY (job_id) REFERENCES ai_analysis_jobs(id) ON DELETE CASCADE,
+        FOREIGN KEY (match_id) REFERENCES matches(id) ON DELETE CASCADE
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_ai_obs_job ON ai_gameplay_observations(job_id);
+      CREATE INDEX IF NOT EXISTS idx_ai_obs_match ON ai_gameplay_observations(match_id, half);
+
+      CREATE TABLE IF NOT EXISTS ai_tactical_vision_assessments (
+        id TEXT PRIMARY KEY,
+        job_id TEXT NOT NULL UNIQUE,
+        match_id TEXT NOT NULL,
+        half TEXT NOT NULL CHECK (half IN ('first_half', 'second_half')),
+        intended_vision_key TEXT NOT NULL DEFAULT 'unspecified',
+        observed_playing_style_json TEXT NOT NULL DEFAULT '{}',
+        recommended_vision_key TEXT NOT NULL DEFAULT 'retain_current',
+        recommendation_stance TEXT NOT NULL DEFAULT 'retain_and_refine' CHECK (recommendation_stance IN (
+          'retain_and_refine', 'adapt_vision', 'insufficient_evidence'
+        )),
+        recommendation_rationale TEXT NOT NULL DEFAULT '',
+        official_compliance_status TEXT NOT NULL DEFAULT 'unspecified',
+        role_affinity_matched_count INTEGER NOT NULL DEFAULT 0,
+        role_affinity_total_count INTEGER NOT NULL DEFAULT 0,
+        role_affinity_unknown_count INTEGER NOT NULL DEFAULT 0,
+        execution_assessment_label TEXT NOT NULL DEFAULT 'Unknown',
+        internal_assessment_score INTEGER,
+        score_methodology_note TEXT NOT NULL DEFAULT '',
+        criteria_breakdown_json TEXT NOT NULL DEFAULT '[]',
+        confidence TEXT NOT NULL DEFAULT 'Low' CHECK (confidence IN ('High', 'Medium', 'Low')),
+        limitations TEXT NOT NULL DEFAULT '',
+        created_at TEXT NOT NULL,
+        FOREIGN KEY (job_id) REFERENCES ai_analysis_jobs(id) ON DELETE CASCADE,
+        FOREIGN KEY (match_id) REFERENCES matches(id) ON DELETE CASCADE
+      );
+
+      CREATE TABLE IF NOT EXISTS ai_tactical_recommendations (
+        id TEXT PRIMARY KEY,
+        job_id TEXT NOT NULL,
+        match_id TEXT NOT NULL,
+        priority_group TEXT NOT NULL CHECK (priority_group IN (
+          'immediate_correction',
+          'player_change',
+          'structural_adjustment',
+          'gameplay_coaching',
+          'contingency_plan'
+        )),
+        priority_rank INTEGER NOT NULL DEFAULT 1,
+        title TEXT NOT NULL,
+        action_type TEXT NOT NULL,
+        target_slot_id TEXT,
+        target_position_code TEXT,
+        current_value TEXT NOT NULL DEFAULT '',
+        proposed_value TEXT NOT NULL DEFAULT '',
+        target_player_out_id TEXT,
+        target_player_in_id TEXT,
+        reason TEXT NOT NULL DEFAULT '',
+        expected_benefit TEXT NOT NULL DEFAULT '',
+        potential_risk TEXT NOT NULL DEFAULT '',
+        evidence_observation_ids_json TEXT NOT NULL DEFAULT '[]',
+        evidence_timestamps_json TEXT NOT NULL DEFAULT '[]',
+        confidence TEXT NOT NULL DEFAULT 'Medium' CHECK (confidence IN ('High', 'Medium', 'Low')),
+        validation_status TEXT NOT NULL DEFAULT 'valid' CHECK (validation_status IN ('valid', 'corrected', 'invalid_unsupported')),
+        validation_errors_json TEXT NOT NULL DEFAULT '[]',
+        raw_ai_proposal_json TEXT,
+        created_at TEXT NOT NULL,
+        FOREIGN KEY (job_id) REFERENCES ai_analysis_jobs(id) ON DELETE CASCADE,
+        FOREIGN KEY (match_id) REFERENCES matches(id) ON DELETE CASCADE
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_ai_recs_job ON ai_tactical_recommendations(job_id, priority_group, priority_rank);
+
+      CREATE TABLE IF NOT EXISTS ai_recommendation_decisions (
+        id TEXT PRIMARY KEY,
+        recommendation_id TEXT NOT NULL UNIQUE,
+        match_id TEXT NOT NULL,
+        job_id TEXT NOT NULL,
+        decision_status TEXT NOT NULL DEFAULT 'ai_recommended' CHECK (decision_status IN (
+          'ai_recommended',
+          'user_accepted',
+          'user_modified',
+          'user_rejected',
+          'applied_in_game',
+          'unable_to_verify'
+        )),
+        modified_value TEXT,
+        applied_in_game INTEGER NOT NULL DEFAULT 0 CHECK (applied_in_game IN (0, 1)),
+        applied_confirmed_at TEXT,
+        adjustment_snapshot_id TEXT,
+        user_notes TEXT NOT NULL DEFAULT '',
+        updated_at TEXT NOT NULL,
+        FOREIGN KEY (recommendation_id) REFERENCES ai_tactical_recommendations(id) ON DELETE CASCADE,
+        FOREIGN KEY (match_id) REFERENCES matches(id) ON DELETE CASCADE,
+        FOREIGN KEY (job_id) REFERENCES ai_analysis_jobs(id) ON DELETE CASCADE,
+        FOREIGN KEY (adjustment_snapshot_id) REFERENCES match_tactical_snapshots(id) ON DELETE SET NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS ai_halftime_briefings (
+        id TEXT PRIMARY KEY,
+        job_id TEXT NOT NULL UNIQUE,
+        match_id TEXT NOT NULL,
+        half TEXT NOT NULL CHECK (half IN ('first_half', 'second_half')),
+        language TEXT NOT NULL DEFAULT 'en' CHECK (language IN ('en', 'id')),
+        model_used TEXT NOT NULL,
+        prompt_version TEXT NOT NULL,
+        schema_version TEXT NOT NULL,
+        briefing_json TEXT NOT NULL,
+        evidence_quality TEXT NOT NULL DEFAULT 'limited',
+        limitations_json TEXT NOT NULL DEFAULT '[]',
+        created_at TEXT NOT NULL,
+        FOREIGN KEY (job_id) REFERENCES ai_analysis_jobs(id) ON DELETE CASCADE,
+        FOREIGN KEY (match_id) REFERENCES matches(id) ON DELETE CASCADE
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_ai_briefings_match ON ai_halftime_briefings(match_id, created_at DESC);
+
+      CREATE TABLE IF NOT EXISTS ai_second_half_comparisons (
+        id TEXT PRIMARY KEY,
+        job_id TEXT NOT NULL UNIQUE,
+        match_id TEXT NOT NULL,
+        first_half_job_id TEXT,
+        model_used TEXT NOT NULL,
+        comparison_json TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        FOREIGN KEY (job_id) REFERENCES ai_analysis_jobs(id) ON DELETE CASCADE,
+        FOREIGN KEY (match_id) REFERENCES matches(id) ON DELETE CASCADE,
+        FOREIGN KEY (first_half_job_id) REFERENCES ai_analysis_jobs(id) ON DELETE SET NULL
+      );
+    `,
+    afterSql: (db: Database.Database) => {
+      // 1. Club Tactical Identity fields on career_profiles (non-destructive, legacy stays 'unspecified')
+      addColumnIfMissing(db, 'career_profiles', 'primary_tactical_vision_key', "TEXT NOT NULL DEFAULT 'unspecified'");
+      addColumnIfMissing(db, 'career_profiles', 'alternative_tactical_vision_key', "TEXT NOT NULL DEFAULT 'unspecified'");
+      addColumnIfMissing(db, 'career_profiles', 'preferred_build_up_style', "TEXT NOT NULL DEFAULT 'Balanced'");
+      addColumnIfMissing(db, 'career_profiles', 'preferred_defensive_approach', "TEXT NOT NULL DEFAULT 'Balanced'");
+      addColumnIfMissing(db, 'career_profiles', 'preferred_defensive_line_height', 'INTEGER NOT NULL DEFAULT 55');
+      addColumnIfMissing(db, 'career_profiles', 'tactical_philosophy_notes', "TEXT NOT NULL DEFAULT ''");
+      addColumnIfMissing(db, 'career_profiles', 'tactical_flexibility', "TEXT NOT NULL DEFAULT 'balanced'");
+
+      // 2. Tactical Vision key on tactical_presets (legacy presets explicitly marked 'unspecified', never guessed)
+      addColumnIfMissing(db, 'tactical_presets', 'tactical_vision_key', "TEXT NOT NULL DEFAULT 'unspecified'");
+
+      // 3. Immutable Tactical Vision snapshot fields + explicit in-game confirmation on match_tactical_snapshots
+      addColumnIfMissing(db, 'match_tactical_snapshots', 'tactical_vision_key', "TEXT NOT NULL DEFAULT 'unspecified'");
+      addColumnIfMissing(db, 'match_tactical_snapshots', 'tactical_vision_dataset_version', 'TEXT');
+      addColumnIfMissing(db, 'match_tactical_snapshots', 'applied_in_game_confirmed', 'INTEGER NOT NULL DEFAULT 0');
+      addColumnIfMissing(db, 'match_tactical_snapshots', 'applied_in_game_at', 'TEXT');
+
+      // 4. Extend api_usage_logs with Phase 3 video/cost telemetry
+      addColumnIfMissing(db, 'api_usage_logs', 'analysis_job_id', 'TEXT');
+      addColumnIfMissing(db, 'api_usage_logs', 'file_size_bytes', 'INTEGER');
+      addColumnIfMissing(db, 'api_usage_logs', 'video_duration_seconds', 'REAL');
+      addColumnIfMissing(db, 'api_usage_logs', 'request_duration_ms', 'INTEGER');
+      addColumnIfMissing(db, 'api_usage_logs', 'estimated_cost_usd', 'REAL');
+      addColumnIfMissing(db, 'api_usage_logs', 'pricing_source', 'TEXT');
+      addColumnIfMissing(db, 'api_usage_logs', 'is_estimate', 'INTEGER NOT NULL DEFAULT 1');
+
+      // 5. Idempotently ensure Wide Half CDM role exists in catalog_player_roles for upgraded v5 databases
+      const now = new Date().toISOString();
+      const cdmPos = db.prepare("SELECT code FROM catalog_positions WHERE code = 'CDM'").get() as
+        | { code: string }
+        | undefined;
+      if (cdmPos) {
+        const existingWideHalf = db
+          .prepare("SELECT id FROM catalog_player_roles WHERE LOWER(name) = 'wide half'")
+          .get() as { id: string } | undefined;
+
+        const wideHalfRoleId = existingWideHalf?.id ?? 'role_fc26_wide_half';
+        if (!existingWideHalf) {
+          db.prepare(`
+            INSERT OR IGNORE INTO catalog_player_roles (
+              id, external_source_id, name, description, position_category,
+              tactical_behavior, attacking_behavior, defensive_behavior,
+              is_fc26_new, verification_status, source_reference, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 'verified', ?, ?, ?)
+          `).run(
+            wideHalfRoleId,
+            'role_cdm_wide_half',
+            'Wide Half',
+            'Defensive midfielder who drifts into wide channels during possession to cover flanks behind advancing fullbacks or create wide build-up angles.',
+            'Midfielder',
+            'Shifts horizontally toward the touchline to support wide progression and protect flank transitions.',
+            'Creates wide passing relief and diagonal delivery angles from deep.',
+            'Covers wide spaces behind overlapping fullbacks and guards outer channels.',
+            'EA FC 26 Pitch Notes & User Tactical Vision Matrix',
+            now,
+            now
+          );
+        }
+
+        db.prepare(`
+          INSERT OR IGNORE INTO catalog_role_position_compatibility (
+            id, role_id, position_code, verification_status, evidence
+          ) VALUES (?, ?, 'CDM', 'verified', 'EA FC 26 Pitch Notes & User Tactical Vision Matrix')
+        `).run(`rpc_${wideHalfRoleId}_CDM`, wideHalfRoleId);
+
+        const focusRows = db
+          .prepare("SELECT id, name FROM catalog_player_focuses WHERE name IN ('Defend', 'Build-Up')")
+          .all() as Array<{ id: string; name: string }>;
+        for (const f of focusRows) {
+          db.prepare(`
+            INSERT OR IGNORE INTO catalog_role_focus_compatibility (
+              id, role_id, position_code, focus_id, verification_status, evidence
+            ) VALUES (?, ?, 'CDM', ?, 'verified', 'EA FC 26 Pitch Notes & User Tactical Vision Matrix')
+          `).run(`rfc_${wideHalfRoleId}_CDM_${f.id}`, wideHalfRoleId, f.id);
+        }
+      }
+    },
+  },
 ];
 
 export function runMigrations(db: Database.Database): void {

@@ -23,12 +23,22 @@ import {
   previewCatalogReconciliationFromPlayers,
 } from './server/services/catalogReconciler.ts';
 import * as catalogRepo from './server/services/catalogRepository.ts';
-import { getGeminiStatus } from './server/services/geminiService.ts';
+import {
+  GEMINI_MODEL_REGISTRY,
+  getGeminiStatus,
+  testGeminiConnection,
+} from './server/services/geminiService.ts';
 import * as repo from './server/services/repository.ts';
 import {
   buildAiMatchTacticalContext,
   validatePlayerRoleFocus,
 } from './server/services/tacticalContextService.ts';
+import * as tacticalVisionService from './server/services/tacticalVisionService.ts';
+import * as aiOrchestrator from './server/services/aiAnalysisOrchestrator.ts';
+import {
+  assertConfinedMediaPath,
+  getEvidenceFramesDir,
+} from './server/services/videoPreprocessingService.ts';
 import type { CatalogDatasetType } from './src/types/domain.ts';
 
 const IS_DESKTOP_MODE = process.env.FC26_DESKTOP_MODE === '1';
@@ -147,6 +157,18 @@ const clubSchema = z.object({
   alternativeFormation: z.string().trim().max(60).default('4-2-3-1 Wide'),
   preferredAttackingStyle: z.string().trim().max(80).default('Balanced'),
   preferredDefensiveStyle: z.string().trim().max(80).default('Balanced'),
+  primaryTacticalVisionKey: z.string().trim().max(60).optional(),
+  alternativeTacticalVisionKey: z.string().trim().max(60).nullable().optional(),
+  preferredBuildUpStyle: z.string().trim().max(80).optional(),
+  preferredDefensiveApproach: z.string().trim().max(80).optional(),
+  preferredDefensiveLineHeight: z.number().int().min(1).max(100).optional(),
+  tacticalPhilosophyNotes: z.string().trim().max(1200).optional(),
+  tacticalFlexibility: z
+    .preprocess(
+      (val) => (val === 'flexible' ? 'pragmatic' : val),
+      z.enum(['strict', 'balanced', 'pragmatic'])
+    )
+    .optional(),
   setActive: z.boolean().optional(),
   rosterInitMode: z.enum(['default_roster', 'empty']).optional(),
 });
@@ -236,6 +258,7 @@ const tacticalPresetCreateSchema = z.object({
   name: z.string().trim().min(1).max(120),
   formationId: z.string().uuid().nullable().optional(),
   formationName: z.string().trim().min(1).max(60),
+  tacticalVisionKey: z.string().trim().max(60).optional(),
   buildUpStyle: z.string().trim().min(1).max(80),
   defensiveApproach: z.string().trim().min(1).max(80),
   defensiveLineHeight: z.number().int().min(1).max(100),
@@ -287,6 +310,7 @@ const matchCreateSchema = z.object({
   sourcePresetId: z.string().uuid().nullable().optional(),
   tacticalSetup: z.object({
     formationId: z.string().uuid().nullable().optional(),
+    tacticalVisionKey: z.string().trim().max(60).optional(),
     buildUpStyle: z.string().trim().min(1).max(80),
     defensiveApproach: z.string().trim().min(1).max(80),
     defensiveLineHeight: z.number().int().min(1).max(100),
@@ -299,12 +323,14 @@ const matchTacticalSnapshotInputSchema = z.object({
   sourcePresetId: z.string().uuid().nullable().optional(),
   formationId: z.string().uuid().nullable().optional(),
   formationName: z.string().trim().min(1).max(60),
+  tacticalVisionKey: z.string().trim().max(60).optional(),
   buildUpStyle: z.string().trim().min(1).max(80),
   defensiveApproach: z.string().trim().min(1).max(80),
   defensiveLineHeight: z.number().int().min(1).max(100),
   playerAssignments: z.array(roleAssignmentSchema).max(11).default([]),
   benchIds: z.array(z.string().uuid()).max(12).optional(),
   confirmedDoubtfulPlayerIds: z.array(z.string().uuid()).max(23).optional(),
+  appliedInGameConfirmed: z.boolean().optional(),
   notes: z.string().trim().max(1500).optional(),
 });
 
@@ -339,8 +365,21 @@ const settingsPatchSchema = z.object({
   ai: z
     .object({
       modelId: z.string().trim().min(1).max(100).optional(),
+      quickModelId: z.string().trim().min(1).max(100).optional(),
+      balancedModelId: z.string().trim().min(1).max(100).optional(),
+      deepModelId: z.string().trim().min(1).max(100).optional(),
+      synthesisModelId: z.string().trim().min(1).max(100).optional(),
+      defaultAnalysisMode: z.enum(['quick', 'balanced', 'deep']).optional(),
+      defaultLanguage: z.enum(['en', 'id']).optional(),
       analysisQuality: z.enum(['balanced', 'detailed', 'compact']).optional(),
-      maxEvidenceFrames: z.number().int().min(6).max(60).optional(),
+      maxEvidenceFrames: z.number().int().min(4).max(60).optional(),
+      samplingFps: z.number().min(0.25).max(5).optional(),
+      downscaleTo720pForAnalysis: z.boolean().optional(),
+      maxConcurrentSegments: z.number().int().min(1).max(4).optional(),
+      perStageTimeoutSeconds: z.number().int().min(30).max(600).optional(),
+      maxRetriesPerStage: z.number().int().min(0).max(5).optional(),
+      perMatchBudgetUsd: z.number().min(0.01).max(25).optional(),
+      dailyBudgetUsd: z.number().min(0.05).max(100).optional(),
       removeDuplicateFrames: z.boolean().optional(),
       requireUploadConfirmation: z.boolean().optional(),
       deleteRemoteAfterAnalysis: z.boolean().optional(),
@@ -378,9 +417,16 @@ const feedbackSchema = z.object({
 async function startServer() {
   // Initialize SQLite database and run versioned migrations on startup
   getDb();
+  // Mark any orphaned active AI analysis jobs from a prior app shutdown/crash as interrupted
+  aiOrchestrator.markInterruptedJobsOnStartup();
 
   const app = express();
   app.disable('x-powered-by');
+  // Raw binary upload strictly for Browser Preview test MP4 clip import (confined & FFprobe-validated)
+  app.use(
+    '/api/matches/:id/test-video-import',
+    express.raw({ type: ['video/mp4', 'application/octet-stream'], limit: '60mb' })
+  );
   // Higher payload limit strictly for large CSV/JSON catalog imports (20,000+ players x 110+ columns)
   app.use('/api/catalog/import', express.json({ limit: '60mb' }));
   app.use('/api/database/restore', express.json({ limit: '60mb' }));
@@ -449,7 +495,12 @@ async function startServer() {
   app.post('/api/clubs', (req, res) => {
     const parsed = clubSchema.safeParse(req.body);
     if (!parsed.success) {
-      return res.status(400).json({ error: 'Invalid club data', details: parsed.error.flatten() });
+      const flattened = parsed.error.flatten();
+      const badFields = Object.keys(flattened.fieldErrors).join(', ');
+      return res.status(400).json({
+        error: badFields ? `Invalid club data (${badFields})` : 'Invalid club data',
+        details: flattened,
+      });
     }
     const created = repo.createClub(parsed.data);
     return res.status(201).json(created);
@@ -458,7 +509,12 @@ async function startServer() {
   app.put('/api/clubs/:id', (req, res) => {
     const parsed = clubSchema.partial().safeParse(req.body);
     if (!parsed.success) {
-      return res.status(400).json({ error: 'Invalid club update', details: parsed.error.flatten() });
+      const flattened = parsed.error.flatten();
+      const badFields = Object.keys(flattened.fieldErrors).join(', ');
+      return res.status(400).json({
+        error: badFields ? `Invalid club update (${badFields})` : 'Invalid club update',
+        details: flattened,
+      });
     }
     const updated = repo.updateClub(req.params.id, parsed.data);
     if (!updated) return res.status(404).json({ error: 'Club not found' });
@@ -1314,6 +1370,433 @@ async function startServer() {
       return res.status(400).json({
         error: err instanceof Error ? err.message : 'Failed to save recording diagnostics',
       });
+    }
+  });
+
+  // ============================================================
+  // Phase 3 — Tactical Vision Engine, Coaching Staff & Familiarity
+  // ============================================================
+
+  const tacticalEvaluationAssignmentSchema = z.object({
+    slotOrder: z.number().int().min(0).max(10),
+    slotId: z.string().trim().max(16).nullable().optional(),
+    positionCode: z.string().trim().min(1).max(12),
+    playerId: z.string().uuid().nullable(),
+    playerDisplayName: z.string().max(120).nullable().optional(),
+    role: z.string().trim().max(80).default(''),
+    focus: z.string().trim().max(80).default(''),
+  });
+
+  const tacticalEvaluationInputSchema = z.object({
+    clubId: z.string().uuid().nullable().optional(),
+    tacticalVisionKey: z.string().trim().max(60).nullable().optional(),
+    formationName: z.string().trim().min(1).max(60),
+    buildUpStyle: z.string().trim().min(1).max(80),
+    defensiveApproach: z.string().trim().min(1).max(80),
+    defensiveLineHeight: z.number().int().min(1).max(100),
+    assignments: z.array(tacticalEvaluationAssignmentSchema).max(11).default([]),
+    benchPlayerIds: z.array(z.string().uuid()).max(12).optional(),
+    confirmedDoubtfulPlayerIds: z.array(z.string().uuid()).max(23).optional(),
+  });
+
+  const compareVisionsSchema = z.object({
+    visionKeyA: z.string().trim().min(1).max(60),
+    visionKeyB: z.string().trim().min(1).max(60),
+    config: tacticalEvaluationInputSchema.omit({ tacticalVisionKey: true }),
+  });
+
+  const optimizeVisionSchema = tacticalEvaluationInputSchema.extend({
+    targetVisionKey: z.string().trim().min(1).max(60),
+    mode: z.enum([
+      'minimal_adjustment',
+      'role_optimization',
+      'squad_optimization',
+      'full_tactical_optimization',
+    ]),
+  });
+
+  const clubCoachSchema = z.object({
+    id: z.string().uuid().optional(),
+    name: z.string().trim().min(1).max(120),
+    department: z.preprocess(
+      (val) => (val === 'attacking' ? 'attack' : val === 'defending' ? 'defense' : val),
+      z.enum(['attack', 'midfield', 'defense', 'goalkeeping', 'head_coach'])
+    ),
+    tacticalVisionKey: z.string().trim().min(1).max(60),
+    qualificationLevel: z.enum(['standard', 'bronze', 'silver', 'gold']),
+    starRating: z.number().int().min(1).max(5),
+    notes: z.string().trim().max(600).optional(),
+  });
+
+  const familiarityTierEnum = z.enum(['unknown', 'none', 'role_plus', 'role_plus_plus']);
+
+  const playerRoleFamiliaritySchema = z.object({
+    positionCode: z.string().trim().min(1).max(12),
+    roleName: z.string().trim().min(1).max(80),
+    baseFamiliarity: familiarityTierEnum.optional(),
+    potentialCoachFamiliarity: familiarityTierEnum.optional(),
+    confirmedFamiliarity: familiarityTierEnum.optional(),
+    notes: z.string().trim().max(600).optional(),
+  });
+
+  app.get('/api/tactical-visions', (_req, res) => {
+    res.json(tacticalVisionService.getTacticalVisionCatalog());
+  });
+
+  app.get('/api/tactical-visions/:key', (req, res) => {
+    const vision = tacticalVisionService.getTacticalVisionByKey(req.params.key);
+    if (!vision) return res.status(404).json({ error: 'Tactical Vision not found' });
+    return res.json(vision);
+  });
+
+  app.post('/api/tactical-visions/evaluate', (req, res) => {
+    const parsed = tacticalEvaluationInputSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return res
+        .status(400)
+        .json({ error: 'Invalid tactical evaluation payload', details: parsed.error.flatten() });
+    }
+    try {
+      return res.json(tacticalVisionService.evaluateThreeLayerTactics(parsed.data));
+    } catch (err) {
+      return res.status(400).json({
+        error: err instanceof Error ? err.message : 'Failed to evaluate tactical setup',
+      });
+    }
+  });
+
+  app.post('/api/tactical-visions/compare', (req, res) => {
+    const parsed = compareVisionsSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return res
+        .status(400)
+        .json({ error: 'Invalid vision comparison payload', details: parsed.error.flatten() });
+    }
+    try {
+      return res.json(
+        tacticalVisionService.compareTacticalVisions(
+          parsed.data.visionKeyA,
+          parsed.data.visionKeyB,
+          parsed.data.config
+        )
+      );
+    } catch (err) {
+      return res.status(400).json({
+        error: err instanceof Error ? err.message : 'Failed to compare tactical visions',
+      });
+    }
+  });
+
+  app.post('/api/tactical-visions/optimize', (req, res) => {
+    const parsed = optimizeVisionSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return res
+        .status(400)
+        .json({ error: 'Invalid vision optimization payload', details: parsed.error.flatten() });
+    }
+    try {
+      return res.json(tacticalVisionService.optimizeForTacticalVision(parsed.data));
+    } catch (err) {
+      return res.status(400).json({
+        error: err instanceof Error ? err.message : 'Failed to optimize for tactical vision',
+      });
+    }
+  });
+
+  app.get('/api/clubs/:clubId/coaches', (req, res) => {
+    res.json(tacticalVisionService.listClubCoaches(req.params.clubId));
+  });
+
+  app.post('/api/clubs/:clubId/coaches', (req, res) => {
+    const parsed = clubCoachSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return res
+        .status(400)
+        .json({ error: 'Invalid club coach payload', details: parsed.error.flatten() });
+    }
+    try {
+      const saved = tacticalVisionService.upsertClubCoach(req.params.clubId, parsed.data);
+      return res.status(201).json(saved);
+    } catch (err) {
+      return res.status(400).json({
+        error: err instanceof Error ? err.message : 'Failed to save club coach',
+      });
+    }
+  });
+
+  app.delete('/api/coaches/:id', (req, res) => {
+    const deleted = tacticalVisionService.deleteClubCoach(req.params.id);
+    if (!deleted) return res.status(404).json({ error: 'Coach not found' });
+    return res.json({ deleted: true });
+  });
+
+  app.get('/api/clubs/:clubId/role-familiarities', (req, res) => {
+    res.json(tacticalVisionService.listClubPlayerRoleFamiliarities(req.params.clubId));
+  });
+
+  app.put('/api/players/:playerId/role-familiarities', (req, res) => {
+    const parsed = playerRoleFamiliaritySchema.safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json({
+        error: 'Invalid role familiarity payload',
+        details: parsed.error.flatten(),
+      });
+    }
+    try {
+      const saved = tacticalVisionService.upsertPlayerRoleFamiliarity(
+        req.params.playerId,
+        parsed.data
+      );
+      return res.json(saved);
+    } catch (err) {
+      return res.status(400).json({
+        error: err instanceof Error ? err.message : 'Failed to update player role familiarity',
+      });
+    }
+  });
+
+  app.post('/api/matches/:id/tactical-snapshots/:snapshotId/confirm-applied', (req, res) => {
+    const confirmed = Boolean(req.body?.confirmed ?? true);
+    const updated = repo.confirmSnapshotAppliedInGame(req.params.snapshotId, confirmed);
+    if (!updated) return res.status(404).json({ error: 'Tactical snapshot not found' });
+    return res.json(updated);
+  });
+
+  // ============================================================
+  // Phase 3 — Gemini Video Intelligence & Half-Time Analyst API
+  // ============================================================
+
+  const startAnalysisJobSchema = z.object({
+    sessionId: z.string().uuid().nullable().optional(),
+    half: z.enum(['first_half', 'second_half']).default('first_half'),
+    analysisMode: z.enum(['quick', 'balanced', 'deep']).optional(),
+    language: z.enum(['en', 'id']).optional(),
+    privacyAuthorized: z.boolean(),
+    entireDisplayAcknowledged: z.boolean().optional(),
+    forceReanalyze: z.boolean().optional(),
+  });
+
+  const recommendationDecisionSchema = z.object({
+    decisionStatus: z.enum([
+      'ai_recommended',
+      'user_accepted',
+      'user_modified',
+      'user_rejected',
+      'applied_in_game',
+      'unable_to_verify',
+    ]),
+    modifiedValue: z.string().trim().max(500).nullable().optional(),
+    appliedInGame: z.boolean().optional(),
+    userNotes: z.string().trim().max(1000).optional(),
+  });
+
+  const applyAdjustmentSchema = z.object({
+    jobId: z.string().uuid(),
+    recommendationIds: z.array(z.string().uuid()).min(1).max(30),
+    appliedInGameConfirmed: z.boolean().optional(),
+    notes: z.string().trim().max(1500).optional(),
+  });
+
+  const saveAdjustmentPresetSchema = z.object({
+    snapshotId: z.string().uuid(),
+    presetName: z.string().trim().min(1).max(120),
+  });
+
+  app.get('/api/ai/models', (_req, res) => {
+    const settings = repo.getSettings();
+    res.json({
+      models: GEMINI_MODEL_REGISTRY,
+      status: getGeminiStatus(settings.ai.modelId),
+    });
+  });
+
+  app.post('/api/ai/test-connection', async (req, res) => {
+    const requestedModel =
+      typeof req.body?.modelId === 'string' && req.body.modelId.trim()
+        ? req.body.modelId.trim()
+        : repo.getSettings().ai.modelId;
+    const result = await testGeminiConnection(requestedModel);
+    return res.json(result);
+  });
+
+  app.get('/api/ai/budget-summary', (_req, res) => {
+    const settings = repo.getSettings();
+    const daily = repo.getDailyApiSpendUsd();
+    const dailyBudgetUsd = settings.ai.dailyBudgetUsd ?? 10.0;
+    res.json({
+      datePrefix: daily.date,
+      spentUsd: daily.totalEstimatedUsd,
+      requestCount: daily.requestCount,
+      dailyBudgetUsd,
+      perMatchBudgetUsd: settings.ai.perMatchBudgetUsd,
+      remainingDailyUsd: Number(Math.max(0, dailyBudgetUsd - daily.totalEstimatedUsd).toFixed(4)),
+    });
+  });
+
+  app.get('/api/matches/:id/analysis', (req, res) => {
+    const preferredJobId =
+      typeof req.query.jobId === 'string' && req.query.jobId.trim()
+        ? req.query.jobId.trim()
+        : undefined;
+    res.json(aiOrchestrator.listMatchAnalysisBundle(req.params.id, preferredJobId));
+  });
+
+  app.post('/api/matches/:id/analysis/start', async (req, res) => {
+    const parsed = startAnalysisJobSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return res
+        .status(400)
+        .json({ error: 'Invalid analysis launch request', details: parsed.error.flatten() });
+    }
+    try {
+      const result = await aiOrchestrator.startAnalysisJob({
+        matchId: req.params.id,
+        sessionId: parsed.data.sessionId ?? null,
+        half: parsed.data.half,
+        analysisMode: parsed.data.analysisMode,
+        language: parsed.data.language,
+        privacyAuthorized: parsed.data.privacyAuthorized,
+        entireDisplayAcknowledged: parsed.data.entireDisplayAcknowledged,
+        forceReanalyze: parsed.data.forceReanalyze,
+      });
+      return res.status(202).json(result);
+    } catch (err) {
+      return res.status(400).json({
+        error: err instanceof Error ? err.message : 'Failed to start AI video analysis',
+      });
+    }
+  });
+
+  app.get('/api/analysis-jobs/:jobId', (req, res) => {
+    const job = aiOrchestrator.getAnalysisJob(req.params.jobId);
+    if (!job) return res.status(404).json({ error: 'Analysis job not found' });
+    return res.json(job);
+  });
+
+  app.post('/api/analysis-jobs/:jobId/cancel', (req, res) => {
+    const job = aiOrchestrator.cancelAnalysisJob(req.params.jobId);
+    if (!job) return res.status(404).json({ error: 'Analysis job not found' });
+    return res.json(job);
+  });
+
+  app.post('/api/analysis-jobs/:jobId/retry-cleanup', async (req, res) => {
+    try {
+      const assets = await aiOrchestrator.retryRemoteCleanup(req.params.jobId);
+      return res.json({ assets });
+    } catch (err) {
+      return res.status(400).json({
+        error: err instanceof Error ? err.message : 'Failed to retry remote file cleanup',
+      });
+    }
+  });
+
+  app.post('/api/matches/:id/analysis/recommendations/:recId/decision', (req, res) => {
+    const parsed = recommendationDecisionSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json({
+        error: 'Invalid recommendation decision payload',
+        details: parsed.error.flatten(),
+      });
+    }
+    try {
+      const decision = aiOrchestrator.saveRecommendationDecision({
+        recommendationId: req.params.recId,
+        ...parsed.data,
+      });
+      return res.json(decision);
+    } catch (err) {
+      return res.status(400).json({
+        error: err instanceof Error ? err.message : 'Failed to save recommendation decision',
+      });
+    }
+  });
+
+  app.post('/api/matches/:id/analysis/apply-adjustment', (req, res) => {
+    const parsed = applyAdjustmentSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json({
+        error: 'Invalid adjustment application payload',
+        details: parsed.error.flatten(),
+      });
+    }
+    try {
+      const snapshot = aiOrchestrator.applyAcceptedRecommendationsToAdjustmentSnapshot({
+        matchId: req.params.id,
+        ...parsed.data,
+      });
+      return res.status(201).json(snapshot);
+    } catch (err) {
+      return res.status(400).json({
+        error: err instanceof Error ? err.message : 'Failed to apply half-time adjustment snapshot',
+      });
+    }
+  });
+
+  app.post('/api/matches/:id/analysis/save-preset', (req, res) => {
+    const parsed = saveAdjustmentPresetSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json({
+        error: 'Invalid save preset payload',
+        details: parsed.error.flatten(),
+      });
+    }
+    try {
+      const preset = aiOrchestrator.saveAdjustmentAsNewClubPreset({
+        matchId: req.params.id,
+        snapshotId: parsed.data.snapshotId,
+        presetName: parsed.data.presetName,
+      });
+      return res.status(201).json(preset);
+    } catch (err) {
+      return res.status(400).json({
+        error: err instanceof Error ? err.message : 'Failed to save preset from match adjustment',
+      });
+    }
+  });
+
+  // Browser Preview fallback: import a local MP4 test clip into an app-owned recording session
+  app.post('/api/matches/:id/test-video-import', async (req, res) => {
+    const half = req.query.half === 'second_half' ? 'second_half' : 'first_half';
+    const rawFileName =
+      typeof req.headers['x-file-name'] === 'string' && req.headers['x-file-name'].trim()
+        ? req.headers['x-file-name'].trim()
+        : 'test-clip.mp4';
+    const buffer = Buffer.isBuffer(req.body) ? req.body : Buffer.alloc(0);
+    try {
+      const imported = await aiOrchestrator.importBrowserPreviewTestClip({
+        matchId: req.params.id,
+        half,
+        fileName: rawFileName,
+        buffer,
+      });
+      return res.status(201).json(imported);
+    } catch (err) {
+      return res.status(400).json({
+        error: err instanceof Error ? err.message : 'Failed to import MP4 test clip',
+      });
+    }
+  });
+
+  // Authenticated, strictly path-confined evidence frame image route
+  app.get('/api/evidence-frames/:matchId/:fileName', (req, res) => {
+    const { matchId, fileName } = req.params;
+    if (!/^[a-zA-Z0-9_-]{4,80}$/.test(matchId)) {
+      return res.status(400).json({ error: 'Invalid matchId parameter.' });
+    }
+    const baseName = path.basename(fileName);
+    if (baseName !== fileName || !/^[a-zA-Z0-9._-]+\.(jpg|jpeg|png|webp)$/i.test(baseName)) {
+      return res.status(400).json({ error: 'Invalid evidence frame file name.' });
+    }
+    try {
+      const matchFramesDir = getEvidenceFramesDir(matchId);
+      const targetPath = path.join(matchFramesDir, baseName);
+      const resolved = assertConfinedMediaPath(targetPath, [matchFramesDir]);
+      if (!fs.existsSync(resolved)) {
+        return res.status(404).json({ error: 'Evidence frame not found.' });
+      }
+      return res.sendFile(resolved);
+    } catch {
+      return res.status(403).json({ error: 'Evidence frame path outside confined directory.' });
     }
   });
 

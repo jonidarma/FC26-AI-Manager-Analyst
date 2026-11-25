@@ -17,8 +17,11 @@ import { desktopBridge } from '../services/desktopBridge';
 import type {
   CatalogClub,
   CatalogFormation,
+  ClubCoachRecord,
   ClubWithProfile,
   DefaultRosterPreview,
+  TacticalFlexibility,
+  TacticalVisionRecord,
 } from '../types/domain';
 import { hasDistinctFullName } from '../utils/playerDisplayName';
 
@@ -36,7 +39,23 @@ const EMPTY_CLUB_FORM = {
   alternativeFormation: '4-2-3-1 Wide',
   preferredAttackingStyle: 'Balanced',
   preferredDefensiveStyle: 'Balanced',
+  primaryTacticalVisionKey: 'standard',
+  alternativeTacticalVisionKey: '' as string,
+  preferredBuildUpStyle: 'Balanced',
+  preferredDefensiveApproach: 'Balanced',
+  preferredDefensiveLineHeight: 55,
+  tacticalPhilosophyNotes: '',
+  tacticalFlexibility: 'balanced' as TacticalFlexibility,
   rosterInitMode: 'default_roster' as 'default_roster' | 'empty',
+};
+
+const EMPTY_COACH_FORM = {
+  name: '',
+  department: 'midfield' as ClubCoachRecord['department'],
+  tacticalVisionKey: 'standard',
+  qualificationLevel: 'silver' as ClubCoachRecord['qualificationLevel'],
+  starRating: 4,
+  notes: '',
 };
 
 export function ClubsView() {
@@ -57,6 +76,10 @@ export function ClubsView() {
   const [showClubForm, setShowClubForm] = useState<boolean>(clubs.length === 0);
 
   const [catalogFormations, setCatalogFormations] = useState<CatalogFormation[]>([]);
+  const [tacticalVisions, setTacticalVisions] = useState<TacticalVisionRecord[]>([]);
+  const [clubCoaches, setClubCoaches] = useState<ClubCoachRecord[]>([]);
+  const [coachForm, setCoachForm] = useState(EMPTY_COACH_FORM);
+  const [savingCoach, setSavingCoach] = useState(false);
 
   // Master Club Picker state
   const [clubSearchQuery, setClubSearchQuery] = useState('');
@@ -72,16 +95,39 @@ export function ClubsView() {
 
   useEffect(() => {
     let active = true;
-    desktopBridge
-      .listCatalogFormations()
-      .then((fList) => {
-        if (active) setCatalogFormations(fList);
+    Promise.all([
+      desktopBridge.listCatalogFormations(),
+      desktopBridge.getTacticalVisionCatalog().catch(() => null),
+    ])
+      .then(([fList, vCat]) => {
+        if (!active) return;
+        setCatalogFormations(fList);
+        if (vCat) setTacticalVisions(vCat.visions);
       })
       .catch(() => {});
     return () => {
       active = false;
     };
   }, []);
+
+  useEffect(() => {
+    if (!activeClub) {
+      setClubCoaches([]);
+      return;
+    }
+    let active = true;
+    desktopBridge
+      .listClubCoaches(activeClub.id)
+      .then((list) => {
+        if (active) setClubCoaches(list);
+      })
+      .catch(() => {
+        if (active) setClubCoaches([]);
+      });
+    return () => {
+      active = false;
+    };
+  }, [activeClub?.id]);
 
   // Live search for FC26 Master Club Picker when club form is open
   useEffect(() => {
@@ -175,6 +221,15 @@ export function ClubsView() {
       alternativeFormation: club.profile.alternativeFormation,
       preferredAttackingStyle: club.profile.preferredAttackingStyle,
       preferredDefensiveStyle: club.profile.preferredDefensiveStyle,
+      primaryTacticalVisionKey: club.profile.primaryTacticalVisionKey || 'standard',
+      alternativeTacticalVisionKey: club.profile.alternativeTacticalVisionKey || '',
+      preferredBuildUpStyle:
+        club.profile.preferredBuildUpStyle || club.profile.preferredAttackingStyle || 'Balanced',
+      preferredDefensiveApproach:
+        club.profile.preferredDefensiveApproach || club.profile.preferredDefensiveStyle || 'Balanced',
+      preferredDefensiveLineHeight: club.profile.preferredDefensiveLineHeight ?? 55,
+      tacticalPhilosophyNotes: club.profile.tacticalPhilosophyNotes || '',
+      tacticalFlexibility: club.profile.tacticalFlexibility || 'balanced',
       rosterInitMode: 'empty',
     });
     setShowClubForm(true);
@@ -188,12 +243,19 @@ export function ClubsView() {
     }
     setSubmitting(true);
     try {
+      const payload = {
+        ...clubForm,
+        alternativeTacticalVisionKey: clubForm.alternativeTacticalVisionKey || null,
+        preferredAttackingStyle: clubForm.preferredBuildUpStyle || clubForm.preferredAttackingStyle,
+        preferredDefensiveStyle:
+          clubForm.preferredDefensiveApproach || clubForm.preferredDefensiveStyle,
+      };
       if (editingClubId) {
-        await desktopBridge.updateClub(editingClubId, clubForm);
+        await desktopBridge.updateClub(editingClubId, payload);
         notify('success', `Updated ${clubForm.name}.`);
       } else {
         const created = await desktopBridge.createClub({
-          ...clubForm,
+          ...payload,
           setActive: true,
         });
         const imported = created.defaultRosterImport?.importedCount ?? 0;
@@ -215,6 +277,38 @@ export function ClubsView() {
       notify('error', err instanceof Error ? err.message : 'Failed to save club');
     } finally {
       setSubmitting(false);
+    }
+  }
+
+  async function handleAddCoach(e: React.FormEvent) {
+    e.preventDefault();
+    if (!activeClub) return;
+    if (!coachForm.name.trim()) {
+      notify('error', 'Coach name is required.');
+      return;
+    }
+    setSavingCoach(true);
+    try {
+      await desktopBridge.saveClubCoach(activeClub.id, coachForm);
+      const updated = await desktopBridge.listClubCoaches(activeClub.id);
+      setClubCoaches(updated);
+      setCoachForm(EMPTY_COACH_FORM);
+      notify('success', `Saved coach "${coachForm.name}" for ${activeClub.name}.`);
+    } catch (err) {
+      notify('error', err instanceof Error ? err.message : 'Failed to save club coach');
+    } finally {
+      setSavingCoach(false);
+    }
+  }
+
+  async function handleDeleteCoach(coach: ClubCoachRecord) {
+    if (!activeClub) return;
+    try {
+      await desktopBridge.deleteClubCoach(coach.id);
+      setClubCoaches((prev) => prev.filter((c) => c.id !== coach.id));
+      notify('info', `Removed coach "${coach.name}".`);
+    } catch (err) {
+      notify('error', err instanceof Error ? err.message : 'Failed to delete coach');
     }
   }
 
@@ -600,12 +694,16 @@ export function ClubsView() {
 
             <div>
               <label className="block text-[12px] text-[#9AA4B4] mb-1.5">
-                Preferred Attacking / Build-Up Style
+                Preferred Build-Up Style
               </label>
               <select
-                value={clubForm.preferredAttackingStyle}
+                value={clubForm.preferredBuildUpStyle}
                 onChange={(e) =>
-                  setClubForm({ ...clubForm, preferredAttackingStyle: e.target.value })
+                  setClubForm({
+                    ...clubForm,
+                    preferredBuildUpStyle: e.target.value,
+                    preferredAttackingStyle: e.target.value,
+                  })
                 }
                 className="w-full bg-[#0C0F14] border border-white/[0.12] rounded-md px-3 py-2 text-[13px] text-white"
               >
@@ -619,12 +717,16 @@ export function ClubsView() {
 
             <div>
               <label className="block text-[12px] text-[#9AA4B4] mb-1.5">
-                Preferred Defensive Style
+                Preferred Defensive Approach
               </label>
               <select
-                value={clubForm.preferredDefensiveStyle}
+                value={clubForm.preferredDefensiveApproach}
                 onChange={(e) =>
-                  setClubForm({ ...clubForm, preferredDefensiveStyle: e.target.value })
+                  setClubForm({
+                    ...clubForm,
+                    preferredDefensiveApproach: e.target.value,
+                    preferredDefensiveStyle: e.target.value,
+                  })
                 }
                 className="w-full bg-[#0C0F14] border border-white/[0.12] rounded-md px-3 py-2 text-[13px] text-white"
               >
@@ -634,6 +736,100 @@ export function ClubsView() {
                   </option>
                 ))}
               </select>
+            </div>
+
+            <div>
+              <label className="block text-[12px] text-[#9AA4B4] mb-1.5">
+                Primary Tactical Vision (FC 26)
+              </label>
+              <select
+                value={clubForm.primaryTacticalVisionKey}
+                onChange={(e) =>
+                  setClubForm({ ...clubForm, primaryTacticalVisionKey: e.target.value })
+                }
+                className="w-full bg-[#0C0F14] border border-white/[0.12] rounded-md px-3 py-2 text-[13px] text-white"
+              >
+                <option value="unspecified">Unspecified</option>
+                {tacticalVisions.map((v) => (
+                  <option key={v.internalKey} value={v.internalKey}>
+                    {v.displayName}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div>
+              <label className="block text-[12px] text-[#9AA4B4] mb-1.5">
+                Alternative Tactical Vision
+              </label>
+              <select
+                value={clubForm.alternativeTacticalVisionKey}
+                onChange={(e) =>
+                  setClubForm({ ...clubForm, alternativeTacticalVisionKey: e.target.value })
+                }
+                className="w-full bg-[#0C0F14] border border-white/[0.12] rounded-md px-3 py-2 text-[13px] text-white"
+              >
+                <option value="">None</option>
+                {tacticalVisions.map((v) => (
+                  <option key={v.internalKey} value={v.internalKey}>
+                    {v.displayName}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div>
+              <label className="block text-[12px] text-[#9AA4B4] mb-1.5">
+                Tactical Flexibility
+              </label>
+              <select
+                value={clubForm.tacticalFlexibility}
+                onChange={(e) =>
+                  setClubForm({
+                    ...clubForm,
+                    tacticalFlexibility: e.target.value as TacticalFlexibility,
+                  })
+                }
+                className="w-full bg-[#0C0F14] border border-white/[0.12] rounded-md px-3 py-2 text-[13px] text-white"
+              >
+                <option value="strict">Strict (Adhere closely to primary vision)</option>
+                <option value="balanced">Balanced (Adapt when match evidence demands)</option>
+                <option value="pragmatic">Pragmatic (Flexible in-match shifts)</option>
+              </select>
+            </div>
+
+            <div>
+              <label className="block text-[12px] text-[#9AA4B4] mb-1.5">
+                Preferred Defensive Line Height ({clubForm.preferredDefensiveLineHeight})
+              </label>
+              <input
+                type="range"
+                min={10}
+                max={95}
+                value={clubForm.preferredDefensiveLineHeight}
+                onChange={(e) =>
+                  setClubForm({
+                    ...clubForm,
+                    preferredDefensiveLineHeight: Number(e.target.value),
+                  })
+                }
+                className="w-full accent-emerald-500 mt-2"
+              />
+            </div>
+
+            <div className="md:col-span-3">
+              <label className="block text-[12px] text-[#9AA4B4] mb-1.5">
+                Club Tactical Philosophy Notes
+              </label>
+              <textarea
+                rows={2}
+                value={clubForm.tacticalPhilosophyNotes}
+                onChange={(e) =>
+                  setClubForm({ ...clubForm, tacticalPhilosophyNotes: e.target.value })
+                }
+                placeholder="Describe non-negotiables, pressing triggers, or Career Mode recruitment identity..."
+                className="w-full bg-[#0C0F14] border border-white/[0.12] rounded-md px-3 py-2 text-[13px] text-white"
+              />
             </div>
           </div>
 
@@ -731,7 +927,9 @@ export function ClubsView() {
                         {[
                           club.league || 'League not specified',
                           club.nation || null,
-                          club.profile.preferredPhilosophy,
+                          tacticalVisions.find(
+                            (v) => v.internalKey === club.profile.primaryTacticalVisionKey
+                          )?.displayName || club.profile.preferredPhilosophy,
                           club.catalogClubId ? 'FC26 Linked' : null,
                         ]
                           .filter(Boolean)
@@ -841,6 +1039,180 @@ export function ClubsView() {
               <ArrowRight className="w-3.5 h-3.5" />
             </button>
           </div>
+        </section>
+      )}
+
+      {/* Phase 3 — Club Coaching Staff (Tactical Vision & Potential Role+ Familiarity) */}
+      {activeClub && (
+        <section className="border border-white/[0.08] bg-[#12151B] rounded-lg p-5 space-y-4">
+          <div>
+            <h2 className="text-[16px] font-semibold text-white">
+              Coaching Staff — {activeClub.name}
+            </h2>
+            <p className="text-[12px] text-[#8A94A6] mt-0.5">
+              Track your Career Mode coaches by department and Tactical Vision. Silver/Gold coaches
+              matching your active Tactical Vision indicate potential Role+ familiarity for matching
+              department roles (always distinguished from confirmed in-game familiarity).
+            </p>
+          </div>
+
+          <form
+            onSubmit={(e) => void handleAddCoach(e)}
+            className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-6 gap-3 items-end bg-[#0C0F14] border border-white/[0.08] rounded-md p-3.5"
+          >
+            <div className="lg:col-span-2">
+              <label className="block text-[11px] text-[#8A94A6] mb-1">Coach Name *</label>
+              <input
+                type="text"
+                value={coachForm.name}
+                onChange={(e) => setCoachForm({ ...coachForm, name: e.target.value })}
+                placeholder="e.g. Marco Rossi"
+                className="w-full bg-[#12151B] border border-white/[0.12] rounded px-2.5 py-1.5 text-[12px] text-white"
+              />
+            </div>
+            <div>
+              <label className="block text-[11px] text-[#8A94A6] mb-1">Department</label>
+              <select
+                value={coachForm.department}
+                onChange={(e) =>
+                  setCoachForm({
+                    ...coachForm,
+                    department: e.target.value as ClubCoachRecord['department'],
+                  })
+                }
+                className="w-full bg-[#12151B] border border-white/[0.12] rounded px-2.5 py-1.5 text-[12px] text-white"
+              >
+                <option value="head_coach">Head Coach</option>
+                <option value="goalkeeping">Goalkeeping</option>
+                <option value="defense">Defense</option>
+                <option value="midfield">Midfield</option>
+                <option value="attack">Attack</option>
+              </select>
+            </div>
+            <div>
+              <label className="block text-[11px] text-[#8A94A6] mb-1">Tactical Vision</label>
+              <select
+                value={coachForm.tacticalVisionKey}
+                onChange={(e) =>
+                  setCoachForm({ ...coachForm, tacticalVisionKey: e.target.value })
+                }
+                className="w-full bg-[#12151B] border border-white/[0.12] rounded px-2.5 py-1.5 text-[12px] text-white"
+              >
+                {tacticalVisions.map((v) => (
+                  <option key={v.internalKey} value={v.internalKey}>
+                    {v.displayName}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div>
+              <label className="block text-[11px] text-[#8A94A6] mb-1">Qualification / Stars</label>
+              <div className="flex gap-1.5">
+                <select
+                  value={coachForm.qualificationLevel}
+                  onChange={(e) =>
+                    setCoachForm({
+                      ...coachForm,
+                      qualificationLevel: e.target.value as ClubCoachRecord['qualificationLevel'],
+                    })
+                  }
+                  className="flex-1 bg-[#12151B] border border-white/[0.12] rounded px-2 py-1.5 text-[12px] text-white"
+                >
+                  <option value="standard">Standard</option>
+                  <option value="bronze">Bronze</option>
+                  <option value="silver">Silver</option>
+                  <option value="gold">Gold</option>
+                </select>
+                <select
+                  value={coachForm.starRating}
+                  onChange={(e) =>
+                    setCoachForm({ ...coachForm, starRating: Number(e.target.value) })
+                  }
+                  className="w-16 bg-[#12151B] border border-white/[0.12] rounded px-2 py-1.5 text-[12px] text-white"
+                >
+                  {[1, 2, 3, 4, 5].map((s) => (
+                    <option key={s} value={s}>
+                      {s}★
+                    </option>
+                  ))}
+                </select>
+              </div>
+            </div>
+            <button
+              type="submit"
+              disabled={savingCoach}
+              className="px-3.5 py-1.5 rounded bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white text-[12px] font-medium"
+            >
+              {savingCoach ? 'Saving...' : 'Add Coach'}
+            </button>
+          </form>
+
+          {clubCoaches.length > 0 ? (
+            <div className="overflow-x-auto">
+              <table className="w-full text-left text-[12px]">
+                <thead className="border-b border-white/[0.08] text-[#7D8798]">
+                  <tr>
+                    <th className="py-2 pr-3 font-medium">Coach</th>
+                    <th className="py-2 pr-3 font-medium">Department</th>
+                    <th className="py-2 pr-3 font-medium">Tactical Vision</th>
+                    <th className="py-2 pr-3 font-medium">Qualification</th>
+                    <th className="py-2 pr-3 font-medium">Stars</th>
+                    <th className="py-2 font-medium text-right">Action</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-white/[0.06]">
+                  {clubCoaches.map((coach) => {
+                    const visionLabel =
+                      tacticalVisions.find((v) => v.internalKey === coach.tacticalVisionKey)
+                        ?.displayName ?? coach.tacticalVisionKey;
+                    const boostsRolePlus =
+                      coach.qualificationLevel === 'silver' || coach.qualificationLevel === 'gold';
+                    return (
+                      <tr key={coach.id} className="hover:bg-white/[0.02]">
+                        <td className="py-2.5 pr-3 font-medium text-white">{coach.name}</td>
+                        <td className="py-2.5 pr-3 capitalize text-[#C5CCD7]">
+                          {coach.department.replace('_', ' ')}
+                        </td>
+                        <td className="py-2.5 pr-3 text-[#C5CCD7]">{visionLabel}</td>
+                        <td className="py-2.5 pr-3">
+                          <span
+                            className={`capitalize font-mono ${
+                              boostsRolePlus ? 'text-emerald-300' : 'text-[#8A94A6]'
+                            }`}
+                          >
+                            {coach.qualificationLevel}
+                          </span>
+                          {boostsRolePlus && (
+                            <span className="ml-1.5 text-[10px] text-emerald-400">
+                              (Potential Role+)
+                            </span>
+                          )}
+                        </td>
+                        <td className="py-2.5 pr-3 font-mono text-amber-300">
+                          {'★'.repeat(coach.starRating)}
+                        </td>
+                        <td className="py-2.5 text-right">
+                          <button
+                            type="button"
+                            onClick={() => void handleDeleteCoach(coach)}
+                            aria-label={`Remove ${coach.name}`}
+                            className="p-1 rounded hover:bg-red-500/10 text-[#9AA4B4] hover:text-red-400"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          ) : (
+            <div className="text-[12px] text-[#7D8798]">
+              No coaches logged for {activeClub.name} yet. Add your Career Mode coaches above to
+              evaluate potential department Role+ familiarity boosts.
+            </div>
+          )}
         </section>
       )}
     </div>

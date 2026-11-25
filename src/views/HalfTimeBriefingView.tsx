@@ -1,92 +1,581 @@
-import { CheckCircle2, ClipboardCheck, Clock3, Download, ShieldCheck } from 'lucide-react';
-import { useEffect, useState } from 'react';
-import { TacticalPitchSVG } from '../components/pitch/TacticalPitchSVG';
+import {
+  AlertTriangle,
+  ArrowRight,
+  BookmarkPlus,
+  Camera,
+  Check,
+  CheckCircle2,
+  ClipboardCheck,
+  Clock3,
+  Download,
+  Edit3,
+  Eye,
+  Film,
+  GitCompare,
+  Layers,
+  Loader2,
+  Play,
+  RefreshCw,
+  Search,
+  ShieldAlert,
+  ShieldCheck,
+  Sparkles,
+  Trash2,
+  Upload,
+  X,
+  XCircle,
+} from 'lucide-react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useApp } from '../context/AppContext';
 import { desktopBridge } from '../services/desktopBridge';
-import type { HalftimeReportData, MatchSessionWithSegments } from '../types/domain';
+import type {
+  AiAnalysisJobRecord,
+  AiGameplayObservationRecord,
+  AiTacticalRecommendationRecord,
+  AnalysisLanguage,
+  GeminiServiceStatus,
+  HalftimeReportData,
+  MatchAnalysisBundle,
+  MatchSessionWithSegments,
+  MatchTacticalSnapshot,
+  RecommendationDecisionStatus,
+  VideoAnalysisMode,
+} from '../types/domain';
+
+const TERMINAL_JOB_STATUSES = new Set<AiAnalysisJobRecord['status']>([
+  'completed',
+  'completed_with_limitations',
+  'insufficient_gameplay',
+  'failed',
+  'cancelled',
+  'interrupted',
+  'not_requested',
+]);
+
+function formatSeconds(sec: number): string {
+  const safe = Math.max(0, Math.floor(sec));
+  const m = Math.floor(safe / 60);
+  const s = safe % 60;
+  return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+}
+
+function extractFrameFileName(framePath: string | null): string | null {
+  if (!framePath) return null;
+  const parts = framePath.split(/[\\/]/);
+  const last = parts[parts.length - 1];
+  return last && last.length > 0 ? last : null;
+}
+
+function statusBadgeStyle(status: string): string {
+  switch (status) {
+    case 'completed':
+    case 'valid':
+    case 'compliant':
+    case 'deleted':
+    case 'improved':
+    case 'strong':
+    case 'user_accepted':
+    case 'applied_in_game':
+      return 'bg-emerald-500/15 text-emerald-300 border-emerald-500/35';
+    case 'completed_with_limitations':
+    case 'corrected':
+    case 'mixed':
+    case 'user_modified':
+    case 'pending':
+    case 'insufficient_gameplay':
+    case 'unchanged':
+      return 'bg-amber-500/15 text-amber-300 border-amber-500/35';
+    case 'failed':
+    case 'invalid_unsupported':
+    case 'conflict':
+    case 'cleanup_failed':
+    case 'worsened':
+    case 'weak':
+    case 'user_rejected':
+    case 'interrupted':
+      return 'bg-rose-500/15 text-rose-300 border-rose-500/35';
+    case 'cancelled':
+    case 'unknown':
+    case 'unspecified':
+    case 'not_uploaded':
+    case 'insufficient_evidence':
+      return 'bg-white/[0.06] text-[#9AA4B4] border-white/[0.14]';
+    default:
+      return 'bg-sky-500/15 text-sky-300 border-sky-500/35';
+  }
+}
+
+function priorityGroupLabel(group: AiTacticalRecommendationRecord['priorityGroup']): string {
+  switch (group) {
+    case 'immediate_correction':
+      return 'Immediate Half-Time Correction';
+    case 'player_change':
+      return 'Player Role / Substitution';
+    case 'structural_adjustment':
+      return 'Structural & Vision Adjustment';
+    case 'gameplay_coaching':
+      return 'Gameplay Coaching';
+    case 'contingency_plan':
+      return 'Contingency Rule';
+  }
+}
+
+type BriefingTab = 'briefing' | 'recommendations' | 'evidence' | 'comparison';
 
 export function HalfTimeBriefingView() {
-  const { matches, selectedMatchId, setSelectedMatchId, players, setActiveSection } = useApp();
-  const [report, setReport] = useState<HalftimeReportData | null>(null);
-  const [sessions, setSessions] = useState<MatchSessionWithSegments[]>([]);
-  const [loadingReport, setLoadingReport] = useState(false);
-
+  const { matches, selectedMatchId, setSelectedMatchId, setActiveSection, refreshAll } = useApp();
   const selectedMatch = matches.find((m) => m.id === selectedMatchId) ?? matches[0] ?? null;
 
+  const [selectedHalf, setSelectedHalf] = useState<'first_half' | 'second_half'>('first_half');
+  const [selectedJobId, setSelectedJobId] = useState<string | undefined>(undefined);
+  const [activeTab, setActiveTab] = useState<BriefingTab>('briefing');
+
+  const [bundle, setBundle] = useState<MatchAnalysisBundle | null>(null);
+  const [legacyReport, setLegacyReport] = useState<HalftimeReportData | null>(null);
+  const [sessions, setSessions] = useState<MatchSessionWithSegments[]>([]);
+  const [snapshots, setSnapshots] = useState<MatchTacticalSnapshot[]>([]);
+  const [aiStatus, setAiStatus] = useState<GeminiServiceStatus | null>(null);
+
+  const [loading, setLoading] = useState(false);
+  const [errorBanner, setErrorBanner] = useState<string | null>(null);
+  const [statusMessage, setStatusMessage] = useState<string | null>(null);
+
+  // Launcher controls
+  const [analysisMode, setAnalysisMode] = useState<VideoAnalysisMode>('balanced');
+  const [language, setLanguage] = useState<AnalysisLanguage>('en');
+  const [privacyAuthorized, setPrivacyAuthorized] = useState(false);
+  const [entireDisplayAcknowledged, setEntireDisplayAcknowledged] = useState(false);
+  const [forceReanalyze, setForceReanalyze] = useState(false);
+  const [startingAnalysis, setStartingAnalysis] = useState(false);
+  const [importingClip, setImportingClip] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+
+  // Recommendation decision editing state
+  const [editingRecId, setEditingRecId] = useState<string | null>(null);
+  const [modifiedText, setModifiedText] = useState('');
+  const [decisionNotes, setDecisionNotes] = useState('');
+  const [savingDecisionId, setSavingDecisionId] = useState<string | null>(null);
+  const [applyingAdjustment, setApplyingAdjustment] = useState(false);
+
+  // Save adjustment snapshot as club preset
+  const [presetModalSnapshotId, setPresetModalSnapshotId] = useState<string | null>(null);
+  const [presetNameInput, setPresetNameInput] = useState('');
+  const [savingPreset, setSavingPreset] = useState(false);
+
+  // Evidence filters & frame lightbox
+  const [obsCategoryFilter, setObsCategoryFilter] = useState<string>('all');
+  const [hideReplayDuplicates, setHideReplayDuplicates] = useState(false);
+  const [obsSearch, setObsSearch] = useState('');
+  const [lightboxState, setLightboxState] = useState<{
+    title: string;
+    subtitle: string;
+    objectUrl: string | null;
+    loading: boolean;
+    error: string | null;
+  } | null>(null);
+
+  const closeLightbox = useCallback(() => {
+    setLightboxState((prev) => {
+      if (prev?.objectUrl) {
+        URL.revokeObjectURL(prev.objectUrl);
+      }
+      return null;
+    });
+  }, []);
+
   useEffect(() => {
-    let cancelled = false;
-    async function load() {
+    return () => {
+      if (lightboxState?.objectUrl) {
+        URL.revokeObjectURL(lightboxState.objectUrl);
+      }
+    };
+  }, [lightboxState]);
+
+  const loadData = useCallback(
+    async (silent = false) => {
       if (!selectedMatch) {
-        setReport(null);
+        setBundle(null);
+        setLegacyReport(null);
         setSessions([]);
+        setSnapshots([]);
         return;
       }
-      setLoadingReport(true);
+      if (!silent) setLoading(true);
       try {
-        const [fetched, matchSessions] = await Promise.all([
-          desktopBridge.getHalftimeReport(selectedMatch.id).catch(() => null),
-          desktopBridge.listRecordingSessions({ matchId: selectedMatch.id }).catch(() => []),
-        ]);
-        if (!cancelled) {
-          setReport(fetched);
-          setSessions(matchSessions);
-        }
-      } catch {
-        if (!cancelled) {
-          setReport(null);
-          setSessions([]);
-        }
+        const [fetchedBundle, matchSessions, matchSnapshots, fetchedLegacy, modelInfo] =
+          await Promise.all([
+            desktopBridge.getMatchAnalysisBundle(selectedMatch.id, selectedJobId).catch(() => null),
+            desktopBridge.listRecordingSessions({ matchId: selectedMatch.id }).catch(() => []),
+            desktopBridge.listMatchTacticalSnapshots(selectedMatch.id).catch(() => []),
+            desktopBridge.getHalftimeReport(selectedMatch.id).catch(() => null),
+            desktopBridge.getAiModelRegistry().catch(() => null),
+          ]);
+        setBundle(fetchedBundle);
+        setSessions(matchSessions);
+        setSnapshots(matchSnapshots);
+        setLegacyReport(fetchedLegacy);
+        if (modelInfo) setAiStatus(modelInfo.status);
+      } catch (err) {
+        setErrorBanner(err instanceof Error ? err.message : 'Failed to load match analysis data.');
       } finally {
-        if (!cancelled) setLoadingReport(false);
+        if (!silent) setLoading(false);
       }
-    }
-    void load();
-    return () => {
-      cancelled = true;
-    };
+    },
+    [selectedMatch, selectedJobId]
+  );
+
+  useEffect(() => {
+    setSelectedJobId(undefined);
+    setErrorBanner(null);
+    setStatusMessage(null);
   }, [selectedMatch?.id]);
 
-  const firstHalfSessions = sessions.filter((s) => s.half === 'first_half');
-  const verifiedFirstHalf = firstHalfSessions.find(
-    (s) => s.integrityStatus === 'verified' && s.segments.some((seg) => seg.integrityStatus === 'verified')
-  );
-  const aiEligibleFirstHalf = firstHalfSessions.find((s) => s.aiEligible);
-  const totalVerifiedBytes = firstHalfSessions.reduce(
-    (acc, s) =>
-      acc +
-      s.segments
-        .filter((seg) => seg.integrityStatus === 'verified')
-        .reduce((segAcc, seg) => segAcc + seg.sizeBytes, 0),
-    0
+  useEffect(() => {
+    void loadData(false);
+  }, [loadData]);
+
+  // Poll every 2 seconds while an analysis job is active
+  const activeJob = bundle?.activeJob ?? null;
+  const isJobRunning = Boolean(activeJob && !TERMINAL_JOB_STATUSES.has(activeJob.status));
+
+  useEffect(() => {
+    if (!isJobRunning || !selectedMatch) return;
+    const timer = window.setInterval(() => {
+      void loadData(true);
+    }, 2000);
+    return () => window.clearInterval(timer);
+  }, [isJobRunning, selectedMatch, loadData]);
+
+  const halfSessions = useMemo(
+    () => sessions.filter((s) => s.half === selectedHalf),
+    [sessions, selectedHalf]
   );
 
-  function handleExportJson() {
-    if (!report || !selectedMatch) return;
-    const blob = new Blob([JSON.stringify(report, null, 2)], { type: 'application/json' });
+  const aiEligibleHalfSession = useMemo(
+    () =>
+      halfSessions.find(
+        (s) => s.aiEligible && s.segments.some((seg) => seg.integrityStatus === 'verified')
+      ) ?? halfSessions.find((s) => s.aiEligible),
+    [halfSessions]
+  );
+
+  const verifiedHalfSession = useMemo(
+    () =>
+      halfSessions.find(
+        (s) => s.integrityStatus === 'verified' && s.segments.some((seg) => seg.integrityStatus === 'verified')
+      ),
+    [halfSessions]
+  );
+
+  const requiresEntireDisplayAck = useMemo(() => {
+    const src = aiEligibleHalfSession?.captureSourceName?.toLowerCase() ?? '';
+    return src.includes('screen') || src.includes('display') || src.includes('entire');
+  }, [aiEligibleHalfSession]);
+
+  const totalVerifiedBytes = useMemo(
+    () =>
+      halfSessions.reduce(
+        (acc, s) =>
+          acc +
+          s.segments
+            .filter((seg) => seg.integrityStatus === 'verified')
+            .reduce((segAcc, seg) => segAcc + seg.sizeBytes, 0),
+        0
+      ),
+    [halfSessions]
+  );
+
+  // Determine the displayed job (selected job -> activeJob -> latest for selected half -> latest overall)
+  const displayedJob = useMemo(() => {
+    if (!bundle) return null;
+    if (selectedJobId) {
+      return bundle.jobs.find((j) => j.id === selectedJobId) ?? bundle.activeJob ?? null;
+    }
+    if (bundle.activeJob && bundle.activeJob.half === selectedHalf) return bundle.activeJob;
+    if (selectedHalf === 'first_half' && bundle.latestFirstHalfJob) return bundle.latestFirstHalfJob;
+    if (selectedHalf === 'second_half' && bundle.latestSecondHalfJob) return bundle.latestSecondHalfJob;
+    return bundle.activeJob ?? bundle.latestFirstHalfJob ?? bundle.latestSecondHalfJob ?? bundle.jobs[0] ?? null;
+  }, [bundle, selectedJobId, selectedHalf]);
+
+  const failedCleanupAssets = useMemo(
+    () => (bundle?.assets ?? []).filter((a) => a.cleanupStatus === 'cleanup_failed'),
+    [bundle?.assets]
+  );
+
+  const acceptedRecommendationIds = useMemo(
+    () =>
+      (bundle?.recommendations ?? [])
+        .filter(
+          (r) =>
+            r.validationStatus !== 'invalid_unsupported' &&
+            (r.decision?.decisionStatus === 'user_accepted' ||
+              r.decision?.decisionStatus === 'user_modified' ||
+              r.decision?.decisionStatus === 'applied_in_game')
+        )
+        .map((r) => r.id),
+    [bundle?.recommendations]
+  );
+
+  const filteredObservations = useMemo(() => {
+    const list = bundle?.observations ?? [];
+    return list.filter((obs) => {
+      if (obsCategoryFilter !== 'all' && obs.categoryGroup !== obsCategoryFilter) return false;
+      if (hideReplayDuplicates && obs.isFromReplay) return false;
+      if (obsSearch.trim()) {
+        const q = obsSearch.trim().toLowerCase();
+        const haystack = `${obs.category} ${obs.description} ${obs.playerAttribution} ${obs.supportingVisualEvidence} ${obs.inGameClock ?? ''}`.toLowerCase();
+        if (!haystack.includes(q)) return false;
+      }
+      return true;
+    });
+  }, [bundle?.observations, obsCategoryFilter, hideReplayDuplicates, obsSearch]);
+
+  async function handleStartAnalysis() {
+    if (!selectedMatch) return;
+    if (!privacyAuthorized) {
+      setErrorBanner('Explicit privacy authorization is required before uploading match footage.');
+      return;
+    }
+    if (requiresEntireDisplayAck && !entireDisplayAcknowledged) {
+      setErrorBanner(
+        'This recording captured an entire display. Confirm the entire-display privacy checkbox before analyzing.'
+      );
+      return;
+    }
+    setStartingAnalysis(true);
+    setErrorBanner(null);
+    setStatusMessage(null);
+    try {
+      const result = await desktopBridge.startMatchVideoAnalysis(selectedMatch.id, {
+        sessionId: aiEligibleHalfSession?.id ?? null,
+        half: selectedHalf,
+        analysisMode,
+        language,
+        privacyAuthorized,
+        entireDisplayAcknowledged: requiresEntireDisplayAck ? entireDisplayAcknowledged : false,
+        forceReanalyze,
+      });
+      setSelectedJobId(result.job.id);
+      setStatusMessage(
+        result.reusedFromCache
+          ? `Reused cached completed analysis (${result.job.id.slice(0, 8)}). Toggle "Force Re-analyze" to run a fresh analysis.`
+          : `Analysis job started (${result.job.status.replace(/_/g, ' ')}). Polling live progress...`
+      );
+      await loadData(false);
+    } catch (err) {
+      setErrorBanner(err instanceof Error ? err.message : 'Failed to start match video analysis.');
+    } finally {
+      setStartingAnalysis(false);
+    }
+  }
+
+  async function handleCancelJob(jobId: string) {
+    setErrorBanner(null);
+    try {
+      await desktopBridge.cancelAnalysisJob(jobId);
+      setStatusMessage('Cancellation requested for active analysis job.');
+      await loadData(true);
+    } catch (err) {
+      setErrorBanner(err instanceof Error ? err.message : 'Failed to cancel analysis job.');
+    }
+  }
+
+  async function handleRetryCleanup(jobId: string) {
+    setErrorBanner(null);
+    try {
+      await desktopBridge.retryAnalysisRemoteCleanup(jobId);
+      setStatusMessage('Remote Gemini file cleanup retried.');
+      await loadData(true);
+    } catch (err) {
+      setErrorBanner(err instanceof Error ? err.message : 'Remote cleanup retry failed.');
+    }
+  }
+
+  async function handleImportTestClip(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (!file || !selectedMatch) return;
+    setImportingClip(true);
+    setErrorBanner(null);
+    setStatusMessage(null);
+    try {
+      const imported = await desktopBridge.importBrowserPreviewTestClip(
+        selectedMatch.id,
+        selectedHalf,
+        file
+      );
+      setStatusMessage(
+        `Imported & verified MP4 test clip (${imported.durationSeconds.toFixed(1)}s, ${(
+          imported.sizeBytes /
+          (1024 * 1024)
+        ).toFixed(2)} MB, ${imported.resolution ?? 'unknown resolution'}). Ready for Phase 3 analysis.`
+      );
+      await loadData(false);
+    } catch (err) {
+      setErrorBanner(err instanceof Error ? err.message : 'Failed to import MP4 test clip.');
+    } finally {
+      setImportingClip(false);
+      if (fileInputRef.current) fileInputRef.current.value = '';
+    }
+  }
+
+  async function handleRecommendationDecision(
+    rec: AiTacticalRecommendationRecord,
+    decisionStatus: RecommendationDecisionStatus,
+    modifiedValue?: string | null,
+    userNotes?: string
+  ) {
+    if (!selectedMatch) return;
+    setSavingDecisionId(rec.id);
+    setErrorBanner(null);
+    try {
+      await desktopBridge.saveRecommendationDecision(selectedMatch.id, rec.id, {
+        decisionStatus,
+        modifiedValue: modifiedValue ?? null,
+        appliedInGame: decisionStatus === 'applied_in_game',
+        userNotes: userNotes ?? rec.decision?.userNotes ?? '',
+      });
+      setEditingRecId(null);
+      await loadData(true);
+    } catch (err) {
+      setErrorBanner(err instanceof Error ? err.message : 'Failed to save recommendation decision.');
+    } finally {
+      setSavingDecisionId(null);
+    }
+  }
+
+  async function handleApplyAcceptedToSnapshot() {
+    if (!selectedMatch || !displayedJob || acceptedRecommendationIds.length === 0) return;
+    setApplyingAdjustment(true);
+    setErrorBanner(null);
+    setStatusMessage(null);
+    try {
+      const snapshot = await desktopBridge.applyAcceptedRecommendationsToAdjustment(
+        selectedMatch.id,
+        {
+          jobId: displayedJob.id,
+          recommendationIds: acceptedRecommendationIds,
+          appliedInGameConfirmed: false,
+          notes: `Applied ${acceptedRecommendationIds.length} accepted Phase 3 recommendation(s) from ${displayedJob.half.replace('_', ' ')} analysis.`,
+        }
+      );
+      setStatusMessage(
+        `Created Half-Time Adjustment Snapshot (${snapshot.formationName}). Original pre-match snapshot remains immutable.`
+      );
+      await loadData(true);
+      await refreshAll();
+    } catch (err) {
+      setErrorBanner(
+        err instanceof Error ? err.message : 'Failed to create half-time adjustment snapshot.'
+      );
+    } finally {
+      setApplyingAdjustment(false);
+    }
+  }
+
+  async function handleToggleConfirmAppliedInGame(snapshot: MatchTacticalSnapshot) {
+    if (!selectedMatch) return;
+    setErrorBanner(null);
+    try {
+      await desktopBridge.confirmSnapshotAppliedInGame(
+        selectedMatch.id,
+        snapshot.id,
+        !snapshot.appliedInGameConfirmed
+      );
+      setStatusMessage(
+        !snapshot.appliedInGameConfirmed
+          ? 'Confirmed adjustment was manually applied inside EA SPORTS FC 26.'
+          : 'Cleared in-game application confirmation.'
+      );
+      await loadData(true);
+    } catch (err) {
+      setErrorBanner(err instanceof Error ? err.message : 'Failed to update confirmation.');
+    }
+  }
+
+  async function handleSaveSnapshotAsPreset() {
+    if (!selectedMatch || !presetModalSnapshotId || !presetNameInput.trim()) return;
+    setSavingPreset(true);
+    setErrorBanner(null);
+    try {
+      const created = await desktopBridge.saveAdjustmentAsNewClubPreset(selectedMatch.id, {
+        snapshotId: presetModalSnapshotId,
+        presetName: presetNameInput.trim(),
+      });
+      setStatusMessage(`Saved adjustment as new Club Tactical Preset "${created.name}".`);
+      setPresetModalSnapshotId(null);
+      setPresetNameInput('');
+      await refreshAll();
+    } catch (err) {
+      setErrorBanner(err instanceof Error ? err.message : 'Failed to save club tactical preset.');
+    } finally {
+      setSavingPreset(false);
+    }
+  }
+
+  async function handleOpenEvidenceFrame(obs: AiGameplayObservationRecord) {
+    if (!selectedMatch) return;
+    const fileName = extractFrameFileName(obs.evidenceFramePath);
+    if (!fileName) return;
+    setLightboxState({
+      title: `${obs.category} (${formatSeconds(obs.sessionStartSeconds)}–${formatSeconds(obs.sessionEndSeconds)})`,
+      subtitle: obs.description,
+      objectUrl: null,
+      loading: true,
+      error: null,
+    });
+    try {
+      const url = await desktopBridge.fetchEvidenceFrameObjectUrl(selectedMatch.id, fileName);
+      setLightboxState((prev) =>
+        prev ? { ...prev, objectUrl: url, loading: false, error: null } : null
+      );
+    } catch (err) {
+      setLightboxState((prev) =>
+        prev
+          ? {
+              ...prev,
+              loading: false,
+              error: err instanceof Error ? err.message : 'Failed to load evidence frame.',
+            }
+          : null
+      );
+    }
+  }
+
+  function handleExportBundleJson() {
+    if (!selectedMatch) return;
+    const payload = bundle?.briefing ? bundle : legacyReport;
+    if (!payload) return;
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `halftime-briefing-${selectedMatch.matchDate}-${selectedMatch.opponentName
+    a.download = `fc26-analysis-${selectedMatch.matchDate}-${selectedMatch.opponentName
       .toLowerCase()
       .replace(/[^a-z0-9]+/g, '-')}.json`;
     a.click();
     URL.revokeObjectURL(url);
   }
 
+  const briefing = bundle?.briefing ?? null;
+  const visionAssessment = bundle?.visionAssessment ?? null;
+  const recommendations = bundle?.recommendations ?? [];
+  const secondHalfComparison = bundle?.secondHalfComparison ?? null;
+
   return (
-    <div className="space-y-7">
+    <div className="space-y-6">
+      {/* Header */}
       <div className="flex flex-wrap items-end justify-between gap-4 border-b border-white/[0.08] pb-5">
         <div>
           <h1 className="text-[24px] font-bold text-white tracking-tight">
-            Half-Time Tactical Briefing
+            Half-Time &amp; Post-Half AI Tactical Briefing
           </h1>
-          <p className="mt-1 text-[14px] text-[#9AA4B4]">
-            Executive 11-section half-time tactical report generated strictly from verified
-            first-half visual evidence.
+          <p className="mt-1 text-[13px] text-[#9AA4B4]">
+            Evidence-anchored Gemini video intelligence, 3-layer Tactical Vision evaluation, and
+            server-validated FC26 tactical adjustments.
           </p>
         </div>
 
-        <div className="flex items-center gap-3">
+        <div className="flex flex-wrap items-center gap-2.5">
           {matches.length > 0 && (
             <select
               value={selectedMatch?.id ?? ''}
@@ -95,17 +584,47 @@ export function HalfTimeBriefingView() {
             >
               {matches.map((m) => (
                 <option key={m.id} value={m.id}>
-                  {m.matchDate} · {m.venue === 'home' ? 'vs' : '@'} {m.opponentName}
-                  {m.hasHalftimeReport ? ' (Analysis Completed)' : ' (Awaiting Phase 3 Analysis)'}
+                  {m.matchDate} · {m.venue === 'home' ? 'vs' : '@'} {m.opponentName} (
+                  {m.startingFormation})
                 </option>
               ))}
             </select>
           )}
-          {report && (
+
+          <div className="inline-flex rounded-md border border-white/[0.12] bg-[#12151B] p-0.5">
+            {(['first_half', 'second_half'] as const).map((half) => (
+              <button
+                key={half}
+                type="button"
+                onClick={() => {
+                  setSelectedHalf(half);
+                  setSelectedJobId(undefined);
+                }}
+                className={`px-3 py-1.5 rounded text-[12px] font-medium transition-colors ${
+                  selectedHalf === half
+                    ? 'bg-emerald-600 text-white'
+                    : 'text-[#9AA4B4] hover:text-white'
+                }`}
+              >
+                {half === 'first_half' ? 'First Half' : 'Second Half'}
+              </button>
+            ))}
+          </div>
+
+          <button
+            type="button"
+            onClick={() => void loadData(false)}
+            className="inline-flex items-center gap-1.5 px-3 py-2 rounded-md border border-white/[0.12] hover:border-white/[0.24] text-[12px] text-[#D7DDE7]"
+          >
+            <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} />
+            Refresh
+          </button>
+
+          {(briefing || legacyReport) && (
             <button
               type="button"
-              onClick={handleExportJson}
-              className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-md border border-white/[0.12] hover:border-white/[0.24] text-[13px] text-white"
+              onClick={handleExportBundleJson}
+              className="inline-flex items-center gap-1.5 px-3 py-2 rounded-md border border-white/[0.12] hover:border-white/[0.24] text-[12px] text-white"
             >
               <Download className="w-3.5 h-3.5" />
               Export JSON
@@ -114,443 +633,1436 @@ export function HalfTimeBriefingView() {
         </div>
       </div>
 
-      {loadingReport ? (
-        <div className="border border-white/[0.08] bg-[#12151B] rounded-lg p-8 text-[13px] text-[#9AA4B4]">
-          Loading saved half-time report from SQLite...
-        </div>
-      ) : !report ? (
-        <div className="border border-white/[0.08] bg-[#12151B] rounded-lg p-8 space-y-6">
-          <div className="max-w-3xl">
-            <div className="text-[12px] text-[#8A94A6]">
-              {selectedMatch
-                ? `${selectedMatch.matchDate} · ${selectedMatch.venue === 'home' ? 'vs' : '@'} ${selectedMatch.opponentName} · ${selectedMatch.startingFormation}`
-                : 'No match selected'}
-            </div>
-            <h2 className="mt-1 text-[20px] font-semibold text-white">
-              {aiEligibleFirstHalf
-                ? 'First-Half Recording Verified — Awaiting Analysis (Phase 3)'
-                : 'No Half-Time Briefing Generated for This Match'}
-            </h2>
-            <p className="mt-2 text-[14px] text-[#9AA4B4] leading-relaxed">
-              Half-time reports are never fabricated from pre-match assumptions. Verified local MP4
-              recordings remain strictly on disk until the explicit Phase 3 Gemini video analysis
-              pipeline is implemented and triggered by the manager.
-            </p>
+      {/* Banners */}
+      {errorBanner && (
+        <div className="border border-rose-500/40 bg-rose-500/10 rounded-lg px-4 py-3 text-[13px] text-rose-200 flex items-start justify-between gap-3">
+          <div className="flex items-start gap-2">
+            <AlertTriangle className="w-4 h-4 text-rose-400 mt-0.5 shrink-0" />
+            <span>{errorBanner}</span>
           </div>
+          <button type="button" onClick={() => setErrorBanner(null)} className="text-rose-300 hover:text-white">
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+      )}
 
-          {selectedMatch && (
+      {statusMessage && (
+        <div className="border border-emerald-500/35 bg-emerald-500/10 rounded-lg px-4 py-3 text-[13px] text-emerald-200 flex items-start justify-between gap-3">
+          <div className="flex items-start gap-2">
+            <CheckCircle2 className="w-4 h-4 text-emerald-400 mt-0.5 shrink-0" />
+            <span>{statusMessage}</span>
+          </div>
+          <button type="button" onClick={() => setStatusMessage(null)} className="text-emerald-300 hover:text-white">
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+      )}
+
+      {!selectedMatch ? (
+        <div className="border border-white/[0.08] bg-[#12151B] rounded-lg p-8 text-[14px] text-[#9AA4B4]">
+          No matches created yet. Prepare a match in{' '}
+          <button
+            type="button"
+            onClick={() => setActiveSection('match-prep')}
+            className="text-emerald-400 underline"
+          >
+            Match Preparation
+          </button>{' '}
+          first.
+        </div>
+      ) : (
+        <>
+          {/* Launcher + Recording Verification + Browser Preview Test Clip Card */}
+          <section className="border border-white/[0.08] bg-[#12151B] rounded-lg p-5 space-y-4">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <div className="text-[11px] font-mono uppercase tracking-wider text-[#8A94A6]">
+                  {selectedMatch.matchDate} · {selectedMatch.venue === 'home' ? 'vs' : '@'}{' '}
+                  {selectedMatch.opponentName} · {selectedMatch.startingFormation} ·{' '}
+                  {selectedHalf === 'first_half' ? 'First Half Pipeline' : 'Second Half Pipeline'}
+                </div>
+                <h2 className="mt-0.5 text-[16px] font-semibold text-white">
+                  Gemini Video Analysis Launcher &amp; Recording Verification
+                </h2>
+              </div>
+
+              <div className="flex items-center gap-2">
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  accept="video/mp4,.mp4"
+                  onChange={handleImportTestClip}
+                  className="hidden"
+                />
+                <button
+                  type="button"
+                  disabled={importingClip}
+                  onClick={() => fileInputRef.current?.click()}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md border border-white/[0.14] hover:border-sky-400/60 bg-[#0E1116] text-[12px] text-[#D7DDE7] disabled:opacity-50"
+                >
+                  {importingClip ? (
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                  ) : (
+                    <Upload className="w-3.5 h-3.5 text-sky-400" />
+                  )}
+                  Import MP4 Test Clip (Browser Preview)
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setActiveSection('match-capture')}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md border border-white/[0.12] hover:border-white/[0.24] text-[12px] text-[#9AA4B4] hover:text-white"
+                >
+                  <Film className="w-3.5 h-3.5" />
+                  Match Capture
+                </button>
+              </div>
+            </div>
+
+            {/* 3-State Recording Verification Strip */}
             <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-              <div className="border border-white/[0.08] bg-[#0E1116] rounded-md p-3.5">
+              <div className="border border-white/[0.08] bg-[#0E1116] rounded-md p-3">
                 <div className="flex items-center gap-1.5 text-[11px] uppercase tracking-wider text-[#8A94A6]">
                   <ShieldCheck className="w-3.5 h-3.5 text-emerald-400" />
                   1. Recording Verified
                 </div>
-                <div className="mt-1.5 text-[14px] font-semibold text-white">
-                  {verifiedFirstHalf ? 'Verified Locally' : 'No Verified First-Half Footage'}
+                <div className="mt-1 text-[13px] font-semibold text-white">
+                  {verifiedHalfSession ? 'Verified Locally (FFprobe + SHA-256)' : 'No Verified Footage'}
                 </div>
                 <div className="mt-0.5 text-[11px] text-[#8A94A6]">
-                  {verifiedFirstHalf
-                    ? `${verifiedFirstHalf.segments.filter((s) => s.integrityStatus === 'verified').length} FFprobe + SHA-256 verified MP4 segment(s) (${(totalVerifiedBytes / (1024 * 1024)).toFixed(1)} MB)`
-                    : 'Record and finalize the first half in Match Capture.'}
+                  {verifiedHalfSession
+                    ? `${verifiedHalfSession.segments.filter((s) => s.integrityStatus === 'verified').length} verified MP4 segment(s) · ${(totalVerifiedBytes / (1024 * 1024)).toFixed(2)} MB`
+                    : `Record ${selectedHalf.replace('_', ' ')} in Match Capture or import a test MP4 clip.`}
                 </div>
               </div>
 
-              <div className="border border-white/[0.08] bg-[#0E1116] rounded-md p-3.5">
+              <div className="border border-white/[0.08] bg-[#0E1116] rounded-md p-3">
                 <div className="flex items-center gap-1.5 text-[11px] uppercase tracking-wider text-[#8A94A6]">
                   <CheckCircle2 className="w-3.5 h-3.5 text-sky-400" />
                   2. Technically AI-Eligible
                 </div>
-                <div className="mt-1.5 text-[14px] font-semibold text-white">
-                  {aiEligibleFirstHalf ? 'Eligible for AI Processing' : 'Not Eligible Yet'}
+                <div className="mt-1 text-[13px] font-semibold text-white">
+                  {aiEligibleHalfSession ? 'Eligible for Video Analysis' : 'Not Eligible Yet'}
                 </div>
                 <div className="mt-0.5 text-[11px] text-[#8A94A6]">
-                  {aiEligibleFirstHalf
-                    ? 'H.264 MP4 container, duration, and frozen tactical snapshot verified. Zero files uploaded.'
-                    : 'Requires a verified non-zero first-half recording session.'}
+                  {aiEligibleHalfSession
+                    ? `Source: ${aiEligibleHalfSession.captureSourceName || 'Verified MP4'} · Stays local until launched.`
+                    : 'Requires a verified non-zero H.264 MP4 recording.'}
                 </div>
               </div>
 
-              <div className="border border-white/[0.08] bg-[#0E1116] rounded-md p-3.5">
+              <div className="border border-white/[0.08] bg-[#0E1116] rounded-md p-3">
                 <div className="flex items-center gap-1.5 text-[11px] uppercase tracking-wider text-[#8A94A6]">
-                  <Clock3 className="w-3.5 h-3.5 text-amber-400" />
-                  3. Analysis State
+                  <Sparkles className="w-3.5 h-3.5 text-amber-400" />
+                  3. Gemini API &amp; Analysis State
                 </div>
-                <div className="mt-1.5 text-[14px] font-semibold text-white">
-                  {aiEligibleFirstHalf
-                    ? 'Awaiting Analysis (Phase 3)'
-                    : 'Not Ready for Analysis'}
+                <div className="mt-1 text-[13px] font-semibold text-white flex items-center gap-2">
+                  <span>
+                    {displayedJob
+                      ? displayedJob.status.replace(/_/g, ' ')
+                      : aiEligibleHalfSession
+                        ? 'Ready to Analyze'
+                        : 'Awaiting Footage'}
+                  </span>
                 </div>
                 <div className="mt-0.5 text-[11px] text-[#8A94A6]">
-                  {aiEligibleFirstHalf
-                    ? 'No Gemini video upload or tactical inference has been run in Phase 2.2.'
-                    : 'Analysis Completed status activates only after Phase 3 report persistence.'}
+                  {aiStatus?.configured
+                    ? `Server GEMINI_API_KEY configured · Default: ${aiStatus.defaultModel}`
+                    : 'Server GEMINI_API_KEY not configured in environment (.env).'}
                 </div>
               </div>
             </div>
-          )}
 
-          {/* 11-Section Briefing Architecture Overview */}
-          <div className="border-t border-white/[0.08] pt-6">
-            <div className="text-[13px] font-semibold text-white mb-4">
-              Structured 11-Section Half-Time Report Schema
-            </div>
-            <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4 text-[12px]">
-              {[
-                ['01. Match Situation', 'Scoreline, formations, objective, tactical rating'],
-                ['02. Manager’s Verdict', 'Concise Head Coach assessment anchored to match footage'],
-                ['03. First-Half Performance', 'Attacking, Defending, and Transition phase breakdown'],
-                ['04. What Is Working', '3–5 evidence-backed strengths to preserve'],
-                ['05. What Is Not Working', 'Ranked problems with evidence, consequence, and fix'],
-                ['06. Opponent Exploitation', 'Top 3 evidence-supported ways to expose opponent gaps'],
-                ['07. Second-Half Game Plan', 'Plan A adjustment, Plan B pivot, Plan C score-state rules'],
-                ['08. Player Instructions', 'Role/focus adjustments bound to verified squad profiles'],
-                ['09. Substitutions', 'Tactical replacements without fabricated stamina/ratings'],
-                ['10. Three Priority Actions', 'Exactly three mandatory non-negotiable adjustments'],
-                ['11. Manager’s Final Instruction', 'Decisive strategic closing directive with honest uncertainty'],
-              ].map(([title, desc]) => (
-                <div
-                  key={title}
-                  className="border border-white/[0.07] bg-[#0E1116] rounded-md p-3.5"
+            {aiStatus && !aiStatus.configured && (
+              <div className="border border-amber-500/35 bg-amber-500/10 rounded-md px-3.5 py-2.5 text-[12px] text-amber-200 flex items-center justify-between gap-3">
+                <span>
+                  <strong>Server-side GEMINI_API_KEY is not set.</strong> Live Gemini analysis
+                  requires setting <code className="font-mono text-amber-100">GEMINI_API_KEY</code>{' '}
+                  in your environment variables or local <code className="font-mono text-amber-100">.env</code>{' '}
+                  file (API keys are never entered in the UI).
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setActiveSection('settings')}
+                  className="shrink-0 px-2.5 py-1 rounded border border-amber-400/40 text-amber-100 hover:bg-amber-500/20 text-[11px]"
                 >
-                  <div className="font-medium text-white">{title}</div>
-                  <div className="mt-1 text-[#8A94A6] leading-relaxed">{desc}</div>
-                </div>
-              ))}
-            </div>
-          </div>
-
-          <div className="flex flex-wrap items-center gap-3 pt-2">
-            <button
-              type="button"
-              onClick={() => setActiveSection('match-capture')}
-              className="px-4 py-2 rounded-md bg-emerald-600 hover:bg-emerald-500 text-white text-[13px] font-medium"
-            >
-              Go to Match Capture
-            </button>
-            <button
-              type="button"
-              onClick={() => setActiveSection('tactical-board')}
-              className="px-4 py-2 rounded-md border border-white/[0.12] hover:border-white/[0.24] text-[#D7DDE7] text-[13px] font-medium"
-            >
-              Inspect Tactical Board
-            </button>
-          </div>
-        </div>
-      ) : (
-        <div className="space-y-6">
-          {/* Executive Header — Section 1 & Section 2 */}
-          <section className="border border-white/[0.08] bg-[#12151B] rounded-lg p-6 space-y-5">
-            <div className="flex flex-wrap items-center justify-between gap-4 border-b border-white/[0.08] pb-5">
-              <div>
-                <div className="text-[12px] text-[#8A94A6]">
-                  Section 1 · Match Situation · Model {report.modelUsed}
-                </div>
-                <div className="mt-1 text-[24px] font-bold text-white font-mono tabular-nums">
-                  {report.section1MatchSituation.clubName}{' '}
-                  <span className="text-emerald-400 px-2">
-                    {report.section1MatchSituation.scoreLabel}
-                  </span>{' '}
-                  {report.section1MatchSituation.opponentName}
-                </div>
-                <div className="mt-1 text-[13px] text-[#9AA4B4]">
-                  {report.section1MatchSituation.halftimeStatus} · Starting{' '}
-                  {report.section1MatchSituation.startingFormation} vs Observed{' '}
-                  {report.section1MatchSituation.observedOpponentFormation}
-                </div>
+                  Open AI Settings
+                </button>
               </div>
-              <div className="text-right">
-                <div className="text-[12px] text-[#8A94A6]">Tactical Assessment</div>
-                <div className="mt-0.5 text-[18px] font-semibold text-white">
-                  {report.section1MatchSituation.tacticalRatingLabel}
-                </div>
-              </div>
-            </div>
+            )}
 
-            <div>
-              <div className="text-[12px] text-emerald-400 font-medium mb-1">
-                Section 2 · Manager’s Verdict
-              </div>
-              <p className="text-[15px] text-[#E6EBF2] leading-relaxed">
-                {report.section2ManagersVerdict}
-              </p>
-            </div>
-          </section>
-
-          {/* Section 10 Highlight: Three Priority Actions */}
-          <section className="border border-emerald-500/25 bg-[#111917] rounded-lg p-6">
-            <div className="flex items-center gap-2 text-[14px] font-semibold text-emerald-300 mb-3">
-              <ClipboardCheck className="w-4 h-4" />
-              Section 10 · Three Mandatory Priority Actions
-            </div>
-            <ol className="grid grid-cols-1 md:grid-cols-3 gap-4 text-[13px]">
-              {report.section10PriorityActions.map((action, idx) => (
-                <li
-                  key={idx}
-                  className="border border-white/[0.08] bg-[#0D1311] rounded-md p-4 text-white leading-relaxed"
+            {/* Launch Controls */}
+            <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 pt-2 border-t border-white/[0.06] items-end">
+              <div className="lg:col-span-3">
+                <label className="block text-[11px] uppercase tracking-wider text-[#8A94A6] mb-1">
+                  Analysis Mode
+                </label>
+                <select
+                  value={analysisMode}
+                  onChange={(e) => setAnalysisMode(e.target.value as VideoAnalysisMode)}
+                  className="w-full bg-[#0E1116] border border-white/[0.12] rounded-md px-3 py-2 text-[13px] text-white"
                 >
-                  <span className="font-mono text-emerald-400 mr-2">0{idx + 1}.</span>
-                  {action}
-                </li>
-              ))}
-            </ol>
-          </section>
+                  <option value="quick">Quick Half-Time (Fastest / Low Cost)</option>
+                  <option value="balanced">Balanced Analyst (Recommended)</option>
+                  <option value="deep">Deep Tactical Breakdown</option>
+                </select>
+              </div>
 
-          {/* Section 3: First-Half Performance */}
-          <section className="border border-white/[0.08] bg-[#12151B] rounded-lg p-6">
-            <h2 className="text-[16px] font-semibold text-white mb-4">
-              Section 3 · First-Half Performance
-            </h2>
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-6 text-[13px]">
-              <div>
-                <div className="font-semibold text-white mb-1.5">Attacking</div>
-                <p className="text-[#A8B2C2] leading-relaxed">
-                  {report.section3FirstHalfPerformance.attacking}
-                </p>
+              <div className="lg:col-span-2">
+                <label className="block text-[11px] uppercase tracking-wider text-[#8A94A6] mb-1">
+                  Output Language
+                </label>
+                <select
+                  value={language}
+                  onChange={(e) => setLanguage(e.target.value as AnalysisLanguage)}
+                  className="w-full bg-[#0E1116] border border-white/[0.12] rounded-md px-3 py-2 text-[13px] text-white"
+                >
+                  <option value="en">English (EN)</option>
+                  <option value="id">Bahasa Indonesia (ID)</option>
+                </select>
               </div>
-              <div>
-                <div className="font-semibold text-white mb-1.5">Defending</div>
-                <p className="text-[#A8B2C2] leading-relaxed">
-                  {report.section3FirstHalfPerformance.defending}
-                </p>
+
+              <div className="lg:col-span-4 space-y-1.5 text-[12px] text-[#C5CCD7]">
+                <label className="flex items-start gap-2 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={privacyAuthorized}
+                    onChange={(e) => setPrivacyAuthorized(e.target.checked)}
+                    className="mt-0.5 accent-emerald-500"
+                  />
+                  <span>
+                    I explicitly authorize uploading this verified {selectedHalf.replace('_', ' ')}{' '}
+                    footage to Google Gemini API (remote files deleted automatically after analysis).
+                  </span>
+                </label>
+
+                {requiresEntireDisplayAck && (
+                  <label className="flex items-start gap-2 cursor-pointer text-amber-200">
+                    <input
+                      type="checkbox"
+                      checked={entireDisplayAcknowledged}
+                      onChange={(e) => setEntireDisplayAcknowledged(e.target.checked)}
+                      className="mt-0.5 accent-amber-500"
+                    />
+                    <span>
+                      Entire-display capture detected: I confirm no sensitive desktop windows are
+                      exposed in this recording.
+                    </span>
+                  </label>
+                )}
+
+                <label className="flex items-center gap-2 cursor-pointer text-[#8A94A6]">
+                  <input
+                    type="checkbox"
+                    checked={forceReanalyze}
+                    onChange={(e) => setForceReanalyze(e.target.checked)}
+                    className="accent-sky-500"
+                  />
+                  <span>Force fresh re-analysis (bypass cached identical fingerprint)</span>
+                </label>
               </div>
-              <div>
-                <div className="font-semibold text-white mb-1.5">Transitions</div>
-                <p className="text-[#A8B2C2] leading-relaxed">
-                  {report.section3FirstHalfPerformance.transitions}
-                </p>
+
+              <div className="lg:col-span-3 flex flex-col gap-2">
+                <button
+                  type="button"
+                  disabled={
+                    startingAnalysis ||
+                    isJobRunning ||
+                    !aiEligibleHalfSession ||
+                    !privacyAuthorized ||
+                    (requiresEntireDisplayAck && !entireDisplayAcknowledged)
+                  }
+                  onClick={() => void handleStartAnalysis()}
+                  className="w-full inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-md bg-emerald-600 hover:bg-emerald-500 disabled:bg-white/[0.08] disabled:text-[#6B7485] text-white text-[13px] font-semibold transition-colors"
+                >
+                  {startingAnalysis || isJobRunning ? (
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                  ) : (
+                    <Play className="w-4 h-4" />
+                  )}
+                  {isJobRunning
+                    ? 'Analysis In Progress...'
+                    : selectedHalf === 'first_half'
+                      ? 'Analyze First Half'
+                      : 'Analyze Second Half'}
+                </button>
               </div>
             </div>
           </section>
 
-          {/* Sections 4 & 5: Working vs Failing */}
-          <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
-            <section className="border border-white/[0.08] bg-[#12151B] rounded-lg p-6 space-y-4">
-              <h2 className="text-[16px] font-semibold text-white">Section 4 · What Is Working</h2>
-              <div className="divide-y divide-white/[0.06]">
-                {report.section4WhatIsWorking.map((item, idx) => (
-                  <div key={idx} className="py-3 first:pt-0 text-[13px] space-y-1">
-                    <div className="font-medium text-white">
-                      {item.observation}{' '}
-                      <span className="text-[11px] text-[#8A94A6] font-normal">
-                        · Confidence: {item.confidence}
-                      </span>
-                    </div>
-                    <p className="text-[#9AA4B4]">{item.whyEffective}</p>
-                    <p className="text-emerald-300/90 text-[12px]">Continue: {item.continueDoing}</p>
-                  </div>
-                ))}
-              </div>
-            </section>
+          {/* Job History & Live 17-State Progress Tracker */}
+          {displayedJob && (
+            <section className="border border-white/[0.08] bg-[#12151B] rounded-lg p-5 space-y-4">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div className="flex flex-wrap items-center gap-2.5">
+                  <span
+                    className={`px-2.5 py-1 rounded border text-[11px] font-mono uppercase ${statusBadgeStyle(
+                      displayedJob.status
+                    )}`}
+                  >
+                    {displayedJob.status.replace(/_/g, ' ')}
+                  </span>
+                  <span className="text-[13px] font-medium text-white">
+                    {displayedJob.progressDetail?.stageLabel || displayedJob.currentStage}
+                  </span>
+                  <span className="text-[12px] text-[#8A94A6] font-mono">
+                    {displayedJob.half.replace('_', ' ')} · {displayedJob.analysisMode} ·{' '}
+                    {displayedJob.language.toUpperCase()}
+                  </span>
+                </div>
 
-            <section className="border border-white/[0.08] bg-[#12151B] rounded-lg p-6 space-y-4">
-              <h2 className="text-[16px] font-semibold text-white">
-                Section 5 · What Is Not Working
-              </h2>
-              <div className="divide-y divide-white/[0.06]">
-                {report.section5WhatIsNotWorking.map((item) => (
-                  <div key={item.rank} className="py-3 first:pt-0 text-[13px] space-y-1">
-                    <div className="font-medium text-white">
-                      #{item.rank} {item.problem}{' '}
-                      <span className="text-[11px] text-[#8A94A6] font-normal">
-                        · Confidence: {item.confidence}
-                      </span>
-                    </div>
-                    <p className="text-[#9AA4B4]">Evidence: {item.evidence}</p>
-                    <p className="text-[#B8C0CE]">{item.tacticalExplanation}</p>
-                    <p className="text-amber-300/90 text-[12px]">Fix: {item.proposedSolution}</p>
-                  </div>
-                ))}
-              </div>
-            </section>
-          </div>
+                <div className="flex flex-wrap items-center gap-2">
+                  {(bundle?.jobs.length ?? 0) > 1 && (
+                    <select
+                      value={displayedJob.id}
+                      onChange={(e) => setSelectedJobId(e.target.value)}
+                      className="bg-[#0E1116] border border-white/[0.12] rounded px-2.5 py-1 text-[12px] text-[#C5CCD7] font-mono"
+                    >
+                      {bundle?.jobs.map((j) => (
+                        <option key={j.id} value={j.id}>
+                          {j.createdAt.slice(0, 16).replace('T', ' ')} · {j.half} · {j.status}
+                        </option>
+                      ))}
+                    </select>
+                  )}
 
-          {/* Section 6 & Section 7 + Tactical Pitch */}
-          <div className="grid grid-cols-1 xl:grid-cols-12 gap-6">
-            <div className="xl:col-span-7 space-y-6">
-              <section className="border border-white/[0.08] bg-[#12151B] rounded-lg p-6 space-y-4">
-                <h2 className="text-[16px] font-semibold text-white">
-                  Section 6 · Opponent Weakness Exploitation
-                </h2>
-                <div className="divide-y divide-white/[0.06]">
-                  {report.section6OpponentWeaknesses.map((w, idx) => (
-                    <div key={idx} className="py-3 first:pt-0 text-[13px] space-y-1">
-                      <div className="font-medium text-white">
-                        {w.strategy}{' '}
-                        <span className="text-[11px] text-[#8A94A6] font-normal">
-                          · Confidence: {w.confidence}
-                        </span>
-                      </div>
-                      <p className="text-[#9AA4B4]">Evidence: {w.evidence}</p>
-                      <p className="text-[#C5CCD7]">{w.executionDetail}</p>
-                    </div>
+                  {!TERMINAL_JOB_STATUSES.has(displayedJob.status) && (
+                    <button
+                      type="button"
+                      onClick={() => void handleCancelJob(displayedJob.id)}
+                      className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md border border-rose-500/40 text-rose-300 hover:bg-rose-500/10 text-[12px]"
+                    >
+                      <XCircle className="w-3.5 h-3.5" />
+                      Cancel Job
+                    </button>
+                  )}
+
+                  {failedCleanupAssets.length > 0 && (
+                    <button
+                      type="button"
+                      onClick={() => void handleRetryCleanup(displayedJob.id)}
+                      className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md border border-amber-500/40 text-amber-200 hover:bg-amber-500/10 text-[12px]"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                      Retry Remote Cleanup ({failedCleanupAssets.length})
+                    </button>
+                  )}
+                </div>
+              </div>
+
+              {/* Progress Bar */}
+              <div className="space-y-1.5">
+                <div className="flex items-center justify-between text-[11px] text-[#8A94A6] font-mono">
+                  <span>
+                    Segments: {displayedJob.segmentsProcessed} / {Math.max(1, displayedJob.segmentsTotal)} ·
+                    Video Model: {displayedJob.modelVideoId} · Synthesis: {displayedJob.modelSynthesisId}
+                  </span>
+                  <span>
+                    Est. ${displayedJob.estimatedCostUsd.toFixed(4)}
+                    {displayedJob.actualCostUsd !== null
+                      ? ` · Actual $${displayedJob.actualCostUsd.toFixed(4)}`
+                      : ''}{' '}
+                    / Cap ${displayedJob.budgetCapUsd.toFixed(2)} ·{' '}
+                    {(displayedJob.elapsedMs / 1000).toFixed(1)}s
+                  </span>
+                </div>
+                <div className="h-2 rounded-full bg-white/[0.06] overflow-hidden">
+                  <div
+                    className={`h-full transition-all duration-500 ${
+                      displayedJob.status === 'failed' || displayedJob.status === 'interrupted'
+                        ? 'bg-rose-500'
+                        : displayedJob.status === 'insufficient_gameplay'
+                          ? 'bg-amber-500'
+                          : 'bg-emerald-500'
+                    }`}
+                    style={{
+                      width: `${
+                        displayedJob.status === 'completed' ||
+                        displayedJob.status === 'completed_with_limitations' ||
+                        displayedJob.status === 'insufficient_gameplay'
+                          ? 100
+                          : Math.min(
+                              95,
+                              Math.max(
+                                8,
+                                Math.round(
+                                  (displayedJob.segmentsProcessed /
+                                    Math.max(1, displayedJob.segmentsTotal)) *
+                                    100
+                                )
+                              )
+                            )
+                      }%`,
+                    }}
+                  />
+                </div>
+              </div>
+
+              {/* Truthful Status Explanations for Special Terminal States */}
+              {displayedJob.status === 'insufficient_gameplay' && (
+                <div className="border border-amber-500/35 bg-amber-500/10 rounded-md p-3.5 text-[13px] text-amber-100">
+                  <div className="font-semibold flex items-center gap-2">
+                    <ShieldAlert className="w-4 h-4 text-amber-300" />
+                    Insufficient Live Gameplay Detected — Zero Events Fabricated
+                  </div>
+                  <p className="mt-1 text-[12px] text-amber-200/90">
+                    Stage 1 classification found primarily menus, pause screens, cutscenes, or
+                    non-gameplay footage ({displayedJob.coverageSummary || 'no sustained live gameplay'}).
+                    No tactical events or half-time recommendations were invented.
+                  </p>
+                </div>
+              )}
+
+              {(displayedJob.status === 'failed' ||
+                displayedJob.status === 'interrupted' ||
+                displayedJob.status === 'cancelled') && (
+                <div className="border border-rose-500/35 bg-rose-500/10 rounded-md p-3.5 text-[13px] text-rose-100">
+                  <div className="font-semibold">
+                    {displayedJob.status === 'interrupted'
+                      ? 'Analysis Interrupted (App Restarted Mid-Job)'
+                      : displayedJob.status === 'cancelled'
+                        ? 'Analysis Cancelled by Manager'
+                        : `Analysis Failed${displayedJob.errorCode ? ` (${displayedJob.errorCode})` : ''}`}
+                  </div>
+                  {displayedJob.errorMessage && (
+                    <p className="mt-1 text-[12px] text-rose-200/90">{displayedJob.errorMessage}</p>
+                  )}
+                </div>
+              )}
+
+              {/* Remote Cleanup Verification Strip */}
+              {(bundle?.assets.length ?? 0) > 0 && (
+                <div className="flex flex-wrap items-center gap-2 pt-1 text-[11px] text-[#8A94A6]">
+                  <span className="uppercase tracking-wider">Remote Media Cleanup:</span>
+                  {bundle?.assets.map((asset) => (
+                    <span
+                      key={asset.id}
+                      className={`px-2 py-0.5 rounded border font-mono ${statusBadgeStyle(
+                        asset.cleanupStatus
+                      )}`}
+                    >
+                      {asset.id.slice(0, 6)}: {asset.cleanupStatus}
+                    </span>
                   ))}
                 </div>
-              </section>
-
-              <section className="border border-white/[0.08] bg-[#12151B] rounded-lg p-6 space-y-5 text-[13px]">
-                <h2 className="text-[16px] font-semibold text-white">
-                  Section 7 · Second-Half Game Plan
-                </h2>
-                <div className="space-y-1.5">
-                  <div className="font-semibold text-emerald-400">
-                    Plan A — Recommended Tactical Adjustment
-                  </div>
-                  <div className="text-[#C5CCD7]">
-                    Formation: {report.section7SecondHalfPlan.planA.formation} · Build-Up:{' '}
-                    {report.section7SecondHalfPlan.planA.buildUpStyle} · Defense:{' '}
-                    {report.section7SecondHalfPlan.planA.defensiveApproach} (
-                    {report.section7SecondHalfPlan.planA.defensiveLine})
-                  </div>
-                  <p className="text-[#9AA4B4]">
-                    {report.section7SecondHalfPlan.planA.attackingStrategy}
-                  </p>
-                </div>
-                <div className="pt-3 border-t border-white/[0.06] space-y-1">
-                  <div className="font-semibold text-white">Plan B — Alternative Strategy</div>
-                  <p className="text-[#9AA4B4]">
-                    Trigger: {report.section7SecondHalfPlan.planB.triggerCondition}
-                  </p>
-                  <p className="text-[#C5CCD7]">
-                    {report.section7SecondHalfPlan.planB.adjustmentSummary}
-                  </p>
-                </div>
-                <div className="pt-3 border-t border-white/[0.06] grid grid-cols-1 md:grid-cols-3 gap-3">
-                  <div>
-                    <div className="font-medium text-white">If Leading</div>
-                    <p className="text-[#9AA4B4] mt-1">
-                      {report.section7SecondHalfPlan.planC.ifLeading}
-                    </p>
-                  </div>
-                  <div>
-                    <div className="font-medium text-white">If Drawing</div>
-                    <p className="text-[#9AA4B4] mt-1">
-                      {report.section7SecondHalfPlan.planC.ifDrawing}
-                    </p>
-                  </div>
-                  <div>
-                    <div className="font-medium text-white">If Losing</div>
-                    <p className="text-[#9AA4B4] mt-1">
-                      {report.section7SecondHalfPlan.planC.ifLosing}
-                    </p>
-                  </div>
-                </div>
-              </section>
-            </div>
-
-            <div className="xl:col-span-5 border border-white/[0.08] bg-[#12151B] rounded-lg p-5">
-              <TacticalPitchSVG
-                formation={report.section7SecondHalfPlan.planA.formation}
-                players={players}
-                assignments={selectedMatch?.tacticalConfiguration?.playerAssignments ?? []}
-                label="Recommended Second-Half Structure (Plan A)"
-                variant="recommended"
-                showAttackingChannels
-                showDefensiveZones
-                showPressingAreas
-              />
-            </div>
-          </div>
-
-          {/* Structured Recommendations Table (Part 9 Format) */}
-          {report.recommendations.length > 0 && (
-            <section className="border border-white/[0.08] bg-[#12151B] rounded-lg p-6 space-y-4">
-              <h2 className="text-[16px] font-semibold text-white">
-                Structured FC26 Tactical Recommendations
-              </h2>
-              <div className="space-y-4">
-                {report.recommendations.map((rec) => (
-                  <div
-                    key={rec.id}
-                    className="border border-white/[0.08] bg-[#0E1116] rounded-md p-4 text-[13px] grid grid-cols-1 md:grid-cols-2 gap-3"
-                  >
-                    <div>
-                      <span className="text-[11px] text-[#7D8798] block">Current Tactic</span>
-                      <span className="text-[#C5CCD7]">{rec.currentTactic}</span>
-                    </div>
-                    <div>
-                      <span className="text-[11px] text-emerald-400 block">Recommended Change</span>
-                      <span className="text-white font-medium">{rec.recommendedChange}</span>
-                    </div>
-                    <div>
-                      <span className="text-[11px] text-[#7D8798] block">
-                        Why This Change Is Necessary
-                      </span>
-                      <span className="text-[#B2BAC8]">{rec.whyNecessary}</span>
-                    </div>
-                    <div>
-                      <span className="text-[11px] text-[#7D8798] block">Expected Benefit</span>
-                      <span className="text-[#B2BAC8]">{rec.expectedBenefit}</span>
-                    </div>
-                    <div>
-                      <span className="text-[11px] text-[#7D8798] block">Potential Risk</span>
-                      <span className="text-[#B2BAC8]">{rec.potentialRisk}</span>
-                    </div>
-                    <div>
-                      <span className="text-[11px] text-[#7D8798] block">
-                        When / Confidence / Priority
-                      </span>
-                      <span className="text-[#C5CCD7]">
-                        {rec.whenToApply} · Confidence: {rec.confidence} · Priority: {rec.priority}
-                      </span>
-                    </div>
-                  </div>
-                ))}
-              </div>
+              )}
             </section>
           )}
 
-          {/* Sections 8, 9, 11 */}
-          <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
-            <section className="border border-white/[0.08] bg-[#12151B] rounded-lg p-6 space-y-3 text-[13px]">
-              <h2 className="text-[16px] font-semibold text-white">
-                Section 8 · Player Instructions
-              </h2>
-              {report.section8PlayerInstructions.length > 0 ? (
-                report.section8PlayerInstructions.map((p, idx) => (
-                  <div key={idx} className="pt-2 border-t border-white/[0.06] first:border-t-0">
-                    <div className="font-medium text-white">
-                      {p.playerLabel}: {p.currentRole} → {p.proposedRole}
-                    </div>
-                    <p className="text-[#9AA4B4] mt-0.5">{p.reasoning}</p>
-                  </div>
-                ))
-              ) : (
-                <p className="text-[#8A94A6]">
-                  No player-specific changes listed (requires verified squad profiles or visual
-                  identification).
-                </p>
-              )}
-            </section>
+          {/* Phase 3 Completed Executive Briefing Workbench */}
+          {briefing ? (
+            <div className="space-y-5">
+              {/* Sub-Tabs */}
+              <div className="flex flex-wrap items-center gap-2 border-b border-white/[0.08] pb-3">
+                {(
+                  [
+                    ['briefing', 'Executive Briefing & Vision', Layers],
+                    [
+                      'recommendations',
+                      `Recommendations & Decisions (${recommendations.length})`,
+                      ClipboardCheck,
+                    ],
+                    [
+                      'evidence',
+                      `Evidence Timeline & Frames (${bundle?.observations.length ?? 0})`,
+                      Eye,
+                    ],
+                    ...(secondHalfComparison
+                      ? ([['comparison', 'Second-Half Comparison', GitCompare]] as const)
+                      : []),
+                  ] as Array<[BriefingTab, string, typeof Layers]>
+                ).map(([tabKey, label, Icon]) => (
+                  <button
+                    key={tabKey}
+                    type="button"
+                    onClick={() => setActiveTab(tabKey)}
+                    className={`inline-flex items-center gap-1.5 px-3.5 py-2 rounded-md text-[13px] font-medium transition-colors ${
+                      activeTab === tabKey
+                        ? 'bg-emerald-600 text-white'
+                        : 'bg-[#12151B] border border-white/[0.08] text-[#9AA4B4] hover:text-white'
+                    }`}
+                  >
+                    <Icon className="w-3.5 h-3.5" />
+                    {label}
+                  </button>
+                ))}
+              </div>
 
-            <section className="border border-white/[0.08] bg-[#12151B] rounded-lg p-6 space-y-3 text-[13px]">
-              <h2 className="text-[16px] font-semibold text-white">
-                Section 9 · Substitution Recommendations
-              </h2>
-              {report.section9Substitutions.length > 0 ? (
-                report.section9Substitutions.map((s, idx) => (
-                  <div key={idx} className="pt-2 border-t border-white/[0.06] first:border-t-0">
-                    <div className="font-medium text-white">
-                      Off: {s.playerOut} → On: {s.playerIn}
+              {/* TAB 1: EXECUTIVE BRIEFING & TACTICAL VISION EVALUATION */}
+              {activeTab === 'briefing' && (
+                <div className="space-y-6">
+                  {/* Section A: Match & Evidence Header */}
+                  <section className="border border-white/[0.08] bg-[#12151B] rounded-lg p-5 space-y-4">
+                    <div className="flex flex-wrap items-start justify-between gap-4 border-b border-white/[0.06] pb-4">
+                      <div>
+                        <div className="text-[11px] font-mono uppercase tracking-wider text-[#8A94A6]">
+                          Section A · Match &amp; Evidence Integrity · {briefing.modelUsed} · Prompt{' '}
+                          {briefing.promptVersion}
+                        </div>
+                        <h3 className="mt-1 text-[20px] font-bold text-white">
+                          {selectedMatch.venue === 'home' ? 'vs' : '@'} {selectedMatch.opponentName} ·{' '}
+                          {briefing.readableHudStats.scoreline || 'Score Not Visible in HUD'}
+                        </h3>
+                        <div className="mt-1 text-[12px] text-[#9AA4B4]">
+                          {displayedJob?.coverageSummary || 'Verified gameplay segments analyzed.'}
+                        </div>
+                      </div>
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span
+                          className={`px-2.5 py-1 rounded border text-[11px] font-mono uppercase ${statusBadgeStyle(
+                            briefing.evidenceQuality === 'high'
+                              ? 'completed'
+                              : briefing.evidenceQuality === 'moderate'
+                                ? 'completed_with_limitations'
+                                : 'insufficient_gameplay'
+                          )}`}
+                        >
+                          Evidence Quality: {briefing.evidenceQuality}
+                        </span>
+                        {briefing.readableHudStats.matchClock && (
+                          <span className="px-2.5 py-1 rounded border border-white/[0.12] bg-[#0E1116] text-[11px] font-mono text-[#D7DDE7]">
+                            HUD Clock: {briefing.readableHudStats.matchClock}
+                          </span>
+                        )}
+                      </div>
                     </div>
-                    <p className="text-[#9AA4B4] mt-0.5">{s.tacticalReason}</p>
-                  </div>
-                ))
-              ) : (
-                <p className="text-[#8A94A6]">
-                  No substitutions recommended without bench availability or observed fatigue.
-                </p>
-              )}
-            </section>
-          </div>
 
-          <section className="border border-white/[0.08] bg-[#12151B] rounded-lg p-6">
-            <div className="text-[12px] text-[#8A94A6] mb-1">
-              Section 11 · Manager’s Final Instruction
+                    {/* Verified HUD Stats (Only when actually readable) */}
+                    {(briefing.readableHudStats.possessionLabel ||
+                      briefing.readableHudStats.shotsLabel ||
+                      briefing.readableHudStats.otherVerifiedStats.length > 0) && (
+                      <div className="flex flex-wrap gap-2.5 text-[12px]">
+                        {briefing.readableHudStats.possessionLabel && (
+                          <div className="px-3 py-1.5 rounded bg-[#0E1116] border border-white/[0.08]">
+                            <span className="text-[#8A94A6] mr-1.5">HUD Possession:</span>
+                            <span className="text-white font-mono">
+                              {briefing.readableHudStats.possessionLabel}
+                            </span>
+                          </div>
+                        )}
+                        {briefing.readableHudStats.shotsLabel && (
+                          <div className="px-3 py-1.5 rounded bg-[#0E1116] border border-white/[0.08]">
+                            <span className="text-[#8A94A6] mr-1.5">HUD Shots:</span>
+                            <span className="text-white font-mono">
+                              {briefing.readableHudStats.shotsLabel}
+                            </span>
+                          </div>
+                        )}
+                        {briefing.readableHudStats.otherVerifiedStats.map((st, idx) => (
+                          <div
+                            key={idx}
+                            className="px-3 py-1.5 rounded bg-[#0E1116] border border-white/[0.08]"
+                          >
+                            <span className="text-[#8A94A6] mr-1.5">{st.label}:</span>
+                            <span className="text-white font-mono">{st.value}</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+
+                    {/* Section B: Manager Verdict */}
+                    <div className="space-y-4">
+                      <div>
+                        <div className="text-[11px] font-mono uppercase tracking-wider text-emerald-400">
+                          Section B · Manager’s Verdict
+                        </div>
+                        <p className="mt-1.5 text-[15px] text-[#E6EBF2] leading-relaxed">
+                          {briefing.managerVerdict.conciseSummary}
+                        </p>
+                      </div>
+
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-[13px]">
+                        <div className="border border-emerald-500/20 bg-[#0D1412] rounded-md p-4">
+                          <div className="font-semibold text-emerald-300 mb-2">What Is Working</div>
+                          <ul className="space-y-1.5 text-[#C5CCD7] list-disc pl-4">
+                            {briefing.managerVerdict.whatIsWorking.map((item, i) => (
+                              <li key={i}>{item}</li>
+                            ))}
+                          </ul>
+                        </div>
+
+                        <div className="border border-rose-500/20 bg-[#150E11] rounded-md p-4">
+                          <div className="font-semibold text-rose-300 mb-2">What Is Not Working</div>
+                          <ul className="space-y-1.5 text-[#C5CCD7] list-disc pl-4">
+                            {briefing.managerVerdict.whatIsNotWorking.map((item, i) => (
+                              <li key={i}>{item}</li>
+                            ))}
+                          </ul>
+                        </div>
+
+                        <div className="border border-white/[0.08] bg-[#0E1116] rounded-md p-4">
+                          <div className="font-semibold text-white mb-1.5">
+                            Why Current Tactic Is Struggling
+                          </div>
+                          <p className="text-[#A8B2C2] leading-relaxed">
+                            {briefing.managerVerdict.whyTacticStruggling}
+                          </p>
+                        </div>
+
+                        <div className="border border-amber-500/25 bg-[#16130C] rounded-md p-4">
+                          <div className="font-semibold text-amber-300 mb-1.5">
+                            First Priority Half-Time Change
+                          </div>
+                          <p className="text-white leading-relaxed">
+                            {briefing.managerVerdict.firstPriorityChange}
+                          </p>
+                        </div>
+                      </div>
+                    </div>
+                  </section>
+
+                  {/* Section C: Tactical Vision Evaluation */}
+                  {visionAssessment && (
+                    <section className="border border-white/[0.08] bg-[#12151B] rounded-lg p-5 space-y-4">
+                      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-white/[0.06] pb-3">
+                        <div>
+                          <div className="text-[11px] font-mono uppercase tracking-wider text-sky-400">
+                            Section C · Tactical Vision Evaluation
+                          </div>
+                          <h3 className="mt-0.5 text-[16px] font-semibold text-white">
+                            {visionAssessment.executionAssessmentLabel}
+                          </h3>
+                        </div>
+                        <div className="flex flex-wrap items-center gap-2 text-[11px] font-mono">
+                          <span
+                            className={`px-2.5 py-1 rounded border uppercase ${statusBadgeStyle(
+                              visionAssessment.officialComplianceStatus
+                            )}`}
+                          >
+                            Layer 2 Official: {visionAssessment.officialComplianceStatus}
+                          </span>
+                          <span className="px-2.5 py-1 rounded border border-white/[0.12] bg-[#0E1116] text-[#D7DDE7]">
+                            Layer 3 Affinity: {visionAssessment.roleAffinityMatchedCount} /{' '}
+                            {visionAssessment.roleAffinityTotalCount}
+                            {visionAssessment.roleAffinityUnknownCount > 0
+                              ? ` (${visionAssessment.roleAffinityUnknownCount} unknown)`
+                              : ''}
+                          </span>
+                          {visionAssessment.internalAssessmentScore !== null && (
+                            <span className="px-2.5 py-1 rounded border border-sky-500/35 bg-sky-500/15 text-sky-200">
+                              Internal Fit Index: {visionAssessment.internalAssessmentScore}/100
+                            </span>
+                          )}
+                        </div>
+                      </div>
+
+                      <div className="grid grid-cols-1 md:grid-cols-3 gap-3 text-[13px]">
+                        <div className="border border-white/[0.08] bg-[#0E1116] rounded-md p-3.5">
+                          <div className="text-[11px] uppercase tracking-wider text-[#8A94A6]">
+                            Intended Vision
+                          </div>
+                          <div className="mt-1 font-semibold text-white capitalize">
+                            {visionAssessment.intendedVisionKey.replace(/_/g, ' ')}
+                          </div>
+                        </div>
+
+                        <div className="border border-white/[0.08] bg-[#0E1116] rounded-md p-3.5">
+                          <div className="text-[11px] uppercase tracking-wider text-[#8A94A6]">
+                            Observed Playing Style
+                          </div>
+                          <div className="mt-1 font-semibold text-white">
+                            {visionAssessment.observedPlayingStyle.primaryTendency}
+                          </div>
+                          <p className="mt-1 text-[12px] text-[#9AA4B4]">
+                            {visionAssessment.observedPlayingStyle.evidenceSummary}
+                          </p>
+                        </div>
+
+                        <div className="border border-white/[0.08] bg-[#0E1116] rounded-md p-3.5">
+                          <div className="text-[11px] uppercase tracking-wider text-[#8A94A6]">
+                            Recommended Stance ({visionAssessment.recommendationStance.replace(/_/g, ' ')})
+                          </div>
+                          <div className="mt-1 font-semibold text-emerald-300 capitalize">
+                            {visionAssessment.recommendedVisionKey.replace(/_/g, ' ')}
+                          </div>
+                          <p className="mt-1 text-[12px] text-[#9AA4B4]">
+                            {visionAssessment.recommendationRationale}
+                          </p>
+                        </div>
+                      </div>
+
+                      {visionAssessment.criteriaBreakdown.length > 0 && (
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-[12px]">
+                          {visionAssessment.criteriaBreakdown.map((c, idx) => (
+                            <div
+                              key={idx}
+                              className="border border-white/[0.07] bg-[#0E1116] rounded-md p-3 flex items-start justify-between gap-3"
+                            >
+                              <div>
+                                <div className="font-medium text-white">{c.criterion}</div>
+                                <div className="mt-0.5 text-[#9AA4B4]">{c.evidenceNote}</div>
+                              </div>
+                              <span
+                                className={`shrink-0 px-2 py-0.5 rounded border text-[10px] font-mono uppercase ${statusBadgeStyle(
+                                  c.assessment
+                                )}`}
+                              >
+                                {c.assessment}
+                              </span>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+
+                      <div className="text-[11px] text-[#8A94A6] border-t border-white/[0.06] pt-2.5">
+                        <strong>Methodology Note:</strong> {visionAssessment.scoreMethodologyNote}
+                        {visionAssessment.limitations && ` · Limitations: ${visionAssessment.limitations}`}
+                      </div>
+                    </section>
+                  )}
+
+                  {/* Section F: Gameplay Coaching & Contingency Plan + Limitations */}
+                  <div className="grid grid-cols-1 xl:grid-cols-2 gap-5">
+                    <section className="border border-white/[0.08] bg-[#12151B] rounded-lg p-5 space-y-3">
+                      <h3 className="text-[15px] font-semibold text-white">
+                        Gameplay Coaching Instructions
+                      </h3>
+                      {briefing.gameplayCoaching.length > 0 ? (
+                        <div className="space-y-2.5 text-[13px]">
+                          {briefing.gameplayCoaching.map((g, i) => (
+                            <div
+                              key={i}
+                              className="border border-white/[0.07] bg-[#0E1116] rounded-md p-3"
+                            >
+                              <div className="font-medium text-white">{g.instruction}</div>
+                              <div className="mt-1 text-[12px] text-emerald-300/90">
+                                Trigger: {g.triggerSituation}
+                              </div>
+                              <div className="mt-0.5 text-[12px] text-[#8A94A6]">
+                                Evidence: {g.evidenceNote}
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      ) : (
+                        <p className="text-[13px] text-[#8A94A6]">
+                          No specific gameplay coaching notes returned for this half.
+                        </p>
+                      )}
+                    </section>
+
+                    <section className="border border-white/[0.08] bg-[#12151B] rounded-lg p-5 space-y-3">
+                      <h3 className="text-[15px] font-semibold text-white">
+                        Contingency Plan &amp; Honest Limitations
+                      </h3>
+                      {briefing.contingencyPlan.length > 0 && (
+                        <div className="space-y-2.5 text-[13px]">
+                          {briefing.contingencyPlan.map((c, i) => (
+                            <div
+                              key={i}
+                              className="border border-white/[0.07] bg-[#0E1116] rounded-md p-3"
+                            >
+                              <div className="font-medium text-white">
+                                {c.scenario}{' '}
+                                <span className="text-[11px] font-normal text-amber-300">
+                                  ({c.trigger})
+                                </span>
+                              </div>
+                              <div className="mt-1 text-[12px] text-[#C5CCD7]">{c.tacticalAction}</div>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+
+                      {briefing.limitations.length > 0 && (
+                        <div className="pt-2 border-t border-white/[0.06]">
+                          <div className="text-[11px] font-mono uppercase tracking-wider text-[#8A94A6] mb-1.5">
+                            Observed Analysis Limitations
+                          </div>
+                          <ul className="space-y-1 text-[12px] text-[#9AA4B4] list-disc pl-4">
+                            {briefing.limitations.map((lim, i) => (
+                              <li key={i}>{lim}</li>
+                            ))}
+                          </ul>
+                        </div>
+                      )}
+                    </section>
+                  </div>
+                </div>
+              )}
+
+              {/* TAB 2: RECOMMENDATIONS, DECISIONS & ADJUSTMENT SNAPSHOTS */}
+              {activeTab === 'recommendations' && (
+                <div className="space-y-6">
+                  {/* Apply Accepted Action Bar */}
+                  <section className="border border-emerald-500/30 bg-[#101815] rounded-lg p-4 flex flex-wrap items-center justify-between gap-4">
+                    <div>
+                      <div className="text-[14px] font-semibold text-white">
+                        Manager-Controlled Tactical Application
+                      </div>
+                      <div className="text-[12px] text-[#9AA4B4] mt-0.5">
+                        AI recommendations never auto-mutate your club preset or pre-match snapshot.
+                        Accept or modify validated recommendations below, then create a separate
+                        Half-Time Adjustment Snapshot.
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      disabled={acceptedRecommendationIds.length === 0 || applyingAdjustment}
+                      onClick={() => void handleApplyAcceptedToSnapshot()}
+                      className="inline-flex items-center gap-2 px-4 py-2 rounded-md bg-emerald-600 hover:bg-emerald-500 disabled:bg-white/[0.08] disabled:text-[#6B7485] text-white text-[13px] font-semibold"
+                    >
+                      {applyingAdjustment ? (
+                        <Loader2 className="w-4 h-4 animate-spin" />
+                      ) : (
+                        <ClipboardCheck className="w-4 h-4" />
+                      )}
+                      Apply {acceptedRecommendationIds.length} Accepted to Half-Time Snapshot
+                    </button>
+                  </section>
+
+                  {/* Recommendations Cards */}
+                  <div className="space-y-3.5">
+                    {recommendations.length === 0 ? (
+                      <div className="border border-white/[0.08] bg-[#12151B] rounded-lg p-6 text-[13px] text-[#8A94A6]">
+                        No tactical recommendations were generated for this job.
+                      </div>
+                    ) : (
+                      recommendations.map((rec) => {
+                        const decisionStatus = rec.decision?.decisionStatus ?? 'ai_recommended';
+                        const isBlockedInvalid = rec.validationStatus === 'invalid_unsupported';
+                        const isEditing = editingRecId === rec.id;
+
+                        return (
+                          <div
+                            key={rec.id}
+                            className={`border rounded-lg p-5 space-y-3 ${
+                              isBlockedInvalid
+                                ? 'border-rose-500/35 bg-[#171114]'
+                                : 'border-white/[0.08] bg-[#12151B]'
+                            }`}
+                          >
+                            <div className="flex flex-wrap items-start justify-between gap-3">
+                              <div>
+                                <div className="flex flex-wrap items-center gap-2 text-[11px] font-mono">
+                                  <span className="text-emerald-400">#{rec.priorityRank}</span>
+                                  <span className="text-[#8A94A6] uppercase">
+                                    {priorityGroupLabel(rec.priorityGroup)}
+                                  </span>
+                                  <span
+                                    className={`px-2 py-0.5 rounded border uppercase ${statusBadgeStyle(
+                                      rec.validationStatus
+                                    )}`}
+                                  >
+                                    FC26 Check: {rec.validationStatus.replace(/_/g, ' ')}
+                                  </span>
+                                  <span
+                                    className={`px-2 py-0.5 rounded border uppercase ${statusBadgeStyle(
+                                      decisionStatus
+                                    )}`}
+                                  >
+                                    {decisionStatus.replace(/_/g, ' ')}
+                                  </span>
+                                  <span className="text-[#8A94A6]">
+                                    Confidence: {rec.confidence}
+                                  </span>
+                                </div>
+                                <h4 className="mt-1 text-[15px] font-semibold text-white">
+                                  {rec.title}
+                                </h4>
+                              </div>
+
+                              {/* Decision Buttons */}
+                              <div className="flex flex-wrap items-center gap-1.5">
+                                <button
+                                  type="button"
+                                  disabled={isBlockedInvalid || savingDecisionId === rec.id}
+                                  onClick={() =>
+                                    void handleRecommendationDecision(rec, 'user_accepted')
+                                  }
+                                  className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded border border-emerald-500/40 bg-emerald-500/10 hover:bg-emerald-500/20 disabled:opacity-40 text-[12px] text-emerald-200"
+                                >
+                                  <Check className="w-3.5 h-3.5" />
+                                  Accept
+                                </button>
+                                <button
+                                  type="button"
+                                  disabled={isBlockedInvalid || savingDecisionId === rec.id}
+                                  onClick={() => {
+                                    setEditingRecId(isEditing ? null : rec.id);
+                                    setModifiedText(
+                                      rec.decision?.modifiedValue || rec.proposedValue
+                                    );
+                                    setDecisionNotes(rec.decision?.userNotes || '');
+                                  }}
+                                  className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded border border-amber-500/40 bg-amber-500/10 hover:bg-amber-500/20 disabled:opacity-40 text-[12px] text-amber-200"
+                                >
+                                  <Edit3 className="w-3.5 h-3.5" />
+                                  Modify
+                                </button>
+                                <button
+                                  type="button"
+                                  disabled={savingDecisionId === rec.id}
+                                  onClick={() =>
+                                    void handleRecommendationDecision(rec, 'user_rejected')
+                                  }
+                                  className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded border border-rose-500/40 bg-rose-500/10 hover:bg-rose-500/20 disabled:opacity-40 text-[12px] text-rose-200"
+                                >
+                                  <X className="w-3.5 h-3.5" />
+                                  Reject
+                                </button>
+                              </div>
+                            </div>
+
+                            {/* Current -> Proposed */}
+                            <div className="flex flex-wrap items-center gap-2 text-[13px] bg-[#0E1116] border border-white/[0.06] rounded-md px-3.5 py-2.5">
+                              <span className="text-[#8A94A6]">{rec.currentValue}</span>
+                              <ArrowRight className="w-4 h-4 text-emerald-400 shrink-0" />
+                              <span className="text-white font-semibold">
+                                {rec.decision?.modifiedValue || rec.proposedValue}
+                              </span>
+                              {rec.targetPositionCode && (
+                                <span className="ml-auto text-[11px] font-mono text-sky-300">
+                                  Slot: {rec.targetPositionCode}
+                                </span>
+                              )}
+                            </div>
+
+                            {rec.validationErrors.length > 0 && (
+                              <div className="border border-rose-500/35 bg-rose-500/10 rounded px-3 py-2 text-[12px] text-rose-200">
+                                <strong>Server Validation Notes:</strong>{' '}
+                                {rec.validationErrors.join(' · ')}
+                              </div>
+                            )}
+
+                            <div className="grid grid-cols-1 md:grid-cols-3 gap-3 text-[12px]">
+                              <div>
+                                <div className="text-[#7D8798] uppercase text-[10px]">
+                                  Tactical Rationale
+                                </div>
+                                <p className="mt-0.5 text-[#C5CCD7]">{rec.reason}</p>
+                              </div>
+                              <div>
+                                <div className="text-[#7D8798] uppercase text-[10px]">
+                                  Expected Benefit
+                                </div>
+                                <p className="mt-0.5 text-emerald-200/90">{rec.expectedBenefit}</p>
+                              </div>
+                              <div>
+                                <div className="text-[#7D8798] uppercase text-[10px]">
+                                  Potential Risk
+                                </div>
+                                <p className="mt-0.5 text-amber-200/90">{rec.potentialRisk}</p>
+                              </div>
+                            </div>
+
+                            {/* Linked Evidence Timestamps */}
+                            {rec.evidenceTimestamps.length > 0 && (
+                              <div className="flex flex-wrap items-center gap-2 text-[11px] text-[#8A94A6] pt-1">
+                                <span>Evidence Clips:</span>
+                                {rec.evidenceTimestamps.map((ts, idx) => (
+                                  <button
+                                    key={idx}
+                                    type="button"
+                                    onClick={() => setActiveTab('evidence')}
+                                    className="px-2 py-0.5 rounded bg-white/[0.05] hover:bg-white/[0.1] text-[#D7DDE7] font-mono"
+                                  >
+                                    {formatSeconds(ts.startSeconds)}–{formatSeconds(ts.endSeconds)}
+                                    {ts.inGameClock ? ` (${ts.inGameClock})` : ''}
+                                  </button>
+                                ))}
+                              </div>
+                            )}
+
+                            {/* Inline Modify Editor */}
+                            {isEditing && (
+                              <div className="border-t border-white/[0.08] pt-3 space-y-2.5">
+                                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                                  <div>
+                                    <label className="block text-[11px] text-[#8A94A6] mb-1">
+                                      Modified Value
+                                    </label>
+                                    <input
+                                      type="text"
+                                      value={modifiedText}
+                                      onChange={(e) => setModifiedText(e.target.value)}
+                                      className="w-full bg-[#0E1116] border border-white/[0.14] rounded px-3 py-1.5 text-[13px] text-white"
+                                    />
+                                  </div>
+                                  <div>
+                                    <label className="block text-[11px] text-[#8A94A6] mb-1">
+                                      Manager Notes
+                                    </label>
+                                    <input
+                                      type="text"
+                                      value={decisionNotes}
+                                      onChange={(e) => setDecisionNotes(e.target.value)}
+                                      placeholder="Optional reason for tweak..."
+                                      className="w-full bg-[#0E1116] border border-white/[0.14] rounded px-3 py-1.5 text-[13px] text-white"
+                                    />
+                                  </div>
+                                </div>
+                                <div className="flex items-center gap-2">
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      void handleRecommendationDecision(
+                                        rec,
+                                        'user_modified',
+                                        modifiedText.trim() || rec.proposedValue,
+                                        decisionNotes.trim()
+                                      )
+                                    }
+                                    className="px-3 py-1.5 rounded bg-amber-600 hover:bg-amber-500 text-white text-[12px] font-medium"
+                                  >
+                                    Save Modification
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => setEditingRecId(null)}
+                                    className="px-3 py-1.5 rounded border border-white/[0.12] text-[#9AA4B4] text-[12px]"
+                                  >
+                                    Cancel
+                                  </button>
+                                </div>
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })
+                    )}
+                  </div>
+
+                  {/* Match Tactical Snapshots Timeline */}
+                  <section className="border border-white/[0.08] bg-[#12151B] rounded-lg p-5 space-y-3">
+                    <div className="flex items-center justify-between">
+                      <h3 className="text-[15px] font-semibold text-white">
+                        Match Tactical Snapshots (Pre-Match Immutable vs Half-Time Adjustments)
+                      </h3>
+                      <span className="text-[11px] font-mono text-[#8A94A6]">
+                        {snapshots.length} snapshot(s)
+                      </span>
+                    </div>
+                    <div className="space-y-2.5">
+                      {snapshots.map((snap) => (
+                        <div
+                          key={snap.id}
+                          className="border border-white/[0.08] bg-[#0E1116] rounded-md p-3.5 flex flex-wrap items-center justify-between gap-3 text-[12px]"
+                        >
+                          <div>
+                            <div className="flex items-center gap-2">
+                              <span
+                                className={`px-2 py-0.5 rounded border font-mono text-[10px] uppercase ${
+                                  snap.snapshotType === 'pre_match'
+                                    ? 'bg-sky-500/15 text-sky-300 border-sky-500/35'
+                                    : 'bg-emerald-500/15 text-emerald-300 border-emerald-500/35'
+                                }`}
+                              >
+                                {snap.snapshotType === 'pre_match'
+                                  ? 'Pre-Match (Immutable)'
+                                  : 'In-Match Adjustment'}
+                              </span>
+                              <span className="font-semibold text-white">
+                                {snap.formationName} · {snap.buildUpStyle} · {snap.defensiveApproach}{' '}
+                                (Line {snap.defensiveLineHeight})
+                              </span>
+                              {snap.tacticalVisionKey && snap.tacticalVisionKey !== 'unspecified' && (
+                                <span className="text-emerald-300 font-mono text-[11px] uppercase">
+                                  [{snap.tacticalVisionKey.replace(/_/g, ' ')}]
+                                </span>
+                              )}
+                            </div>
+                            {snap.notes && (
+                              <div className="mt-1 text-[#8A94A6]">{snap.notes}</div>
+                            )}
+                          </div>
+
+                          {snap.snapshotType === 'in_match_adjustment' && (
+                            <div className="flex flex-wrap items-center gap-2">
+                              <button
+                                type="button"
+                                onClick={() => void handleToggleConfirmAppliedInGame(snap)}
+                                className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded border text-[11px] font-medium ${
+                                  snap.appliedInGameConfirmed
+                                    ? 'border-emerald-500/40 bg-emerald-500/15 text-emerald-200'
+                                    : 'border-white/[0.14] text-[#C5CCD7] hover:border-emerald-500/40'
+                                }`}
+                              >
+                                <CheckCircle2 className="w-3.5 h-3.5" />
+                                {snap.appliedInGameConfirmed
+                                  ? 'Confirmed Applied in FC26'
+                                  : 'Mark Applied in FC26'}
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setPresetModalSnapshotId(snap.id);
+                                  setPresetNameInput(
+                                    `${selectedMatch.opponentName} HT Adjustment (${snap.formationName})`
+                                  );
+                                }}
+                                className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded border border-white/[0.14] hover:border-sky-400/50 text-[#C5CCD7] text-[11px]"
+                              >
+                                <BookmarkPlus className="w-3.5 h-3.5" />
+                                Save as Club Preset
+                              </button>
+                            </div>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+
+                    {presetModalSnapshotId && (
+                      <div className="border border-sky-500/35 bg-sky-500/10 rounded-md p-3.5 flex flex-wrap items-center gap-3">
+                        <input
+                          type="text"
+                          value={presetNameInput}
+                          onChange={(e) => setPresetNameInput(e.target.value)}
+                          placeholder="New club tactical preset name..."
+                          className="flex-1 min-w-[220px] bg-[#0E1116] border border-white/[0.14] rounded px-3 py-1.5 text-[13px] text-white"
+                        />
+                        <button
+                          type="button"
+                          disabled={savingPreset || !presetNameInput.trim()}
+                          onClick={() => void handleSaveSnapshotAsPreset()}
+                          className="px-3.5 py-1.5 rounded bg-sky-600 hover:bg-sky-500 text-white text-[12px] font-medium disabled:opacity-50"
+                        >
+                          {savingPreset ? 'Saving...' : 'Confirm Save Preset'}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setPresetModalSnapshotId(null)}
+                          className="px-3 py-1.5 rounded border border-white/[0.12] text-[#C5CCD7] text-[12px]"
+                        >
+                          Cancel
+                        </button>
+                      </div>
+                    )}
+                  </section>
+                </div>
+              )}
+
+              {/* TAB 3: EVIDENCE TIMELINE & EXTRACTED FRAMES */}
+              {activeTab === 'evidence' && (
+                <div className="space-y-6">
+                  {/* Stage 1 Segment Classification */}
+                  <section className="border border-white/[0.08] bg-[#12151B] rounded-lg p-5 space-y-3">
+                    <h3 className="text-[15px] font-semibold text-white">
+                      Stage 1 · Video Content Classification Timeline ({bundle?.classifications.length ?? 0})
+                    </h3>
+                    {(bundle?.classifications.length ?? 0) > 0 ? (
+                      <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-2.5 text-[12px]">
+                        {bundle?.classifications.map((cls) => (
+                          <div
+                            key={cls.id}
+                            className="border border-white/[0.07] bg-[#0E1116] rounded-md p-3 space-y-1"
+                          >
+                            <div className="flex items-center justify-between gap-2 font-mono text-[11px]">
+                              <span className="text-emerald-300">
+                                {formatSeconds(cls.sessionStartSeconds)}–
+                                {formatSeconds(cls.sessionEndSeconds)}
+                                {cls.inGameClock ? ` (${cls.inGameClock})` : ''}
+                              </span>
+                              <span
+                                className={`px-1.5 py-0.5 rounded border uppercase text-[10px] ${statusBadgeStyle(
+                                  cls.contentType === 'live_gameplay' || cls.contentType === 'set_piece'
+                                    ? 'completed'
+                                    : cls.contentType === 'replay'
+                                      ? 'pending'
+                                      : 'unknown'
+                                )}`}
+                              >
+                                {cls.contentType.replace(/_/g, ' ')}
+                              </span>
+                            </div>
+                            <p className="text-[#A8B2C2]">{cls.evidenceDescription}</p>
+                          </div>
+                        ))}
+                      </div>
+                    ) : (
+                      <p className="text-[13px] text-[#8A94A6]">No segment classifications recorded.</p>
+                    )}
+                  </section>
+
+                  {/* Stage 2 Gameplay Observations */}
+                  <section className="border border-white/[0.08] bg-[#12151B] rounded-lg p-5 space-y-4">
+                    <div className="flex flex-wrap items-center justify-between gap-3">
+                      <h3 className="text-[15px] font-semibold text-white">
+                        Stage 2 · Grounded Gameplay Observations ({filteredObservations.length})
+                      </h3>
+                      <div className="flex flex-wrap items-center gap-2.5 text-[12px]">
+                        <div className="relative">
+                          <Search className="w-3.5 h-3.5 text-[#7D8798] absolute left-2.5 top-2" />
+                          <input
+                            type="text"
+                            value={obsSearch}
+                            onChange={(e) => setObsSearch(e.target.value)}
+                            placeholder="Search observations..."
+                            className="bg-[#0E1116] border border-white/[0.12] rounded pl-8 pr-3 py-1.5 text-[12px] text-white"
+                          />
+                        </div>
+                        <select
+                          value={obsCategoryFilter}
+                          onChange={(e) => setObsCategoryFilter(e.target.value)}
+                          className="bg-[#0E1116] border border-white/[0.12] rounded px-2.5 py-1.5 text-[12px] text-white"
+                        >
+                          <option value="all">All Phases</option>
+                          <option value="attacking">Attacking</option>
+                          <option value="defensive">Defensive</option>
+                          <option value="possession">Possession</option>
+                          <option value="match_events">Match Events</option>
+                        </select>
+                        <label className="flex items-center gap-1.5 text-[#9AA4B4] cursor-pointer">
+                          <input
+                            type="checkbox"
+                            checked={hideReplayDuplicates}
+                            onChange={(e) => setHideReplayDuplicates(e.target.checked)}
+                            className="accent-emerald-500"
+                          />
+                          Hide replay duplicates
+                        </label>
+                      </div>
+                    </div>
+
+                    <div className="divide-y divide-white/[0.06]">
+                      {filteredObservations.map((obs) => {
+                        const frameFile = extractFrameFileName(obs.evidenceFramePath);
+                        return (
+                          <div key={obs.id} className="py-3.5 first:pt-0 space-y-1.5 text-[13px]">
+                            <div className="flex flex-wrap items-center justify-between gap-2">
+                              <div className="flex flex-wrap items-center gap-2 font-mono text-[11px]">
+                                <span className="text-emerald-400">
+                                  {formatSeconds(obs.sessionStartSeconds)}–
+                                  {formatSeconds(obs.sessionEndSeconds)}
+                                </span>
+                                {obs.inGameClock && (
+                                  <span className="text-[#C5CCD7]">Clock {obs.inGameClock}</span>
+                                )}
+                                <span className="px-2 py-0.5 rounded bg-white/[0.06] text-white uppercase">
+                                  {obs.categoryGroup} · {obs.category}
+                                </span>
+                                <span className="text-[#8A94A6]">
+                                  Team: {obs.teamAttribution.replace(/_/g, ' ')}
+                                </span>
+                                <span className="text-sky-300">
+                                  Player: {obs.playerAttribution || 'Unknown'}
+                                </span>
+                                {obs.isFromReplay && (
+                                  <span className="px-2 py-0.5 rounded border border-amber-500/35 bg-amber-500/15 text-amber-200 uppercase">
+                                    Replay Duplicate
+                                  </span>
+                                )}
+                              </div>
+
+                              <div className="flex items-center gap-2">
+                                <span className="text-[11px] text-[#8A94A6]">
+                                  {obs.severity} · {obs.confidence}
+                                </span>
+                                {frameFile && (
+                                  <button
+                                    type="button"
+                                    onClick={() => void handleOpenEvidenceFrame(obs)}
+                                    className="inline-flex items-center gap-1 px-2.5 py-1 rounded border border-white/[0.14] hover:border-emerald-400/60 text-[11px] text-white"
+                                  >
+                                    <Camera className="w-3 h-3 text-emerald-400" />
+                                    View Frame
+                                  </button>
+                                )}
+                              </div>
+                            </div>
+
+                            <p className="text-white">{obs.description}</p>
+                            <p className="text-[12px] text-[#9AA4B4]">
+                              Visual Evidence ({obs.evidenceType.replace(/_/g, ' ')}):{' '}
+                              {obs.supportingVisualEvidence}
+                            </p>
+                            {obs.limitations && (
+                              <p className="text-[11px] text-[#7D8798]">
+                                Limitation: {obs.limitations}
+                              </p>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </section>
+                </div>
+              )}
+
+              {/* TAB 4: SECOND-HALF COMPARISON */}
+              {activeTab === 'comparison' && secondHalfComparison && (
+                <section className="border border-white/[0.08] bg-[#12151B] rounded-lg p-5 space-y-5">
+                  <div className="border-b border-white/[0.06] pb-4">
+                    <div className="text-[11px] font-mono uppercase tracking-wider text-sky-400">
+                      Section H · Stage 4 Second-Half vs First-Half Comparison ·{' '}
+                      {secondHalfComparison.modelUsed}
+                    </div>
+                    <h3 className="mt-1 text-[17px] font-semibold text-white">
+                      Second-Half Tactical Impact Evaluation
+                    </h3>
+                    <p className="mt-1.5 text-[14px] text-[#E6EBF2] leading-relaxed">
+                      {secondHalfComparison.summary}
+                    </p>
+                  </div>
+
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-4 text-[13px]">
+                    <div className="border border-white/[0.08] bg-[#0E1116] rounded-md p-3.5">
+                      <div className="font-semibold text-white mb-1">Attacking Comparison</div>
+                      <p className="text-[#9AA4B4]">{secondHalfComparison.attackingComparison}</p>
+                    </div>
+                    <div className="border border-white/[0.08] bg-[#0E1116] rounded-md p-3.5">
+                      <div className="font-semibold text-white mb-1">Defensive Comparison</div>
+                      <p className="text-[#9AA4B4]">{secondHalfComparison.defensiveComparison}</p>
+                    </div>
+                    <div className="border border-white/[0.08] bg-[#0E1116] rounded-md p-3.5">
+                      <div className="font-semibold text-white mb-1">Tactical Vision Comparison</div>
+                      <p className="text-[#9AA4B4]">
+                        {secondHalfComparison.tacticalVisionComparison}
+                      </p>
+                    </div>
+                  </div>
+
+                  {secondHalfComparison.appliedAdjustmentsReviewed.length > 0 && (
+                    <div className="space-y-2.5">
+                      <div className="text-[13px] font-semibold text-white">
+                        Reviewed Half-Time Adjustments (With Explicit Causation Caveats)
+                      </div>
+                      <div className="space-y-2">
+                        {secondHalfComparison.appliedAdjustmentsReviewed.map((adj, idx) => (
+                          <div
+                            key={idx}
+                            className="border border-white/[0.07] bg-[#0E1116] rounded-md p-3.5 text-[12px] space-y-1"
+                          >
+                            <div className="flex flex-wrap items-center justify-between gap-2">
+                              <span className="font-semibold text-white">
+                                {adj.recommendationTitle}
+                              </span>
+                              <div className="flex items-center gap-2 font-mono text-[10px]">
+                                <span
+                                  className={`px-2 py-0.5 rounded border uppercase ${
+                                    adj.userConfirmedAppliedInGame
+                                      ? 'border-emerald-500/35 bg-emerald-500/15 text-emerald-200'
+                                      : 'border-white/[0.12] text-[#9AA4B4]'
+                                  }`}
+                                >
+                                  {adj.userConfirmedAppliedInGame
+                                    ? 'User Confirmed Applied'
+                                    : 'Unconfirmed In-Game'}
+                                </span>
+                                <span
+                                  className={`px-2 py-0.5 rounded border uppercase ${statusBadgeStyle(
+                                    adj.outcomeAssessment
+                                  )}`}
+                                >
+                                  {adj.outcomeAssessment.replace(/_/g, ' ')}
+                                </span>
+                              </div>
+                            </div>
+                            <p className="text-[#C5CCD7]">{adj.observedSecondHalfPattern}</p>
+                            <p className="text-amber-200/80 text-[11px]">
+                              Causation Caveat: {adj.causationCaveat}
+                            </p>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {secondHalfComparison.recurringWeaknesses.length > 0 && (
+                    <div>
+                      <div className="text-[12px] font-semibold text-rose-300 mb-1.5">
+                        Recurring Weaknesses Remaining Unresolved
+                      </div>
+                      <ul className="list-disc pl-4 space-y-1 text-[12px] text-[#C5CCD7]">
+                        {secondHalfComparison.recurringWeaknesses.map((w, idx) => (
+                          <li key={idx}>{w}</li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+                </section>
+              )}
             </div>
-            <p className="text-[15px] text-white leading-relaxed">
-              {report.section11FinalInstruction}
-            </p>
-          </section>
+          ) : legacyReport ? (
+            /* Backward-compatible view for any pre-Phase 3 stored legacy HalftimeReportData */
+            <section className="border border-white/[0.08] bg-[#12151B] rounded-lg p-6 space-y-4">
+              <div className="flex items-center justify-between border-b border-white/[0.08] pb-4">
+                <div>
+                  <div className="text-[11px] font-mono text-[#8A94A6] uppercase">
+                    Legacy Stored Half-Time Report · Model {legacyReport.modelUsed}
+                  </div>
+                  <div className="mt-1 text-[20px] font-bold text-white">
+                    {legacyReport.section1MatchSituation.clubName}{' '}
+                    <span className="text-emerald-400">
+                      {legacyReport.section1MatchSituation.scoreLabel}
+                    </span>{' '}
+                    {legacyReport.section1MatchSituation.opponentName}
+                  </div>
+                </div>
+                <div className="text-[14px] font-semibold text-white">
+                  {legacyReport.section1MatchSituation.tacticalRatingLabel}
+                </div>
+              </div>
+              <p className="text-[14px] text-[#E6EBF2] leading-relaxed">
+                {legacyReport.section2ManagersVerdict}
+              </p>
+              <ol className="grid grid-cols-1 md:grid-cols-3 gap-3 text-[13px]">
+                {legacyReport.section10PriorityActions.map((act, idx) => (
+                  <li
+                    key={idx}
+                    className="border border-white/[0.08] bg-[#0E1116] rounded p-3 text-white"
+                  >
+                    <span className="text-emerald-400 font-mono mr-1.5">0{idx + 1}.</span>
+                    {act}
+                  </li>
+                ))}
+              </ol>
+            </section>
+          ) : (
+            <div className="border border-white/[0.08] bg-[#12151B] rounded-lg p-7 text-center space-y-2">
+              <Clock3 className="w-7 h-7 text-[#7D8798] mx-auto" />
+              <h3 className="text-[16px] font-semibold text-white">
+                No Phase 3 Briefing Generated Yet for {selectedHalf.replace('_', ' ')}
+              </h3>
+              <p className="text-[13px] text-[#9AA4B4] max-w-2xl mx-auto">
+                Half-time tactical briefings are strictly evidence-anchored and never fabricated
+                from pre-match presets. Verify a recording (or import an MP4 test clip above),
+                authorize privacy upload, and launch analysis.
+              </p>
+            </div>
+          )}
+        </>
+      )}
+
+      {/* Authenticated Evidence Frame Lightbox */}
+      {lightboxState && (
+        <div
+          className="fixed inset-0 z-50 bg-black/80 flex items-center justify-center p-4"
+          onClick={closeLightbox}
+        >
+          <div
+            className="max-w-4xl w-full border border-white/[0.14] bg-[#12151B] rounded-lg overflow-hidden"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between px-4 py-3 border-b border-white/[0.08]">
+              <div>
+                <div className="text-[14px] font-semibold text-white">{lightboxState.title}</div>
+                <div className="text-[12px] text-[#9AA4B4]">{lightboxState.subtitle}</div>
+              </div>
+              <button
+                type="button"
+                onClick={closeLightbox}
+                className="p-1.5 rounded hover:bg-white/[0.08] text-[#9AA4B4] hover:text-white"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <div className="p-4 bg-[#0B0D11] flex items-center justify-center min-h-[280px]">
+              {lightboxState.loading ? (
+                <div className="flex items-center gap-2 text-[13px] text-[#9AA4B4]">
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                  Loading authenticated evidence frame...
+                </div>
+              ) : lightboxState.error ? (
+                <div className="text-[13px] text-rose-300">{lightboxState.error}</div>
+              ) : lightboxState.objectUrl ? (
+                <img
+                  src={lightboxState.objectUrl}
+                  alt={lightboxState.title}
+                  className="max-h-[70vh] w-auto rounded border border-white/[0.1]"
+                />
+              ) : null}
+            </div>
+          </div>
         </div>
       )}
     </div>

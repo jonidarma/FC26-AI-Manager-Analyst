@@ -10,6 +10,7 @@ import {
 } from 'lucide-react';
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { TacticalPitchSVG } from '../components/pitch/TacticalPitchSVG';
+import { SearchablePlayerSelect } from '../components/tactics/SearchablePlayerSelect';
 import { useApp } from '../context/AppContext';
 import { getFormationPositions } from '../data/tacticalCatalog';
 import { desktopBridge } from '../services/desktopBridge';
@@ -91,6 +92,9 @@ export function MatchPrepView() {
   const [formation, setFormation] = useState(
     defaultPreset?.formationName ?? activeClub?.profile.primaryFormation ?? '4-3-3 Holding'
   );
+  const [tacticalVisionKey, setTacticalVisionKey] = useState(
+    defaultPreset?.tacticalVisionKey ?? activeClub?.profile.primaryTacticalVisionKey ?? 'unspecified'
+  );
   const [buildUpStyle, setBuildUpStyle] = useState(
     defaultPreset?.buildUpStyle ?? activeClub?.profile.preferredAttackingStyle ?? 'Balanced'
   );
@@ -142,6 +146,7 @@ export function MatchPrepView() {
       if (!preset) {
         const fallbackForm = activeClub?.profile.primaryFormation || '4-3-3 Holding';
         setFormation(fallbackForm);
+        setTacticalVisionKey(activeClub?.profile.primaryTacticalVisionKey ?? 'unspecified');
         setBuildUpStyle(activeClub?.profile.preferredAttackingStyle || 'Balanced');
         setDefensiveApproach(activeClub?.profile.preferredDefensiveStyle || 'Balanced');
         setDefensiveLineHeight(55);
@@ -169,6 +174,7 @@ export function MatchPrepView() {
 
       const fallbackNodes = getFormationPositions(preset.formationName);
       setFormation(preset.formationName);
+      setTacticalVisionKey(preset.tacticalVisionKey ?? 'unspecified');
       setBuildUpStyle(preset.buildUpStyle);
       setDefensiveApproach(preset.defensiveApproach);
       setDefensiveLineHeight(preset.defensiveLineHeight);
@@ -470,6 +476,7 @@ export function MatchPrepView() {
         sourcePresetId: selectedPreset?.id ?? null,
         tacticalSetup: {
           formationId: selectedCatalogFormation?.id ?? null,
+          tacticalVisionKey,
           buildUpStyle,
           defensiveApproach,
           defensiveLineHeight,
@@ -974,41 +981,17 @@ export function MatchPrepView() {
                                 )}
                               </td>
                               <td className="py-1.5 pr-2 align-top space-y-1">
-                                <select
-                                  value={slot.playerId ?? ''}
-                                  onChange={(e) =>
-                                    handleOverrideSlotPlayer(slot.slotIndex, e.target.value)
+                                <SearchablePlayerSelect
+                                  value={slot.playerId ?? null}
+                                  options={visibleOptions}
+                                  assignedIds={assignedIds}
+                                  slotPosition={canonicalPos}
+                                  onChange={(nextPlayerId) =>
+                                    handleOverrideSlotPlayer(slot.slotIndex, nextPlayerId)
                                   }
-                                  className={`w-full bg-[#12151B] border rounded px-2 py-1 text-[12px] text-white ${
-                                    currentEval && !currentEval.eligible
-                                      ? 'border-red-500/70'
-                                      : 'border-white/[0.1]'
-                                  }`}
-                                >
-                                  <option value="">Unassigned</option>
-                                  {visibleOptions.map((p) => {
-                                    const evalRes = evaluatePlayerEligibility(p);
-                                    const usedElsewhere =
-                                      assignedIds.has(p.id) && slot.playerId !== p.id;
-                                    const blocked = !evalRes.eligible && slot.playerId !== p.id;
-                                    return (
-                                      <option
-                                        key={p.id}
-                                        value={p.id}
-                                        disabled={usedElsewhere || blocked}
-                                      >
-                                        {resolvePlayerDisplayName(p)} ({p.position}
-                                        {p.overallRating ? ` · ${p.overallRating}` : ''})
-                                        {!evalRes.eligible
-                                          ? ` · [${evalRes.shortBadge.toUpperCase()}]`
-                                          : evalRes.requiresConfirmation
-                                            ? ' · [DOUBTFUL]'
-                                            : ''}
-                                        {usedElsewhere ? ' — In XI' : ''}
-                                      </option>
-                                    );
-                                  })}
-                                </select>
+                                  unassignedLabel="Unassigned"
+                                  triggerBgClass="bg-[#12151B]"
+                                />
                                 {currentEval && !currentEval.eligible && replacements.length > 0 && (
                                   <div className="flex flex-wrap items-center gap-1">
                                     <span className="text-[10px] text-[#8A94A6]">Replace:</span>

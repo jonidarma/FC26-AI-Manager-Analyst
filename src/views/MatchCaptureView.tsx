@@ -14,6 +14,7 @@ import {
   RefreshCw,
   RotateCcw,
   ShieldAlert,
+  Sparkles,
   Square,
   Trash2,
 } from 'lucide-react';
@@ -22,11 +23,13 @@ import { useApp } from '../context/AppContext';
 import { desktopBridge } from '../services/desktopBridge';
 import { recordingController } from '../services/recordingController';
 import type {
+  AnalysisLanguage,
   CaptureSourceInfo,
   DiskSpaceInfo,
   MatchSessionWithSegments,
   RecoverableSessionSummary,
   RecoveryExecutionResult,
+  VideoAnalysisMode,
 } from '../types/domain';
 
 function formatBytes(bytes: number | null | undefined): string {
@@ -73,6 +76,16 @@ export function MatchCaptureView() {
   const [showPipelineDiagnostics, setShowPipelineDiagnostics] = useState(false);
   const [inspectedRecoveryId, setInspectedRecoveryId] = useState<string | null>(null);
   const [lastRecoveryResult, setLastRecoveryResult] = useState<RecoveryExecutionResult | null>(null);
+  const [analysisLaunchSessionId, setAnalysisLaunchSessionId] = useState<string | null>(null);
+  const [analysisMode, setAnalysisMode] = useState<VideoAnalysisMode>(
+    settings?.ai?.defaultAnalysisMode ?? 'balanced'
+  );
+  const [analysisLang, setAnalysisLang] = useState<AnalysisLanguage>(
+    settings?.ai?.defaultLanguage ?? 'en'
+  );
+  const [privacyAck, setPrivacyAck] = useState(false);
+  const [entireDisplayAck, setEntireDisplayAck] = useState(false);
+  const [startingAnalysis, setStartingAnalysis] = useState(false);
 
   // Explicit discard confirmation state (double-step if discarding an already finalized session)
   const [discardTarget, setDiscardTarget] = useState<{
@@ -1355,16 +1368,162 @@ export function MatchCaptureView() {
                           sess.status === 'partial') &&
                         sess.aiEligible !== false &&
                         finalizedSegs.some((s) => s.sizeBytes > 0 && s.durationSeconds > 0) ? (
-                        <div className="text-[11px] text-[#8A94A6] pt-1 border-t border-white/[0.06]">
-                          <strong className="text-emerald-300">Recording Verified</strong> ·{' '}
-                          <strong className="text-white">Technically AI-Eligible</strong> ·{' '}
-                          <strong className="text-sky-300">
-                            {sess.analysisState === 'analysis_completed'
-                              ? 'Analysis Completed'
-                              : 'Awaiting Analysis (Phase 3)'}
-                          </strong>{' '}
-                          — Local MP4 segments are stored safely on disk. Zero frames have been
-                          uploaded to Gemini.
+                        <div className="pt-2 border-t border-white/[0.06] space-y-2.5">
+                          <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] text-[#8A94A6]">
+                            <div>
+                              <strong className="text-emerald-300">Recording Verified</strong> ·{' '}
+                              <strong className="text-white">Technically AI-Eligible</strong> ·{' '}
+                              <strong className="text-sky-300">
+                                {sess.analysisState === 'analysis_completed'
+                                  ? 'Analysis Completed'
+                                  : 'Ready for Gemini Video Analysis'}
+                              </strong>
+                            </div>
+                            <div className="flex items-center gap-2">
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setAnalysisLaunchSessionId((prev) =>
+                                    prev === sess.id ? null : sess.id
+                                  );
+                                  setPrivacyAck(false);
+                                  setEntireDisplayAck(false);
+                                }}
+                                className="inline-flex items-center gap-1.5 px-3 py-1 rounded bg-emerald-600 hover:bg-emerald-500 text-white text-[11px] font-medium"
+                              >
+                                <Sparkles className="w-3.5 h-3.5" />
+                                {sess.half === 'first_half'
+                                  ? 'Analyze First Half'
+                                  : 'Analyze Second Half'}
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => setActiveSection('halftime-briefing')}
+                                className="px-2.5 py-1 rounded border border-white/[0.12] hover:border-emerald-500/50 text-[11px] text-[#D7DDE7]"
+                              >
+                                Open Briefing
+                              </button>
+                            </div>
+                          </div>
+
+                          {analysisLaunchSessionId === sess.id && (
+                            <div className="rounded border border-emerald-500/30 bg-[#0B1210] p-3 space-y-2.5 text-[12px]">
+                              <div className="flex flex-wrap items-center gap-3">
+                                <label className="flex items-center gap-1.5 text-[#C5CCD7]">
+                                  <span>Mode:</span>
+                                  <select
+                                    value={analysisMode}
+                                    onChange={(e) =>
+                                      setAnalysisMode(e.target.value as VideoAnalysisMode)
+                                    }
+                                    className="bg-[#12151B] border border-white/[0.12] rounded px-2 py-1 text-[11px] text-white"
+                                  >
+                                    <option value="quick">Quick</option>
+                                    <option value="balanced">Balanced</option>
+                                    <option value="deep">Deep</option>
+                                  </select>
+                                </label>
+                                <label className="flex items-center gap-1.5 text-[#C5CCD7]">
+                                  <span>Language:</span>
+                                  <select
+                                    value={analysisLang}
+                                    onChange={(e) =>
+                                      setAnalysisLang(e.target.value as AnalysisLanguage)
+                                    }
+                                    className="bg-[#12151B] border border-white/[0.12] rounded px-2 py-1 text-[11px] text-white"
+                                  >
+                                    <option value="en">English</option>
+                                    <option value="id">Bahasa Indonesia</option>
+                                  </select>
+                                </label>
+                              </div>
+
+                              <label className="flex items-start gap-2 cursor-pointer text-[11px] text-[#D7DDE7]">
+                                <input
+                                  type="checkbox"
+                                  checked={privacyAck}
+                                  onChange={(e) => setPrivacyAck(e.target.checked)}
+                                  className="mt-0.5 accent-emerald-500"
+                                />
+                                <span>
+                                  I authorize uploading this local MP4 recording to the configured
+                                  Gemini Files API for tactical analysis (remote file deletion is
+                                  enabled after completion).
+                                </span>
+                              </label>
+
+                              {(sess.captureSourceName ?? '').toLowerCase().includes('screen') ||
+                              (sess.captureSourceName ?? '').toLowerCase().includes('display') ? (
+                                <label className="flex items-start gap-2 cursor-pointer text-[11px] text-amber-200">
+                                  <input
+                                    type="checkbox"
+                                    checked={entireDisplayAck}
+                                    onChange={(e) => setEntireDisplayAck(e.target.checked)}
+                                    className="mt-0.5 accent-amber-500"
+                                  />
+                                  <span>
+                                    Entire Display capture detected ({sess.captureSourceName}). I
+                                    confirm no private desktop content should block upload.
+                                  </span>
+                                </label>
+                              ) : null}
+
+                              <div className="flex justify-end gap-2">
+                                <button
+                                  type="button"
+                                  onClick={() => setAnalysisLaunchSessionId(null)}
+                                  className="px-3 py-1 rounded border border-white/[0.12] text-[11px] text-[#C5CCD7]"
+                                >
+                                  Cancel
+                                </button>
+                                <button
+                                  type="button"
+                                  disabled={
+                                    startingAnalysis ||
+                                    !privacyAck ||
+                                    (((sess.captureSourceName ?? '').toLowerCase().includes('screen') ||
+                                      (sess.captureSourceName ?? '')
+                                        .toLowerCase()
+                                        .includes('display')) &&
+                                      !entireDisplayAck)
+                                  }
+                                  onClick={async () => {
+                                    setStartingAnalysis(true);
+                                    try {
+                                      await desktopBridge.startMatchVideoAnalysis(sess.matchId, {
+                                        sessionId: sess.id,
+                                        half: sess.half,
+                                        analysisMode,
+                                        language: analysisLang,
+                                        privacyAuthorized: privacyAck,
+                                        entireDisplayAcknowledged: entireDisplayAck,
+                                      });
+                                      setAnalysisLaunchSessionId(null);
+                                      notify(
+                                        'success',
+                                        `Started ${analysisMode} Gemini video analysis for ${
+                                          sess.half === 'first_half' ? 'First Half' : 'Second Half'
+                                        }.`
+                                      );
+                                      setActiveSection('halftime-briefing');
+                                    } catch (err) {
+                                      notify(
+                                        'error',
+                                        err instanceof Error
+                                          ? err.message
+                                          : 'Failed to launch AI video analysis'
+                                      );
+                                    } finally {
+                                      setStartingAnalysis(false);
+                                    }
+                                  }}
+                                  className="px-3.5 py-1 rounded bg-emerald-600 hover:bg-emerald-500 disabled:opacity-45 text-white text-[11px] font-medium"
+                                >
+                                  {startingAnalysis ? 'Launching...' : 'Confirm & Start Analysis'}
+                                </button>
+                              </div>
+                            </div>
+                          )}
                         </div>
                       ) : null}
                     </div>

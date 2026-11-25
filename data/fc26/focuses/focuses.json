@@ -114,6 +114,7 @@
     { "roleName": "Centre-Half", "positions": ["CDM"], "focuses": ["Defend"], "evidence": "EA FC 26 Pitch Notes" },
     { "roleName": "Deep-Lying Playmaker", "positions": ["CDM", "CM"], "focuses": ["Defend", "Build-Up", "Roaming"], "evidence": "EA FC 26 Pitch Notes" },
     { "roleName": "Box Crasher", "positions": ["CDM"], "focuses": ["Balanced"], "evidence": "EA FC 26 Gameplay Deep Dive" },
+    { "roleName": "Wide Half", "positions": ["CDM"], "focuses": ["Defend", "Build-Up"], "evidence": "EA FC 26 Pitch Notes & User Tactical Vision Matrix" },
 
     { "roleName": "Box-to-Box", "positions": ["CM"], "focuses": ["Balanced", "Ball-Winning"], "evidence": "EA FC 26 Pitch Notes" },
     { "roleName": "Playmaker", "positions": ["CM"], "focuses": ["Attack", "Roaming", "Build-Up"], "evidence": "EA FC 26 Pitch Notes" },

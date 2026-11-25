@@ -1,0 +1,500 @@
+{
+  "datasetVersion": "fc26-tactical-visions-3.0.0",
+  "lastVerifiedAt": "2026-11-24",
+  "sources": [
+    {
+      "sourceKey": "ea_fc26_career_mode_deep_dive",
+      "title": "EA SPORTS FC 26 Career Mode Deep Dive Pitch Notes",
+      "url": "https://www.ea.com/games/ea-sports-fc/fc-26/news/pitch-notes-fc26-career-mode-deep-dive",
+      "sourceType": "official_ea_documentation",
+      "reliabilityTier": "primary_authority",
+      "notes": "Primary authority for FC26 Tactical Visions, relaxed Player Role requirements vs FC25, mandatory Build-Up / Defensive Approach rules, and Silver/Gold Coach Role+ familiarity boosts.",
+      "conflictResolutions": [
+        {
+          "topic": "Player Role Mandatory Requirements",
+          "conflict": "FC25 required specific Player Roles per Tactical Vision; secondary matrices still list role-to-vision checkmarks.",
+          "resolution": "In FC26, Player Roles are advisory Role Affinities (Layer 3) and never block selecting a legal FC IQ role for a position."
+        },
+        {
+          "topic": "Terminology Normalization",
+          "conflict": "Official Career Mode documentation references 'Close Support' for Possession and 'Aggressive' for High Pressing, whereas tactical menus and secondary matrices frequently use 'Short Passing' and 'Extreme'.",
+          "resolution": "Normalize 'Close Support' <-> 'Short Passing', 'Aggressive' <-> 'Extreme', 'Kick & Rush' <-> 'Kick and Rush', and 'Wing-Play' <-> 'Wing Play' while preserving both labels for transparency."
+        },
+        {
+          "topic": "Matrix Build-Up & Defensive Height vs Official Mandatory Rules",
+          "conflict": "User-provided reference matrix marks additional Build-Up Styles and Defensive Heights as associated (e.g., Counter listed under High Pressing/Park the Bus/Kick and Rush; Deep listed under Possession/Wing Play).",
+          "resolution": "Store official FC26 Career Mode requirements separately in Layer 2 (mandatory for verified vision compliance) and preserve all matrix Build-Up / Defensive Height cells separately as secondary reference affinities with explicit conflict flags."
+        },
+        {
+          "topic": "Defensive Line Height Numerical Ranges",
+          "conflict": "Third-party guides propose numerical Defensive Line Height cutoffs (e.g. 1-30 Deep, 71-95 High).",
+          "resolution": "Do not enforce unverified numerical line-height blocks in Layer 2; validate Defensive Approach label officially and treat numeric line height as advisory."
+        }
+      ],
+      "verifiedAt": "2026-11-24"
+    },
+    {
+      "sourceKey": "ea_fc26_gameplay_deep_dive",
+      "title": "EA SPORTS FC 26 Gameplay Deep Dive Pitch Notes",
+      "url": "https://www.ea.com/games/ea-sports-fc/fc-26/news/pitch-notes-fc26-gameplay-deep-dive",
+      "sourceType": "official_ea_documentation",
+      "reliabilityTier": "primary_authority",
+      "notes": "Primary authority for FC IQ canonical positions, new FC26 Player Roles (Ball-Playing Keeper, Wide Back, Inverted Wingback, Box Crasher), and Player Focuses.",
+      "conflictResolutions": [],
+      "verifiedAt": "2026-11-24"
+    },
+    {
+      "sourceKey": "user_provided_fc26_vision_matrix",
+      "title": "User-Provided FC26 Tactical Vision Compatibility Matrix",
+      "url": "local://user-reference/fc26-tactical-vision-matrix",
+      "sourceType": "user_provided_matrix",
+      "reliabilityTier": "secondary_reference",
+      "notes": "User-supplied secondary reference matrix mapping position-specific Player Roles, Build-Up Styles, and Defensive Heights across the 7 Tactical Visions (S, W, P, H, B, C, K). Publication date and patch completeness are unestablished; treated strictly as advisory Layer 3 affinity data.",
+      "conflictResolutions": [
+        {
+          "topic": "Blank Matrix Cells",
+          "conflict": "Blank cells could be misread as banned roles or settings.",
+          "resolution": "Blank cells represent 'not_associated' in Layer 3 advisory affinity only, never a prohibition. Positions/roles absent from the matrix (e.g., LWB, RWB, CF) are explicitly marked 'unknown'."
+        }
+      ],
+      "verifiedAt": "2026-11-24"
+    }
+  ],
+  "visions": [
+    {
+      "id": "tv_standard",
+      "internalKey": "standard",
+      "shortCode": "S",
+      "displayName": "Standard",
+      "description": "Balanced football philosophy maintaining structural equilibrium across attacking, defensive, and transitional phases without extreme tactical commitments.",
+      "attackingPrinciples": [
+        "Maintain balanced positional spacing across central and wide channels",
+        "Adapt attacking tempo to opponent block height and game state",
+        "Combine controlled build-up with vertical progression when space opens"
+      ],
+      "defensivePrinciples": [
+        "Preserve compact horizontal and vertical distances between lines",
+        "Balance pressing triggers with disciplined recovery shape",
+        "Avoid unnecessary tactical extremes that expose single zones"
+      ],
+      "transitionPrinciples": [
+        "Flexible defensive-to-attacking transitions based on numerical advantage",
+        "Measured rest defense protecting central counter-attacking lanes"
+      ],
+      "strengths": [
+        "High adaptability across diverse opposition setups",
+        "Low structural risk and predictable positional coverage",
+        "Broad role compatibility across varied squad profiles"
+      ],
+      "weaknesses": [
+        "Does not create extreme territorial dominance or overload specialization",
+        "Can struggle to break down disciplined low blocks without role-level adjustments"
+      ],
+      "evaluationCriteria": [
+        "Team balance",
+        "Defensive organization",
+        "Attacking support",
+        "Transition stability",
+        "Adaptability"
+      ],
+      "aliases": [
+        { "aliasKey": "balanced", "aliasLabel": "Balanced", "aliasType": "in_game_variant", "notes": "EA FC 26 Career Mode Deep Dive also refers to Standard as Balanced." },
+        { "aliasKey": "standard_vision", "aliasLabel": "Standard Vision", "aliasType": "alternate_label", "notes": "Common label variation." }
+      ],
+      "officialRequirements": [],
+      "sourceType": "official_ea_documentation",
+      "sourceReferences": ["ea_fc26_career_mode_deep_dive"],
+      "verificationStatus": "verified"
+    },
+    {
+      "id": "tv_wing_play",
+      "internalKey": "wing_play",
+      "shortCode": "W",
+      "displayName": "Wing Play",
+      "description": "Width-focused attacking philosophy designed to stretch defensive blocks horizontally, create flank overloads, and supply dangerous deliveries into central areas.",
+      "attackingPrinciples": [
+        "Maintain maximum attacking width along both touchlines",
+        "Exploit wide channels through wingers, wide midfielders, and overlapping fullbacks",
+        "Create 2v1 flank overloads and deliver crosses or cutbacks into dangerous box zones"
+      ],
+      "defensivePrinciples": [
+        "Protect wide channels during transitions when fullbacks advance",
+        "Ensure central midfield cover shields spaces vacated by wide progressions"
+      ],
+      "transitionPrinciples": [
+        "Rapid switches of play toward the weak-side flank on ball recovery",
+        "Quick wide progression to stretch recovering defensive lines"
+      ],
+      "strengths": [
+        "Stretches compact central blocks and isolates opposing fullbacks",
+        "Maximizes aerial, crossing, and pace threats on the wings"
+      ],
+      "weaknesses": [
+        "Exposed space behind advancing fullbacks and wingbacks on turnovers",
+        "Can become predictable if central box arrivals are isolated"
+      ],
+      "evaluationCriteria": [
+        "Width utilization",
+        "Wide overloads",
+        "Fullback support",
+        "Crossing opportunities",
+        "Weak-side space",
+        "Wide defensive exposure"
+      ],
+      "aliases": [
+        { "aliasKey": "wing-play", "aliasLabel": "Wing-Play", "aliasType": "terminology_variant", "notes": "Hyphenated spelling variant." },
+        { "aliasKey": "wingplay", "aliasLabel": "Wingplay", "aliasType": "terminology_variant", "notes": "Compact spelling variant." }
+      ],
+      "officialRequirements": [
+        {
+          "parameterType": "build_up_style",
+          "allowedValues": ["Balanced", "Counter"],
+          "canonicalInGameLabels": ["Balanced", "Counter"],
+          "isMandatory": true,
+          "sourceType": "official_ea_documentation",
+          "sourceReference": "ea_fc26_career_mode_deep_dive",
+          "verificationStatus": "verified",
+          "conflictNotes": "Official FC26 Career Mode baseline requires Balanced or Counter Build-Up Style for Wing Play."
+        }
+      ],
+      "sourceType": "official_ea_documentation",
+      "sourceReferences": ["ea_fc26_career_mode_deep_dive"],
+      "verificationStatus": "verified"
+    },
+    {
+      "id": "tv_possession",
+      "internalKey": "possession",
+      "shortCode": "P",
+      "displayName": "Possession",
+      "description": "Control-oriented philosophy emphasizing ball retention, close passing support, positional rotations, and patient progression through defensive lines.",
+      "attackingPrinciples": [
+        "Sustain high-security ball retention with short passing combinations",
+        "Form passing triangles and positional rotations between lines",
+        "Progress patiently and exploit space as opponents lose defensive compactness"
+      ],
+      "defensivePrinciples": [
+        "Control match tempo through possession to limit opponent attacking phases",
+        "Maintain close support distances to enable immediate ball recovery after loss"
+      ],
+      "transitionPrinciples": [
+        "Structured rest-defense circulation rather than rushed vertical passes",
+        "Immediate short support angles upon winning possession"
+      ],
+      "strengths": [
+        "Controls game tempo and starves opponents of attacking volume",
+        "Dismantles disorganized presses through close triangles and central overloads"
+      ],
+      "weaknesses": [
+        "Vulnerable to turnovers in central build-up against coordinated high presses",
+        "Risk of sterile circulation if forward penetration and box runs are lacking"
+      ],
+      "evaluationCriteria": [
+        "Passing support",
+        "Ball retention",
+        "Patient progression",
+        "Passing triangles",
+        "Turnovers under pressure",
+        "Ability to create space"
+      ],
+      "aliases": [
+        { "aliasKey": "tiki_taka", "aliasLabel": "Tiki Taka", "aliasType": "legacy_alias", "notes": "Legacy FC24/FC25 Tactical Vision name mapped to Possession in FC26." },
+        { "aliasKey": "tiki-taka", "aliasLabel": "Tiki-Taka", "aliasType": "legacy_alias", "notes": "Hyphenated legacy alias for Possession." },
+        { "aliasKey": "possession_play", "aliasLabel": "Possession Play", "aliasType": "alternate_label", "notes": "Common Career Mode descriptive label." }
+      ],
+      "officialRequirements": [
+        {
+          "parameterType": "build_up_style",
+          "allowedValues": ["Short Passing", "Close Support"],
+          "canonicalInGameLabels": ["Short Passing", "Close Support"],
+          "isMandatory": true,
+          "sourceType": "official_ea_documentation",
+          "sourceReference": "ea_fc26_career_mode_deep_dive",
+          "verificationStatus": "verified",
+          "conflictNotes": "Official FC26 documentation specifies Close Support, corresponding to Short Passing in tactical menus; both are normalized as equivalent."
+        }
+      ],
+      "sourceType": "official_ea_documentation",
+      "sourceReferences": ["ea_fc26_career_mode_deep_dive"],
+      "verificationStatus": "verified"
+    },
+    {
+      "id": "tv_high_pressing",
+      "internalKey": "high_pressing",
+      "shortCode": "H",
+      "displayName": "High Pressing",
+      "description": "Proactive territorial philosophy built on aggressive ball recovery in opponent zones, compact pressing traps, and fast attacking sequences after turnovers.",
+      "attackingPrinciples": [
+        "Convert high turnovers into immediate vertical chances before opponents reset",
+        "Keep attacking and midfield lines compact to sustain wave attacks"
+      ],
+      "defensivePrinciples": [
+        "Engage opponent build-up high up the pitch with coordinated pressing triggers",
+        "Compress vertical distances between defensive, midfield, and forward lines",
+        "Restrict opponent passing lanes out of the defensive third"
+      ],
+      "transitionPrinciples": [
+        "Immediate counter-pressing on possession loss",
+        "Rapid direct vertical attack immediately after winning the ball high"
+      ],
+      "strengths": [
+        "Disrupts opponent build-up and generates high-value turnovers near goal",
+        "Controls territory and pins weaker ball-playing teams deep"
+      ],
+      "weaknesses": [
+        "High space exposure behind the defensive line against pacey runners",
+        "Demands strong coordination and can increase squad fatigue late in matches"
+      ],
+      "evaluationCriteria": [
+        "Press coordination",
+        "High ball recoveries",
+        "Opponent build-up disruption",
+        "Defensive compactness",
+        "Space exposed behind the press",
+        "Potential fatigue indicators when visible"
+      ],
+      "aliases": [
+        { "aliasKey": "gegenpressing", "aliasLabel": "Gegenpressing", "aliasType": "legacy_alias", "notes": "Legacy FC24/FC25 Tactical Vision name mapped to High Pressing in FC26." },
+        { "aliasKey": "high_press", "aliasLabel": "High Press", "aliasType": "alternate_label", "notes": "Shortened label variant." }
+      ],
+      "officialRequirements": [
+        {
+          "parameterType": "defensive_approach",
+          "allowedValues": ["High", "Aggressive", "Extreme"],
+          "canonicalInGameLabels": ["High", "Aggressive"],
+          "isMandatory": true,
+          "sourceType": "official_ea_documentation",
+          "sourceReference": "ea_fc26_career_mode_deep_dive",
+          "verificationStatus": "verified",
+          "conflictNotes": "Official FC26 baseline requires High or Aggressive Defensive Approach; secondary matrices label Aggressive as Extreme (normalized equivalently)."
+        }
+      ],
+      "sourceType": "official_ea_documentation",
+      "sourceReferences": ["ea_fc26_career_mode_deep_dive"],
+      "verificationStatus": "verified"
+    },
+    {
+      "id": "tv_park_the_bus",
+      "internalKey": "park_the_bus",
+      "shortCode": "B",
+      "displayName": "Park the Bus",
+      "description": "Defensive-first philosophy prioritizing a deep, compact low block that protects central zones, minimizes attacking risk, and relies on disciplined recovery.",
+      "attackingPrinciples": [
+        "Minimize high-risk attacking commitments and maintain numbers behind the ball",
+        "Select controlled, low-risk forward progressions only when clear outlets exist"
+      ],
+      "defensivePrinciples": [
+        "Organize a deep, tightly compacted defensive block around the penalty area",
+        "Protect central lanes and deny space between midfield and defensive lines",
+        "Enforce strict defensive discipline across all outfield roles"
+      ],
+      "transitionPrinciples": [
+        "Controlled outlet transitions after absorbing pressure without breaking shape",
+        "Prioritize immediate defensive regrouping upon any turnover"
+      ],
+      "strengths": [
+        "Extremely difficult to penetrate through central combinations or balls in behind",
+        "Effective for protecting leads or neutralizing superior opposition"
+      ],
+      "weaknesses": [
+        "Cedes territory and sustained pressure around the penalty area",
+        "Limited attacking numbers can leave forwards isolated when chasing goals"
+      ],
+      "evaluationCriteria": [
+        "Defensive compactness",
+        "Protection of central areas",
+        "Defensive discipline",
+        "Space allowed around the penalty area",
+        "Transition opportunities",
+        "Ability to relieve sustained pressure"
+      ],
+      "aliases": [
+        { "aliasKey": "park-the-bus", "aliasLabel": "Park-the-Bus", "aliasType": "terminology_variant", "notes": "Hyphenated variant." },
+        { "aliasKey": "low_block", "aliasLabel": "Low Block", "aliasType": "alternate_label", "notes": "Descriptive tactical synonym." }
+      ],
+      "officialRequirements": [
+        {
+          "parameterType": "defensive_approach",
+          "allowedValues": ["Deep"],
+          "canonicalInGameLabels": ["Deep"],
+          "isMandatory": true,
+          "sourceType": "official_ea_documentation",
+          "sourceReference": "ea_fc26_career_mode_deep_dive",
+          "verificationStatus": "verified",
+          "conflictNotes": "Official FC26 baseline requires Deep Defensive Approach for Park the Bus."
+        }
+      ],
+      "sourceType": "official_ea_documentation",
+      "sourceReferences": ["ea_fc26_career_mode_deep_dive"],
+      "verificationStatus": "verified"
+    },
+    {
+      "id": "tv_counter_attack",
+      "internalKey": "counter_attack",
+      "shortCode": "C",
+      "displayName": "Counter Attack",
+      "description": "Transition-driven philosophy combining low-risk defensive organization with rapid vertical breaks into open space behind opposing lines.",
+      "attackingPrinciples": [
+        "Trigger immediate forward runs behind the opposition defensive line after recovery",
+        "Prioritize direct vertical progression before the opponent reorganizes",
+        "Maximize efficiency in open-field transition situations"
+      ],
+      "defensivePrinciples": [
+        "Defend with low-risk compactness to draw the opponent forward",
+        "Force turnovers in middle and defensive thirds to open space behind the opposition"
+      ],
+      "transitionPrinciples": [
+        "Explosive defensive-to-attacking transition speed within the first 2-3 passes",
+        "Timely secondary support runners arriving behind the initial break"
+      ],
+      "strengths": [
+        "Punishes high defensive lines and aggressive possession opponents",
+        "Creates high-quality chances with minimal build-up exposure"
+      ],
+      "weaknesses": [
+        "Less effective against opponents who sit deep and deny space in behind",
+        "Can lose attacking fluency if initial vertical outlets are closed down"
+      ],
+      "evaluationCriteria": [
+        "Defensive organization before recovery",
+        "Transition speed",
+        "Forward passing",
+        "Attacking runs",
+        "Exploitation of open space",
+        "Support after the initial transition"
+      ],
+      "aliases": [
+        { "aliasKey": "counter-attack", "aliasLabel": "Counter-Attack", "aliasType": "terminology_variant", "notes": "Hyphenated variant." },
+        { "aliasKey": "counter_attacking", "aliasLabel": "Counter Attacking", "aliasType": "alternate_label", "notes": "Alternate descriptive label." }
+      ],
+      "officialRequirements": [
+        {
+          "parameterType": "build_up_style",
+          "allowedValues": ["Counter"],
+          "canonicalInGameLabels": ["Counter"],
+          "isMandatory": true,
+          "sourceType": "official_ea_documentation",
+          "sourceReference": "ea_fc26_career_mode_deep_dive",
+          "verificationStatus": "verified",
+          "conflictNotes": "Official FC26 baseline requires Counter Build-Up Style for Counter Attack."
+        }
+      ],
+      "sourceType": "official_ea_documentation",
+      "sourceReferences": ["ea_fc26_career_mode_deep_dive"],
+      "verificationStatus": "verified"
+    },
+    {
+      "id": "tv_kick_and_rush",
+      "internalKey": "kick_and_rush",
+      "shortCode": "K",
+      "displayName": "Kick and Rush",
+      "description": "Direct vertical philosophy leveraging long distribution, physical forward focal points, aerial/ground duels, and aggressive second-ball recovery to bypass congested midfields.",
+      "attackingPrinciples": [
+        "Bypass congested midfield zones with direct long passes into forward zones",
+        "Use physical attacking presence to win initial aerial and ground duels",
+        "Swarm second balls immediately around target receivers"
+      ],
+      "defensivePrinciples": [
+        "Maintain balanced midfield positioning to contest second balls and long clearances",
+        "Stay compact enough to defend direct counter-clearances"
+      ],
+      "transitionPrinciples": [
+        "Immediate vertical release into attacking duels upon winning possession",
+        "Coordinated midfield push-up to capture knockdowns and rebounds"
+      ],
+      "strengths": [
+        "Bypasses elite high presses and congested central midfields quickly",
+        "Maximizes physical, aerial, and direct running profiles"
+      ],
+      "weaknesses": [
+        "Lower ball retention when initial duels or second balls are lost",
+        "Struggles if forwards lack physical/aerial competitiveness against dominant centre-backs"
+      ],
+      "evaluationCriteria": [
+        "Direct progression",
+        "Long-ball effectiveness",
+        "Target-player support",
+        "Duel outcomes when visible",
+        "Second-ball recovery",
+        "Midfield bypass effectiveness"
+      ],
+      "aliases": [
+        { "aliasKey": "kick_&_rush", "aliasLabel": "Kick & Rush", "aliasType": "terminology_variant", "notes": "Ampersand variant used in menus and guides." },
+        { "aliasKey": "kick-and-rush", "aliasLabel": "Kick-and-Rush", "aliasType": "terminology_variant", "notes": "Hyphenated variant." },
+        { "aliasKey": "direct_play", "aliasLabel": "Direct Play", "aliasType": "alternate_label", "notes": "Descriptive tactical synonym." }
+      ],
+      "officialRequirements": [
+        {
+          "parameterType": "defensive_approach",
+          "allowedValues": ["Balanced"],
+          "canonicalInGameLabels": ["Balanced"],
+          "isMandatory": true,
+          "sourceType": "official_ea_documentation",
+          "sourceReference": "ea_fc26_career_mode_deep_dive",
+          "verificationStatus": "verified",
+          "conflictNotes": "Official FC26 baseline requires Balanced Defensive Approach for Kick and Rush."
+        }
+      ],
+      "sourceType": "official_ea_documentation",
+      "sourceReferences": ["ea_fc26_career_mode_deep_dive"],
+      "verificationStatus": "verified"
+    }
+  ],
+  "roleAffinityMatrix": [
+    { "positions": ["GK"], "roleName": "Goalkeeper", "visions": ["S", "B", "C"] },
+    { "positions": ["GK"], "roleName": "Sweeper Keeper", "visions": ["W", "P", "H"] },
+    { "positions": ["GK"], "roleName": "Ball-Playing Keeper", "visions": ["P", "H", "K"] },
+
+    { "positions": ["CB"], "roleName": "Ball-Playing Defender", "visions": ["W", "P", "H", "B", "C"] },
+    { "positions": ["CB"], "roleName": "Wide Back", "visions": ["H", "B", "K"] },
+    { "positions": ["CB"], "roleName": "Defender", "visions": ["S", "W", "B", "C", "K"] },
+    { "positions": ["CB"], "roleName": "Stopper", "visions": ["S", "W", "H", "B", "K"] },
+
+    { "positions": ["LB", "RB"], "roleName": "Fullback", "visions": ["S", "B", "K"] },
+    { "positions": ["LB", "RB"], "roleName": "Falseback", "visions": ["P", "H", "B"] },
+    { "positions": ["LB", "RB"], "roleName": "Wingback", "visions": ["S", "W", "P", "C", "K"] },
+    { "positions": ["LB", "RB"], "roleName": "Attacking Wingback", "visions": ["W", "P"] },
+    { "positions": ["LB", "RB"], "roleName": "Inverted Wingback", "visions": ["W", "H", "C"] },
+
+    { "positions": ["CDM"], "roleName": "Holding", "visions": ["S", "W", "H", "B"] },
+    { "positions": ["CDM"], "roleName": "Deep-Lying Playmaker", "visions": ["P", "B", "K"] },
+    { "positions": ["CDM"], "roleName": "Wide Half", "visions": ["W", "H", "C", "K"] },
+    { "positions": ["CDM"], "roleName": "Centre-Half", "visions": ["S", "B"] },
+    { "positions": ["CDM"], "roleName": "Box Crasher", "visions": ["W", "C", "K"] },
+
+    { "positions": ["CM"], "roleName": "Half-Winger", "visions": ["S", "W", "P", "H", "C"] },
+    { "positions": ["CM"], "roleName": "Box-to-Box", "visions": ["S", "W", "H", "K"] },
+    { "positions": ["CM"], "roleName": "Holding", "visions": ["S", "W", "H", "B"] },
+    { "positions": ["CM"], "roleName": "Deep-Lying Playmaker", "visions": ["P", "B", "K"] },
+    { "positions": ["CM"], "roleName": "Playmaker", "visions": ["S", "W", "P", "C"] },
+
+    { "positions": ["LM", "RM"], "roleName": "Wide Midfielder", "visions": ["H", "B", "C", "K"] },
+    { "positions": ["LM", "RM"], "roleName": "Winger", "visions": ["S", "W", "H", "B", "C", "K"] },
+    { "positions": ["LM", "RM"], "roleName": "Inside Forward", "visions": ["W", "P", "H", "K"] },
+    { "positions": ["LM", "RM"], "roleName": "Wide Playmaker", "visions": ["S", "P", "H", "B", "C", "K"] },
+
+    { "positions": ["CAM"], "roleName": "Playmaker", "visions": ["S", "W", "P", "C"] },
+    { "positions": ["CAM"], "roleName": "Half-Winger", "visions": ["S", "W", "P", "H", "C"] },
+    { "positions": ["CAM"], "roleName": "Classic 10", "visions": ["B", "K"] },
+    { "positions": ["CAM"], "roleName": "Shadow Striker", "visions": ["S", "W", "H", "B", "K"] },
+
+    { "positions": ["LW", "RW"], "roleName": "Winger", "visions": ["S", "W", "H", "B", "C", "K"] },
+    { "positions": ["LW", "RW"], "roleName": "Inside Forward", "visions": ["W", "P", "H", "K"] },
+    { "positions": ["LW", "RW"], "roleName": "Wide Playmaker", "visions": ["S", "P", "H", "B", "C", "K"] },
+
+    { "positions": ["ST"], "roleName": "Advanced Forward", "visions": ["S", "H", "K"] },
+    { "positions": ["ST"], "roleName": "Poacher", "visions": ["W", "H", "B"] },
+    { "positions": ["ST"], "roleName": "Target Forward", "visions": ["W", "B", "K"] },
+    { "positions": ["ST"], "roleName": "False 9", "visions": ["S", "W", "P"] }
+  ],
+  "referenceBuildUpAffinities": [
+    { "settingValue": "Short Passing", "visions": ["S", "P", "H", "B", "K"] },
+    { "settingValue": "Balanced", "visions": ["S", "W", "H", "B", "K"] },
+    { "settingValue": "Counter", "visions": ["S", "W", "H", "B", "C", "K"] }
+  ],
+  "referenceDefensiveHeightAffinities": [
+    { "settingValue": "Deep", "visions": ["S", "W", "P", "B", "C"] },
+    { "settingValue": "Balanced", "visions": ["S", "W", "P", "C", "K"] },
+    { "settingValue": "High", "visions": ["S", "W", "P", "H", "C"] },
+    { "settingValue": "Extreme", "visions": ["S", "W", "P", "H", "C"] }
+  ]
+}

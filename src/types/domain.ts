@@ -50,10 +50,17 @@ export interface CareerProfile {
   season: string;
   managerName: string;
   preferredPhilosophy: string;
+  primaryTacticalVisionKey?: TacticalVisionKey | 'unspecified' | null;
+  alternativeTacticalVisionKey?: TacticalVisionKey | 'unspecified' | null;
   primaryFormation: string;
   alternativeFormation: string;
   preferredAttackingStyle: string;
   preferredDefensiveStyle: string;
+  preferredBuildUpStyle?: string;
+  preferredDefensiveApproach?: string;
+  preferredDefensiveLineHeight?: number;
+  tacticalPhilosophyNotes?: string;
+  tacticalFlexibility?: 'strict' | 'balanced' | 'pragmatic';
   isActive: boolean;
   createdAt: string;
   updatedAt: string;
@@ -193,6 +200,7 @@ export interface TacticalPreset {
   clubId: string;
   name: string;
   presetStatus?: TacticalPresetStatus;
+  tacticalVisionKey?: TacticalVisionKey | 'unspecified' | null;
   formationId: string | null;
   formationName: string;
   buildUpStyle: string;
@@ -234,6 +242,10 @@ export interface MatchTacticalSnapshot {
   sourcePresetName: string | null;
   snapshotType: 'pre_match' | 'in_match_adjustment';
   isLocked: boolean;
+  tacticalVisionKey?: TacticalVisionKey | 'unspecified' | null;
+  tacticalVisionDatasetVersion?: string | null;
+  appliedInGameConfirmed?: boolean;
+  appliedInGameAt?: string | null;
   formationId: string | null;
   formationName: string;
   buildUpStyle: string;
@@ -277,6 +289,7 @@ export interface TacticalConfiguration {
   label: string;
   phase: 'pre_match' | 'halftime_recommended' | 'second_half_applied';
   formation: string;
+  tacticalVisionKey?: TacticalVisionKey | 'unspecified';
   buildUpStyle: string;
   defensiveApproach: string;
   defensiveLineHeight: number;
@@ -566,8 +579,25 @@ export interface CaptureSettings {
 
 export interface AiSettings {
   modelId: string;
+  quickAnalysisModelId?: string;
+  balancedAnalysisModelId?: string;
+  deepAnalysisModelId?: string;
+  tacticalSynthesisModelId?: string;
+  defaultAnalysisMode?: VideoAnalysisMode;
+  defaultLanguage?: AnalysisLanguage;
   analysisQuality: 'balanced' | 'detailed' | 'compact';
   maxEvidenceFrames: number;
+  samplingFpsQuick?: number;
+  samplingFpsBalanced?: number;
+  samplingFpsDeep?: number;
+  downscaleForAnalysis?: boolean;
+  maxConcurrentRequests?: number;
+  maxAnalysisDurationSeconds?: number;
+  maxRetryAttempts?: number;
+  perMatchBudgetUsd?: number;
+  dailyBudgetUsd?: number;
+  minLiveGameplaySeconds?: number;
+  autoAnalyzeAfterStop?: boolean;
   removeDuplicateFrames: boolean;
   requireUploadConfirmation: boolean;
   deleteRemoteAfterAnalysis: boolean;
@@ -593,11 +623,18 @@ export interface TacticalCatalogItem {
 export interface ApiUsageLog {
   id: string;
   matchId: string | null;
+  analysisJobId?: string | null;
   modelId: string;
   stage: string;
   inputTokens: number;
   outputTokens: number;
   evidenceFramesCount: number;
+  fileSizeBytes?: number | null;
+  videoDurationSeconds?: number | null;
+  requestDurationMs?: number | null;
+  estimatedCostUsd?: number | null;
+  pricingSource?: string | null;
+  isEstimate?: boolean;
   status: 'success' | 'error';
   errorMessage: string | null;
   createdAt: string;
@@ -1215,8 +1252,24 @@ export interface RoleFocusValidationResult {
 
 export interface AiMatchTacticalContext {
   matchId: string;
+  clubId?: string;
   clubName: string;
   opponentName: string;
+  competition?: string;
+  venue?: string;
+  scoreline?: string | null;
+  snapshotId?: string | null;
+  tacticalVisionKey?: TacticalVisionKey | 'unspecified';
+  tacticalVisionName?: string;
+  buildUpStyle?: string;
+  defensiveApproach?: string;
+  defensiveLineHeight?: number;
+  clubTacticalIdentity?: {
+    primaryTacticalVisionKey: TacticalVisionKey | 'unspecified';
+    alternativeTacticalVisionKey: TacticalVisionKey | 'unspecified';
+    tacticalFlexibility: 'strict' | 'balanced' | 'pragmatic';
+    philosophyNotes: string;
+  };
   formation: {
     name: string;
     careerModeStatus: string;
@@ -1225,7 +1278,9 @@ export interface AiMatchTacticalContext {
   } | null;
   startingXi: Array<{
     slotIndex: number;
+    slotId?: string;
     positionCode: string;
+    playerId?: string | null;
     playerName: string | null;
     assignedRole: string;
     assignedFocus: string;
@@ -1243,6 +1298,16 @@ export interface AiMatchTacticalContext {
       defending: number | null;
       physicality: number | null;
     } | null;
+  }>;
+  benchPlayers?: Array<{
+    playerId: string;
+    displayName: string;
+    position: string;
+    secondaryPositions: string[];
+    overallRating: number | null;
+    squadStatus: SquadStatus;
+    availability: PlayerAvailability;
+    eligibleForMatch: boolean;
   }>;
   validRolesByPosition: Record<string, Record<string, string[]>>;
 }
@@ -1359,4 +1424,654 @@ export interface CatalogReconcileResult {
   playersPreservedCount: number;
   coverageAfter: CatalogCoverageReport;
 }
+
+// ============================================================
+// Phase 3 — Tactical Vision Engine, Coaching & AI Video Intelligence
+// ============================================================
+
+export type TacticalVisionKey =
+  | 'standard'
+  | 'wing_play'
+  | 'possession'
+  | 'high_pressing'
+  | 'park_the_bus'
+  | 'counter_attack'
+  | 'kick_and_rush';
+
+export type TacticalVisionShortCode = 'S' | 'W' | 'P' | 'H' | 'B' | 'C' | 'K';
+
+export type TacticalFlexibility = 'strict' | 'balanced' | 'pragmatic';
+
+export type TacticalVisionSourceType =
+  | 'official_ea_documentation'
+  | 'user_provided_matrix'
+  | 'in_game_verification'
+  | 'internal_tactical_recommendation'
+  | 'unverified_assumption';
+
+export type RoleAffinityStatus = 'associated' | 'not_associated' | 'unknown';
+
+export interface TacticalVisionAliasRecord {
+  id: string;
+  visionId: string;
+  aliasKey: string;
+  aliasLabel: string;
+  aliasType: string;
+  notes: string;
+}
+
+export interface TacticalVisionRequirementRecord {
+  id: string;
+  visionId: string;
+  parameterType: 'build_up_style' | 'defensive_approach';
+  allowedValues: string[];
+  canonicalInGameLabels: string[];
+  isMandatory: boolean;
+  sourceType: TacticalVisionSourceType;
+  sourceReference: string;
+  verificationStatus: string;
+  conflictNotes: string;
+}
+
+export interface TacticalVisionRoleAffinityRecord {
+  id: string;
+  visionId: string;
+  visionKey: TacticalVisionKey;
+  positionCode: string;
+  roleId: string | null;
+  roleName: string;
+  affinityStatus: RoleAffinityStatus;
+  sourceType: TacticalVisionSourceType;
+  sourceReference: string;
+  datasetVersion: string;
+  verificationStatus: string;
+}
+
+export interface TacticalVisionSettingAffinityRecord {
+  id: string;
+  visionId: string;
+  visionKey: TacticalVisionKey;
+  settingType: 'build_up_style' | 'defensive_height';
+  settingValue: string;
+  isAssociated: boolean;
+  sourceType: TacticalVisionSourceType;
+  sourceReference: string;
+  conflictWithOfficial: boolean;
+  conflictNote: string;
+  datasetVersion: string;
+}
+
+export interface TacticalVisionSourceRecord {
+  id: string;
+  sourceKey: string;
+  title: string;
+  url: string;
+  sourceType: TacticalVisionSourceType;
+  reliabilityTier: string;
+  notes: string;
+  conflictResolutions: Array<{
+    topic: string;
+    conflict: string;
+    resolution: string;
+  }>;
+  verifiedAt: string;
+}
+
+export interface TacticalVisionRecord {
+  id: string;
+  internalKey: TacticalVisionKey;
+  shortCode: TacticalVisionShortCode;
+  displayName: string;
+  description: string;
+  attackingPrinciples: string[];
+  defensivePrinciples: string[];
+  transitionPrinciples: string[];
+  strengths: string[];
+  weaknesses: string[];
+  evaluationCriteria: string[];
+  sourceType: TacticalVisionSourceType;
+  sourceReferences: string[];
+  datasetVersion: string;
+  verificationStatus: string;
+  lastVerifiedAt: string;
+  aliases: TacticalVisionAliasRecord[];
+  officialRequirements: TacticalVisionRequirementRecord[];
+}
+
+export interface TacticalVisionCatalogResponse {
+  datasetVersion: string;
+  lastVerifiedAt: string;
+  visions: TacticalVisionRecord[];
+  roleAffinities: TacticalVisionRoleAffinityRecord[];
+  settingAffinities: TacticalVisionSettingAffinityRecord[];
+  sources: TacticalVisionSourceRecord[];
+}
+
+export type RoleFamiliarityTier = 'none' | 'role_plus' | 'role_plus_plus' | 'unknown';
+
+export interface ClubCoachRecord {
+  id: string;
+  clubId: string;
+  name: string;
+  department: 'attack' | 'midfield' | 'defense' | 'goalkeeping' | 'head_coach';
+  tacticalVisionKey: TacticalVisionKey;
+  qualificationLevel: 'bronze' | 'silver' | 'gold' | 'standard';
+  starRating: number;
+  notes: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface PlayerRoleFamiliarityRecord {
+  id: string;
+  playerId: string;
+  positionCode: string;
+  roleName: string;
+  baseFamiliarity: RoleFamiliarityTier;
+  potentialCoachFamiliarity: RoleFamiliarityTier;
+  confirmedFamiliarity: RoleFamiliarityTier;
+  confirmedAt: string | null;
+  notes: string;
+}
+
+export interface ThreeLayerTacticalEvaluation {
+  tacticalVisionKey: TacticalVisionKey | 'unspecified';
+  tacticalVisionName: string;
+  datasetVersion: string;
+  layer1FcIqLegality: {
+    valid: boolean;
+    blockingIssues: Array<{
+      slotOrder: number | null;
+      slotId: string | null;
+      positionCode: string | null;
+      code: string;
+      message: string;
+    }>;
+  };
+  layer2OfficialRequirements: {
+    status: 'compliant' | 'conflict' | 'unspecified';
+    verifiedVisionCompliant: boolean;
+    conflicts: Array<{
+      parameterType: 'build_up_style' | 'defensive_approach';
+      currentValue: string;
+      allowedValues: string[];
+      canonicalInGameLabels: string[];
+      explanation: string;
+      suggestedCorrectionValue: string;
+      sourceType: TacticalVisionSourceType;
+    }>;
+    advisoryNotes: string[];
+  };
+  layer3RoleAffinity: {
+    status: 'evaluated' | 'unspecified';
+    matchedCount: number;
+    assignedRoleCount: number;
+    notAssociatedCount: number;
+    unknownCount: number;
+    summaryLabel: string;
+    disclaimer: string;
+    slotAffinities: Array<{
+      slotOrder: number;
+      slotId: string;
+      positionCode: string;
+      role: string;
+      focus: string;
+      affinityStatus: RoleAffinityStatus;
+      legalForPosition: boolean;
+      playerId: string | null;
+      playerDisplayName: string | null;
+      baseFamiliarity: RoleFamiliarityTier;
+      potentialCoachFamiliarity: RoleFamiliarityTier;
+      confirmedFamiliarity: RoleFamiliarityTier;
+      coachBonusNote: string | null;
+    }>;
+    coachPotentialSummary: {
+      configuredCoachCount: number;
+      matchingVisionCoachCount: number;
+      silverOrGoldMatchingCoaches: number;
+      note: string;
+    };
+  };
+  squadSuitability: {
+    naturalPositionCount: number;
+    secondaryPositionCount: number;
+    outOfPositionCount: number;
+    unassignedCount: number;
+    tradeOffs: string[];
+  };
+}
+
+export type VisionOptimizationMode =
+  | 'minimal_adjustment'
+  | 'role_optimization'
+  | 'squad_optimization'
+  | 'full_tactical_optimization';
+
+export interface VisionOptimizationProposalItem {
+  id: string;
+  category: 'build_up_style' | 'defensive_approach' | 'defensive_line_height' | 'formation' | 'role_focus' | 'player_swap';
+  slotOrder?: number;
+  slotId?: string;
+  positionCode?: string;
+  currentValue: string;
+  proposedValue: string;
+  proposedRole?: string;
+  proposedFocus?: string;
+  proposedPlayerId?: string | null;
+  proposedPlayerName?: string | null;
+  mandatoryForOfficialVision: boolean;
+  explanation: string;
+  expectedBenefit: string;
+  potentialDownside: string;
+  evidenceBasis: string;
+}
+
+export interface VisionOptimizationResult {
+  mode: VisionOptimizationMode;
+  targetVisionKey: TacticalVisionKey;
+  targetVisionName: string;
+  beforeEvaluation: ThreeLayerTacticalEvaluation;
+  afterPreview: {
+    formationName: string;
+    buildUpStyle: string;
+    defensiveApproach: string;
+    defensiveLineHeight: number;
+    assignments: Array<{
+      slotOrder: number;
+      slotId: string;
+      positionCode: string;
+      playerId: string | null;
+      playerName: string | null;
+      role: string;
+      focus: string;
+    }>;
+    evaluation: ThreeLayerTacticalEvaluation;
+  };
+  proposals: VisionOptimizationProposalItem[];
+  summaryNote: string;
+}
+
+// --- Gemini Model Capability Registry & Video Intelligence ---
+
+export type VideoAnalysisMode = 'quick' | 'balanced' | 'deep';
+export type AnalysisLanguage = 'en' | 'id';
+
+export interface GeminiModelCapability {
+  modelId: string;
+  displayName: string;
+  availability: 'available_default' | 'available_optional' | 'requires_paid_tier';
+  supportsVideoInput: boolean;
+  supportsStructuredOutput: boolean;
+  recommendedStages: Array<'classification' | 'quick' | 'balanced' | 'deep' | 'synthesis'>;
+  estimatedInputPricePer1MTokensUsd: number | null;
+  estimatedOutputPricePer1MTokensUsd: number | null;
+  pricingVerified: boolean;
+  pricingNote: string;
+  description: string;
+}
+
+export interface GeminiServiceStatus {
+  configured: boolean;
+  defaultModel: string;
+  supportedModels: string[];
+  models: GeminiModelCapability[];
+  phaseNote: string;
+}
+
+export interface GeminiConnectionTestResult {
+  ok: boolean;
+  configured: boolean;
+  modelId: string;
+  latencyMs: number;
+  videoSupported: boolean;
+  structuredOutputSupported: boolean;
+  listedModelsCount?: number;
+  message: string;
+  errorCode?: string;
+}
+
+export type AnalysisJobStatus =
+  | 'not_requested'
+  | 'queued'
+  | 'validating_recording'
+  | 'preprocessing'
+  | 'uploading'
+  | 'waiting_for_media_processing'
+  | 'classifying_gameplay'
+  | 'analyzing_gameplay'
+  | 'evaluating_tactics'
+  | 'generating_briefing'
+  | 'validating_results'
+  | 'completed'
+  | 'insufficient_gameplay'
+  | 'completed_with_limitations'
+  | 'failed'
+  | 'cancelled'
+  | 'interrupted';
+
+export type VideoContentType =
+  | 'live_gameplay'
+  | 'set_piece'
+  | 'replay'
+  | 'cutscene'
+  | 'pre_match_menu'
+  | 'tactical_setup'
+  | 'squad_management'
+  | 'pause_menu'
+  | 'halftime_statistics'
+  | 'fulltime_statistics'
+  | 'loading_screen'
+  | 'non_game_content'
+  | 'obscured_or_black_screen'
+  | 'unknown';
+
+export type ObservationEvidenceType =
+  | 'directly_observed'
+  | 'hud_or_statistics_screen'
+  | 'user_confirmed'
+  | 'tactical_inference'
+  | 'master_database_attribute';
+
+export type RecommendationPriorityGroup =
+  | 'immediate_correction'
+  | 'player_change'
+  | 'structural_adjustment'
+  | 'gameplay_coaching'
+  | 'contingency_plan';
+
+export type RecommendationDecisionStatus =
+  | 'ai_recommended'
+  | 'user_accepted'
+  | 'user_modified'
+  | 'user_rejected'
+  | 'applied_in_game'
+  | 'unable_to_verify';
+
+export interface AnalysisTimingBreakdown {
+  recordingDurationSeconds: number;
+  validationMs: number;
+  preprocessingMs: number;
+  uploadMs: number;
+  mediaProcessingMs: number;
+  classificationMs: number;
+  observationAnalysisMs: number;
+  tacticalSynthesisMs: number;
+  resultValidationMs: number;
+  totalElapsedMs: number;
+}
+
+export interface AiAnalysisJobRecord {
+  id: string;
+  matchId: string;
+  sessionId: string | null;
+  half: 'first_half' | 'second_half';
+  analysisMode: VideoAnalysisMode;
+  language: AnalysisLanguage;
+  status: AnalysisJobStatus;
+  currentStage: string;
+  progressDetail: {
+    segmentsTotal: number;
+    segmentsProcessed: number;
+    stageLabel: string;
+    uploadBytesSent?: number;
+    uploadBytesTotal?: number;
+    note?: string;
+  };
+  modelVideoId: string;
+  modelSynthesisId: string;
+  promptVersion: string;
+  schemaVersion: string;
+  tacticalVisionDatasetVersion: string;
+  requestFingerprint: string;
+  privacyAuthorized: boolean;
+  entireDisplayAcknowledged: boolean;
+  estimatedCostUsd: number;
+  actualCostUsd: number | null;
+  budgetCapUsd: number;
+  segmentsTotal: number;
+  segmentsProcessed: number;
+  samplingFps: number;
+  coverageSummary: string;
+  startedAt: string | null;
+  completedAt: string | null;
+  elapsedMs: number;
+  timingBreakdown: AnalysisTimingBreakdown | null;
+  errorCode: string | null;
+  errorMessage: string | null;
+  retryCount: number;
+  cancelRequested: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface AiAnalysisAssetRecord {
+  id: string;
+  jobId: string;
+  matchId: string;
+  sessionId: string | null;
+  segmentId: string | null;
+  localFilePath: string;
+  preparedFilePath: string | null;
+  isTempAsset: boolean;
+  sha256Hash: string;
+  fileSizeBytes: number;
+  durationSeconds: number;
+  width: number | null;
+  height: number | null;
+  remoteFileName: string | null;
+  remoteFileUri: string | null;
+  remoteState: string | null;
+  cleanupStatus: 'not_uploaded' | 'pending' | 'deleted' | 'cleanup_failed' | 'retained_by_policy';
+  cleanupAttemptedAt: string | null;
+  cleanupConfirmedAt: string | null;
+  cleanupError: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface AiVideoClassificationRecord {
+  id: string;
+  jobId: string;
+  matchId: string;
+  segmentId: string | null;
+  startSeconds: number;
+  endSeconds: number;
+  sessionStartSeconds: number;
+  sessionEndSeconds: number;
+  contentType: VideoContentType;
+  confidence: ConfidenceLevel;
+  evidenceDescription: string;
+  inGameClock: string | null;
+  createdAt: string;
+}
+
+export interface AiGameplayObservationRecord {
+  id: string;
+  jobId: string;
+  matchId: string;
+  half: 'first_half' | 'second_half';
+  segmentId: string | null;
+  startSeconds: number;
+  endSeconds: number;
+  sessionStartSeconds: number;
+  sessionEndSeconds: number;
+  inGameClock: string | null;
+  categoryGroup: 'attacking' | 'defensive' | 'possession' | 'match_events';
+  category: string;
+  teamAttribution: 'user_team' | 'opponent' | 'both' | 'unknown';
+  playerAttribution: string;
+  description: string;
+  supportingVisualEvidence: string;
+  evidenceType: ObservationEvidenceType;
+  confidence: ConfidenceLevel;
+  severity: 'Critical' | 'High' | 'Medium' | 'Low' | 'Positive';
+  limitations: string;
+  evidenceFramePath: string | null;
+  isFromReplay: boolean;
+  createdAt: string;
+}
+
+export interface AiTacticalVisionAssessmentRecord {
+  id: string;
+  jobId: string;
+  matchId: string;
+  half: 'first_half' | 'second_half';
+  intendedVisionKey: TacticalVisionKey | 'unspecified';
+  observedPlayingStyle: {
+    primaryTendency: string;
+    mixedTendencies: string[];
+    evidenceSummary: string;
+    isInsufficientEvidence: boolean;
+  };
+  recommendedVisionKey: TacticalVisionKey | 'retain_current' | 'unspecified';
+  recommendationStance: 'retain_and_refine' | 'adapt_vision' | 'insufficient_evidence';
+  recommendationRationale: string;
+  officialComplianceStatus: 'compliant' | 'conflict' | 'unspecified';
+  roleAffinityMatchedCount: number;
+  roleAffinityTotalCount: number;
+  roleAffinityUnknownCount: number;
+  executionAssessmentLabel: string;
+  internalAssessmentScore: number | null;
+  scoreMethodologyNote: string;
+  criteriaBreakdown: Array<{
+    criterion: string;
+    assessment: 'strong' | 'mixed' | 'weak' | 'unknown';
+    evidenceNote: string;
+  }>;
+  confidence: ConfidenceLevel;
+  limitations: string;
+  createdAt: string;
+}
+
+export interface AiTacticalRecommendationRecord {
+  id: string;
+  jobId: string;
+  matchId: string;
+  priorityGroup: RecommendationPriorityGroup;
+  priorityRank: number;
+  title: string;
+  actionType:
+    | 'build_up_style'
+    | 'defensive_approach'
+    | 'defensive_line_height'
+    | 'player_role'
+    | 'player_focus'
+    | 'substitution'
+    | 'formation_change'
+    | 'tactical_vision_change'
+    | 'gameplay_coaching'
+    | 'contingency_rule';
+  targetSlotId: string | null;
+  targetPositionCode: string | null;
+  currentValue: string;
+  proposedValue: string;
+  targetPlayerOutId: string | null;
+  targetPlayerInId: string | null;
+  reason: string;
+  expectedBenefit: string;
+  potentialRisk: string;
+  evidenceObservationIds: string[];
+  evidenceTimestamps: Array<{
+    segmentId: string | null;
+    startSeconds: number;
+    endSeconds: number;
+    inGameClock: string | null;
+  }>;
+  confidence: ConfidenceLevel;
+  validationStatus: 'valid' | 'corrected' | 'invalid_unsupported';
+  validationErrors: string[];
+  rawAiProposal: Record<string, unknown> | null;
+  decision?: AiRecommendationDecisionRecord | null;
+  createdAt: string;
+}
+
+export interface AiRecommendationDecisionRecord {
+  id: string;
+  recommendationId: string;
+  matchId: string;
+  jobId: string;
+  decisionStatus: RecommendationDecisionStatus;
+  modifiedValue: string | null;
+  appliedInGame: boolean;
+  appliedConfirmedAt: string | null;
+  adjustmentSnapshotId: string | null;
+  userNotes: string;
+  updatedAt: string;
+}
+
+export interface AiHalftimeBriefingPayload {
+  id: string;
+  jobId: string;
+  matchId: string;
+  half: 'first_half' | 'second_half';
+  language: AnalysisLanguage;
+  modelUsed: string;
+  promptVersion: string;
+  schemaVersion: string;
+  evidenceQuality: 'high' | 'moderate' | 'limited' | 'insufficient';
+  managerVerdict: {
+    whatIsWorking: string[];
+    whatIsNotWorking: string[];
+    whyTacticStruggling: string;
+    firstPriorityChange: string;
+    conciseSummary: string;
+  };
+  readableHudStats: {
+    scoreline: string | null;
+    matchClock: string | null;
+    possessionLabel: string | null;
+    shotsLabel: string | null;
+    otherVerifiedStats: Array<{ label: string; value: string; source: 'hud_or_statistics_screen' }>;
+  };
+  gameplayCoaching: Array<{
+    instruction: string;
+    triggerSituation: string;
+    evidenceNote: string;
+  }>;
+  contingencyPlan: Array<{
+    scenario: string;
+    trigger: string;
+    tacticalAction: string;
+  }>;
+  limitations: string[];
+  createdAt: string;
+}
+
+export interface AiSecondHalfComparisonPayload {
+  id: string;
+  jobId: string;
+  matchId: string;
+  firstHalfJobId: string | null;
+  modelUsed: string;
+  summary: string;
+  appliedAdjustmentsReviewed: Array<{
+    recommendationTitle: string;
+    userConfirmedAppliedInGame: boolean;
+    observedSecondHalfPattern: string;
+    outcomeAssessment: 'improved' | 'unchanged' | 'worsened' | 'insufficient_evidence';
+    causationCaveat: string;
+  }>;
+  attackingComparison: string;
+  defensiveComparison: string;
+  tacticalVisionComparison: string;
+  recurringWeaknesses: string[];
+  limitations: string[];
+  createdAt: string;
+}
+
+export interface MatchAnalysisBundle {
+  matchId: string;
+  jobs: AiAnalysisJobRecord[];
+  activeJob: AiAnalysisJobRecord | null;
+  latestFirstHalfJob: AiAnalysisJobRecord | null;
+  latestSecondHalfJob: AiAnalysisJobRecord | null;
+  briefing: AiHalftimeBriefingPayload | null;
+  visionAssessment: AiTacticalVisionAssessmentRecord | null;
+  classifications: AiVideoClassificationRecord[];
+  observations: AiGameplayObservationRecord[];
+  recommendations: AiTacticalRecommendationRecord[];
+  assets: AiAnalysisAssetRecord[];
+  secondHalfComparison: AiSecondHalfComparisonPayload | null;
+}
+
 

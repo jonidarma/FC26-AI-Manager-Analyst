@@ -118,7 +118,10 @@ export function listClubs(): ClubWithProfile[] {
         c.id, c.name, c.league, c.nation, c.catalog_club_id, c.created_at, c.updated_at,
         cp.id as profile_id, cp.season, cp.manager_name, cp.preferred_philosophy,
         cp.primary_formation, cp.alternative_formation, cp.preferred_attacking_style,
-        cp.preferred_defensive_style, cp.is_active, cp.created_at as profile_created_at,
+        cp.preferred_defensive_style, cp.primary_tactical_vision_key, cp.alternative_tactical_vision_key,
+        cp.preferred_build_up_style, cp.preferred_defensive_approach, cp.preferred_defensive_line_height,
+        cp.tactical_philosophy_notes, cp.tactical_flexibility,
+        cp.is_active, cp.created_at as profile_created_at,
         cp.updated_at as profile_updated_at,
         (SELECT COUNT(*) FROM players p WHERE p.club_id = c.id) as player_count,
         (SELECT COUNT(*) FROM matches m WHERE m.club_id = c.id) as match_count
@@ -148,6 +151,19 @@ export function listClubs(): ClubWithProfile[] {
       alternativeFormation: String(r.alternative_formation),
       preferredAttackingStyle: String(r.preferred_attacking_style),
       preferredDefensiveStyle: String(r.preferred_defensive_style),
+      primaryTacticalVisionKey: (r.primary_tactical_vision_key
+        ? String(r.primary_tactical_vision_key)
+        : 'unspecified') as ClubWithProfile['profile']['primaryTacticalVisionKey'],
+      alternativeTacticalVisionKey: (r.alternative_tactical_vision_key
+        ? String(r.alternative_tactical_vision_key)
+        : 'unspecified') as ClubWithProfile['profile']['alternativeTacticalVisionKey'],
+      preferredBuildUpStyle: String(r.preferred_build_up_style ?? 'Balanced'),
+      preferredDefensiveApproach: String(r.preferred_defensive_approach ?? 'Balanced'),
+      preferredDefensiveLineHeight: Number(r.preferred_defensive_line_height ?? 55),
+      tacticalPhilosophyNotes: String(r.tactical_philosophy_notes ?? ''),
+      tacticalFlexibility: (r.tactical_flexibility
+        ? String(r.tactical_flexibility)
+        : 'balanced') as ClubWithProfile['profile']['tacticalFlexibility'],
       isActive: Boolean(r.is_active),
       createdAt: String(r.profile_created_at),
       updatedAt: String(r.profile_updated_at),
@@ -167,6 +183,13 @@ export function createClub(input: {
   alternativeFormation: string;
   preferredAttackingStyle: string;
   preferredDefensiveStyle: string;
+  primaryTacticalVisionKey?: string;
+  alternativeTacticalVisionKey?: string | null;
+  preferredBuildUpStyle?: string;
+  preferredDefensiveApproach?: string;
+  preferredDefensiveLineHeight?: number;
+  tacticalPhilosophyNotes?: string;
+  tacticalFlexibility?: 'strict' | 'balanced' | 'pragmatic';
   setActive?: boolean;
   rosterInitMode?: 'default_roster' | 'empty';
 }): ClubWithProfile & { defaultRosterImport?: DefaultRosterImportResult | null } {
@@ -203,8 +226,10 @@ export function createClub(input: {
       INSERT INTO career_profiles (
         id, club_id, season, manager_name, preferred_philosophy,
         primary_formation, alternative_formation, preferred_attacking_style,
-        preferred_defensive_style, is_active, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        preferred_defensive_style, primary_tactical_vision_key, alternative_tactical_vision_key,
+        preferred_build_up_style, preferred_defensive_approach, preferred_defensive_line_height,
+        tactical_philosophy_notes, tactical_flexibility, is_active, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       profileId,
       clubId,
@@ -215,6 +240,13 @@ export function createClub(input: {
       input.alternativeFormation.trim(),
       input.preferredAttackingStyle.trim(),
       input.preferredDefensiveStyle.trim(),
+      input.primaryTacticalVisionKey?.trim() || 'unspecified',
+      input.alternativeTacticalVisionKey?.trim() || 'unspecified',
+      input.preferredBuildUpStyle?.trim() || 'Balanced',
+      input.preferredDefensiveApproach?.trim() || 'Balanced',
+      Math.max(1, Math.min(100, Math.round(input.preferredDefensiveLineHeight ?? 55))),
+      (input.tacticalPhilosophyNotes ?? '').trim(),
+      input.tacticalFlexibility ?? 'balanced',
       shouldBeActive ? 1 : 0,
       now,
       now
@@ -252,6 +284,13 @@ export function updateClub(
     alternativeFormation?: string;
     preferredAttackingStyle?: string;
     preferredDefensiveStyle?: string;
+    primaryTacticalVisionKey?: string;
+    alternativeTacticalVisionKey?: string | null;
+    preferredBuildUpStyle?: string;
+    preferredDefensiveApproach?: string;
+    preferredDefensiveLineHeight?: number;
+    tacticalPhilosophyNotes?: string;
+    tacticalFlexibility?: 'strict' | 'balanced' | 'pragmatic';
   }
 ): ClubWithProfile | null {
   const db = getDb();
@@ -271,11 +310,16 @@ export function updateClub(
       clubId
     );
 
+    // Updating Club Tactical Identity never silently mutates saved tactical presets or historical match snapshots
     db.prepare(`
       UPDATE career_profiles
       SET season = ?, manager_name = ?, preferred_philosophy = ?,
           primary_formation = ?, alternative_formation = ?,
-          preferred_attacking_style = ?, preferred_defensive_style = ?, updated_at = ?
+          preferred_attacking_style = ?, preferred_defensive_style = ?,
+          primary_tactical_vision_key = ?, alternative_tactical_vision_key = ?,
+          preferred_build_up_style = ?, preferred_defensive_approach = ?,
+          preferred_defensive_line_height = ?, tactical_philosophy_notes = ?,
+          tactical_flexibility = ?, updated_at = ?
       WHERE club_id = ?
     `).run(
       input.season?.trim() ?? existing.profile.season,
@@ -285,6 +329,17 @@ export function updateClub(
       input.alternativeFormation?.trim() ?? existing.profile.alternativeFormation,
       input.preferredAttackingStyle?.trim() ?? existing.profile.preferredAttackingStyle,
       input.preferredDefensiveStyle?.trim() ?? existing.profile.preferredDefensiveStyle,
+      input.primaryTacticalVisionKey?.trim() ?? existing.profile.primaryTacticalVisionKey ?? 'unspecified',
+      input.alternativeTacticalVisionKey?.trim() ?? existing.profile.alternativeTacticalVisionKey ?? 'unspecified',
+      input.preferredBuildUpStyle?.trim() ?? existing.profile.preferredBuildUpStyle ?? 'Balanced',
+      input.preferredDefensiveApproach?.trim() ?? existing.profile.preferredDefensiveApproach ?? 'Balanced',
+      input.preferredDefensiveLineHeight !== undefined
+        ? Math.max(1, Math.min(100, Math.round(input.preferredDefensiveLineHeight)))
+        : (existing.profile.preferredDefensiveLineHeight ?? 55),
+      input.tacticalPhilosophyNotes !== undefined
+        ? input.tacticalPhilosophyNotes.trim()
+        : (existing.profile.tacticalPhilosophyNotes ?? ''),
+      input.tacticalFlexibility ?? existing.profile.tacticalFlexibility ?? 'balanced',
       now,
       clubId
     );
@@ -1016,6 +1071,9 @@ function mapTacticalPreset(
     id: String(presetRow.id),
     clubId: String(presetRow.club_id),
     name: String(presetRow.name),
+    tacticalVisionKey: (presetRow.tactical_vision_key
+      ? String(presetRow.tactical_vision_key)
+      : 'unspecified') as TacticalPreset['tacticalVisionKey'],
     formationId: presetRow.formation_id ? String(presetRow.formation_id) : null,
     formationName: String(presetRow.formation_name),
     buildUpStyle: String(presetRow.build_up_style),
@@ -1213,6 +1271,7 @@ export function createTacticalPreset(
   clubId: string,
   input: {
     name: string;
+    tacticalVisionKey?: string;
     formationId?: string | null;
     formationName: string;
     buildUpStyle: string;
@@ -1258,14 +1317,15 @@ export function createTacticalPreset(
 
     db.prepare(`
       INSERT INTO tactical_presets (
-        id, club_id, name, formation_id, formation_name, build_up_style,
+        id, club_id, name, tactical_vision_key, formation_id, formation_name, build_up_style,
         defensive_approach, defensive_line_height, is_default, preset_status, bench_json,
         notes, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       presetId,
       clubId,
       input.name.trim(),
+      input.tacticalVisionKey?.trim() || 'unspecified',
       resolvedFormation?.id ?? null,
       input.formationName.trim(),
       input.buildUpStyle.trim(),
@@ -1306,6 +1366,7 @@ export function updateTacticalPreset(
   presetId: string,
   input: Partial<{
     name: string;
+    tacticalVisionKey: string;
     formationId: string | null;
     formationName: string;
     buildUpStyle: string;
@@ -1368,12 +1429,13 @@ export function updateTacticalPreset(
 
     db.prepare(`
       UPDATE tactical_presets
-      SET name = ?, formation_id = ?, formation_name = ?, build_up_style = ?,
+      SET name = ?, tactical_vision_key = ?, formation_id = ?, formation_name = ?, build_up_style = ?,
           defensive_approach = ?, defensive_line_height = ?, is_default = ?, preset_status = ?,
           bench_json = ?, notes = ?, updated_at = ?
       WHERE id = ?
     `).run(
       input.name?.trim() ?? existing.name,
+      input.tacticalVisionKey?.trim() ?? existing.tacticalVisionKey ?? 'unspecified',
       resolvedFormation?.id ?? existing.formationId,
       nextFormationName,
       input.buildUpStyle?.trim() ?? existing.buildUpStyle,
@@ -1444,6 +1506,7 @@ export function duplicateTacticalPreset(presetId: string, newName?: string): Tac
     existing.clubId,
     {
       name: newName?.trim() || `${existing.name} (Copy)`,
+      tacticalVisionKey: existing.tacticalVisionKey ?? 'unspecified',
       formationId: existing.formationId,
       formationName: existing.formationName,
       buildUpStyle: existing.buildUpStyle,
@@ -1609,6 +1672,14 @@ function mapMatchTacticalSnapshotRow(r: Record<string, unknown>): MatchTacticalS
     sourcePresetName: r.source_preset_name ? String(r.source_preset_name) : null,
     snapshotType: String(r.snapshot_type) as MatchTacticalSnapshot['snapshotType'],
     isLocked: Boolean(r.is_locked),
+    tacticalVisionKey: (r.tactical_vision_key
+      ? String(r.tactical_vision_key)
+      : 'unspecified') as MatchTacticalSnapshot['tacticalVisionKey'],
+    tacticalVisionDatasetVersion: r.tactical_vision_dataset_version
+      ? String(r.tactical_vision_dataset_version)
+      : null,
+    appliedInGameConfirmed: Boolean(r.applied_in_game_confirmed),
+    appliedInGameAt: r.applied_in_game_at ? String(r.applied_in_game_at) : null,
     formationId: r.formation_id ? String(r.formation_id) : null,
     formationName: String(r.formation_name),
     buildUpStyle: String(r.build_up_style),
@@ -1700,6 +1771,8 @@ export function updatePreMatchTacticalSnapshot(
   matchId: string,
   input: {
     sourcePresetId?: string | null;
+    tacticalVisionKey?: string;
+    tacticalVisionDatasetVersion?: string | null;
     formationId?: string | null;
     formationName: string;
     buildUpStyle: string;
@@ -1746,6 +1819,14 @@ export function updatePreMatchTacticalSnapshot(
 
   const now = new Date().toISOString();
   const sourcePreset = input.sourcePresetId ? getTacticalPresetById(input.sourcePresetId) : null;
+  const visionKey =
+    input.tacticalVisionKey?.trim() ||
+    sourcePreset?.tacticalVisionKey ||
+    existing?.tacticalVisionKey ||
+    'unspecified';
+  const visionDatasetVersion =
+    input.tacticalVisionDatasetVersion ?? existing?.tacticalVisionDatasetVersion ?? 'fc26-tactical-visions-3.0.0';
+
   const resolvedFormation = input.formationId
     ? getCatalogFormationByIdOrName(input.formationId, db)
     : getCatalogFormationByIdOrName(input.formationName, db);
@@ -1760,13 +1841,16 @@ export function updatePreMatchTacticalSnapshot(
     if (existing) {
       db.prepare(`
         UPDATE match_tactical_snapshots
-        SET source_preset_id = ?, source_preset_name = ?, formation_id = ?, formation_name = ?,
+        SET source_preset_id = ?, source_preset_name = ?, tactical_vision_key = ?,
+            tactical_vision_dataset_version = ?, formation_id = ?, formation_name = ?,
             build_up_style = ?, defensive_approach = ?, defensive_line_height = ?,
             assignments_json = ?, bench_json = ?, notes = ?, updated_at = ?
         WHERE id = ?
       `).run(
         sourcePreset?.id ?? null,
         sourcePreset?.name ?? null,
+        visionKey,
+        visionDatasetVersion,
         resolvedFormation?.id ?? null,
         input.formationName.trim(),
         input.buildUpStyle.trim(),
@@ -1782,14 +1866,17 @@ export function updatePreMatchTacticalSnapshot(
       db.prepare(`
         INSERT INTO match_tactical_snapshots (
           id, match_id, source_preset_id, source_preset_name, snapshot_type, is_locked,
+          tactical_vision_key, tactical_vision_dataset_version,
           formation_id, formation_name, build_up_style, defensive_approach, defensive_line_height,
           assignments_json, bench_json, notes, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, 'pre_match', 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, 'pre_match', 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         crypto.randomUUID(),
         matchId,
         sourcePreset?.id ?? null,
         sourcePreset?.name ?? null,
+        visionKey,
+        visionDatasetVersion,
         resolvedFormation?.id ?? null,
         input.formationName.trim(),
         input.buildUpStyle.trim(),
@@ -1824,6 +1911,9 @@ export function updatePreMatchTacticalSnapshot(
 export function createInMatchTacticalAdjustment(
   matchId: string,
   input: {
+    tacticalVisionKey?: string;
+    tacticalVisionDatasetVersion?: string | null;
+    appliedInGameConfirmed?: boolean;
     formationId?: string | null;
     formationName: string;
     buildUpStyle: string;
@@ -1863,6 +1953,11 @@ export function createInMatchTacticalAdjustment(
 
   const id = crypto.randomUUID();
   const now = new Date().toISOString();
+  const preMatch = getPreMatchTacticalSnapshot(matchId);
+  const visionKey = input.tacticalVisionKey?.trim() || preMatch?.tacticalVisionKey || 'unspecified';
+  const visionDatasetVersion =
+    input.tacticalVisionDatasetVersion ?? preMatch?.tacticalVisionDatasetVersion ?? 'fc26-tactical-visions-3.0.0';
+
   const resolvedFormation = input.formationId
     ? getCatalogFormationByIdOrName(input.formationId, db)
     : getCatalogFormationByIdOrName(input.formationName, db);
@@ -1876,12 +1971,17 @@ export function createInMatchTacticalAdjustment(
   db.prepare(`
     INSERT INTO match_tactical_snapshots (
       id, match_id, source_preset_id, source_preset_name, snapshot_type, is_locked,
+      tactical_vision_key, tactical_vision_dataset_version, applied_in_game_confirmed, applied_in_game_at,
       formation_id, formation_name, build_up_style, defensive_approach, defensive_line_height,
       assignments_json, bench_json, notes, created_at, updated_at
-    ) VALUES (?, ?, NULL, NULL, 'in_match_adjustment', 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ) VALUES (?, ?, NULL, NULL, 'in_match_adjustment', 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     id,
     matchId,
+    visionKey,
+    visionDatasetVersion,
+    input.appliedInGameConfirmed ? 1 : 0,
+    input.appliedInGameConfirmed ? now : null,
     resolvedFormation?.id ?? null,
     input.formationName.trim(),
     input.buildUpStyle.trim(),
@@ -1898,6 +1998,29 @@ export function createInMatchTacticalAdjustment(
     .prepare('SELECT * FROM match_tactical_snapshots WHERE id = ?')
     .get(id) as Record<string, unknown>;
   return mapMatchTacticalSnapshotRow(row);
+}
+
+export function confirmSnapshotAppliedInGame(
+  snapshotId: string,
+  applied: boolean
+): MatchTacticalSnapshot | null {
+  const db = getDb();
+  const existing = db
+    .prepare('SELECT * FROM match_tactical_snapshots WHERE id = ?')
+    .get(snapshotId) as Record<string, unknown> | undefined;
+  if (!existing) return null;
+
+  const now = new Date().toISOString();
+  db.prepare(`
+    UPDATE match_tactical_snapshots
+    SET applied_in_game_confirmed = ?, applied_in_game_at = ?, updated_at = ?
+    WHERE id = ?
+  `).run(applied ? 1 : 0, applied ? now : null, now, snapshotId);
+
+  const updated = db
+    .prepare('SELECT * FROM match_tactical_snapshots WHERE id = ?')
+    .get(snapshotId) as Record<string, unknown>;
+  return mapMatchTacticalSnapshotRow(updated);
 }
 
 function mapMatchRow(r: Record<string, unknown>, db: ReturnType<typeof getDb>): MatchRecord {
@@ -2014,6 +2137,7 @@ export function createMatch(input: {
   objective: string;
   preMatchNotes: string;
   tacticalSetup: {
+    tacticalVisionKey?: string;
     formationId?: string | null;
     buildUpStyle: string;
     defensiveApproach: string;
@@ -2048,6 +2172,11 @@ export function createMatch(input: {
   );
 
   const sourcePreset = input.sourcePresetId ? getTacticalPresetById(input.sourcePresetId) : null;
+  const resolvedVisionKey =
+    input.tacticalSetup.tacticalVisionKey?.trim() ||
+    sourcePreset?.tacticalVisionKey ||
+    'unspecified';
+
   const resolvedFormation = input.tacticalSetup.formationId
     ? getCatalogFormationByIdOrName(input.tacticalSetup.formationId, db)
     : getCatalogFormationByIdOrName(input.startingFormation, db);
@@ -2138,14 +2267,16 @@ export function createMatch(input: {
     db.prepare(`
       INSERT INTO match_tactical_snapshots (
         id, match_id, source_preset_id, source_preset_name, snapshot_type, is_locked,
+        tactical_vision_key, tactical_vision_dataset_version,
         formation_id, formation_name, build_up_style, defensive_approach, defensive_line_height,
         assignments_json, bench_json, notes, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, 'pre_match', 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, 'pre_match', 0, ?, 'fc26-tactical-visions-3.0.0', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       snapshotId,
       matchId,
       sourcePreset?.id ?? null,
       sourcePreset?.name ?? null,
+      resolvedVisionKey,
       resolvedFormation?.id ?? null,
       input.startingFormation,
       input.tacticalSetup.buildUpStyle,
@@ -2433,21 +2564,119 @@ export function deleteTacticalCatalogItem(id: string): boolean {
 export function listApiUsageLogs(): ApiUsageLog[] {
   const db = getDb();
   const rows = db
-    .prepare('SELECT * FROM api_usage_logs ORDER BY created_at DESC LIMIT 100')
+    .prepare('SELECT * FROM api_usage_logs ORDER BY created_at DESC LIMIT 150')
     .all() as Array<Record<string, unknown>>;
 
   return rows.map((r) => ({
     id: String(r.id),
     matchId: r.match_id ? String(r.match_id) : null,
+    analysisJobId: r.analysis_job_id ? String(r.analysis_job_id) : null,
     modelId: String(r.model_id),
     stage: String(r.stage),
     inputTokens: Number(r.input_tokens),
     outputTokens: Number(r.output_tokens),
     evidenceFramesCount: Number(r.evidence_frames_count),
+    fileSizeBytes: r.file_size_bytes === null || r.file_size_bytes === undefined ? null : Number(r.file_size_bytes),
+    videoDurationSeconds:
+      r.video_duration_seconds === null || r.video_duration_seconds === undefined
+        ? null
+        : Number(r.video_duration_seconds),
+    requestDurationMs:
+      r.request_duration_ms === null || r.request_duration_ms === undefined
+        ? null
+        : Number(r.request_duration_ms),
+    estimatedCostUsd:
+      r.estimated_cost_usd === null || r.estimated_cost_usd === undefined
+        ? null
+        : Number(r.estimated_cost_usd),
+    pricingSource: r.pricing_source ? String(r.pricing_source) : null,
+    isEstimate: r.is_estimate !== undefined ? Boolean(r.is_estimate) : true,
     status: String(r.status) as 'success' | 'error',
     errorMessage: r.error_message ? String(r.error_message) : null,
     createdAt: String(r.created_at),
   }));
+}
+
+export function insertApiUsageLog(input: {
+  matchId?: string | null;
+  analysisJobId?: string | null;
+  modelId: string;
+  stage: string;
+  inputTokens: number;
+  outputTokens: number;
+  evidenceFramesCount?: number;
+  fileSizeBytes?: number | null;
+  videoDurationSeconds?: number | null;
+  requestDurationMs?: number | null;
+  estimatedCostUsd?: number | null;
+  pricingSource?: string | null;
+  isEstimate?: boolean;
+  status: 'success' | 'error';
+  errorMessage?: string | null;
+}): void {
+  const db = getDb();
+  const now = new Date().toISOString();
+  db.prepare(`
+    INSERT INTO api_usage_logs (
+      id, match_id, analysis_job_id, model_id, stage, input_tokens, output_tokens,
+      evidence_frames_count, file_size_bytes, video_duration_seconds, request_duration_ms,
+      estimated_cost_usd, pricing_source, is_estimate, status, error_message, created_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    crypto.randomUUID(),
+    input.matchId ?? null,
+    input.analysisJobId ?? null,
+    input.modelId,
+    input.stage,
+    Math.max(0, Math.round(input.inputTokens)),
+    Math.max(0, Math.round(input.outputTokens)),
+    Math.max(0, Math.round(input.evidenceFramesCount ?? 0)),
+    input.fileSizeBytes ?? null,
+    input.videoDurationSeconds ?? null,
+    input.requestDurationMs ?? null,
+    input.estimatedCostUsd ?? null,
+    input.pricingSource ?? null,
+    input.isEstimate === false ? 0 : 1,
+    input.status,
+    input.errorMessage ?? null,
+    now
+  );
+}
+
+export function getDailyApiSpendUsd(datePrefix?: string): {
+  date: string;
+  totalEstimatedUsd: number;
+  requestCount: number;
+  matchSpendByMatchId: Record<string, number>;
+} {
+  const db = getDb();
+  const day = datePrefix ?? new Date().toISOString().slice(0, 10);
+  const rows = db
+    .prepare(
+      `SELECT match_id, COALESCE(SUM(estimated_cost_usd), 0) as total_usd, COUNT(*) as req_count
+       FROM api_usage_logs
+       WHERE created_at LIKE ? AND status = 'success'
+       GROUP BY match_id`
+    )
+    .all(`${day}%`) as Array<{ match_id: string | null; total_usd: number; req_count: number }>;
+
+  let totalEstimatedUsd = 0;
+  let requestCount = 0;
+  const matchSpendByMatchId: Record<string, number> = {};
+  for (const r of rows) {
+    const usd = Number(r.total_usd ?? 0);
+    totalEstimatedUsd += usd;
+    requestCount += Number(r.req_count ?? 0);
+    if (r.match_id) {
+      matchSpendByMatchId[r.match_id] = usd;
+    }
+  }
+  return {
+    date: day,
+    totalEstimatedUsd: Number(totalEstimatedUsd.toFixed(6)),
+    requestCount,
+    matchSpendByMatchId,
+  };
 }
 
 export function getDashboardSummary(): DashboardSummary {

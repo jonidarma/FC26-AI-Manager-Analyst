@@ -1,14 +1,21 @@
-import { Download, Plus, Trash2, Upload } from 'lucide-react';
-import React, { useMemo, useRef, useState } from 'react';
+import { CheckCircle2, Download, Plus, ShieldAlert, Trash2, Upload, Wifi } from 'lucide-react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { SortableTh } from '../components/common/SortableTh';
 import { useApp } from '../context/AppContext';
 import { ACTIVE_GEMINI_MODELS } from '../data/tacticalCatalog';
 import { useTableSort } from '../hooks/useTableSort';
 import { desktopBridge } from '../services/desktopBridge';
-import type { ApiUsageLog, TacticalCatalogItem } from '../types/domain';
+import type {
+  AnalysisLanguage,
+  ApiUsageLog,
+  GeminiConnectionTestResult,
+  GeminiModelCapability,
+  TacticalCatalogItem,
+  VideoAnalysisMode,
+} from '../types/domain';
 
 type SettingsTab = 'capture' | 'ai' | 'catalog' | 'database';
-type UsageLogSortKey = 'timestamp' | 'model' | 'stage' | 'tokens' | 'status';
+type UsageLogSortKey = 'timestamp' | 'model' | 'stage' | 'tokens' | 'cost' | 'status';
 
 const CATALOG_CATEGORY_LABELS: Record<TacticalCatalogItem['category'], string> = {
   formation: 'Formations',
@@ -30,6 +37,7 @@ export function SettingsView() {
       model: (l) => l.modelId,
       stage: (l) => l.stage,
       tokens: (l) => (l.inputTokens ?? 0) + (l.outputTokens ?? 0),
+      cost: (l) => l.estimatedCostUsd ?? 0,
       status: (l) => l.status,
     }),
     []
@@ -46,6 +54,35 @@ export function SettingsView() {
   const [aiDraft, setAiDraft] = useState(settings?.ai ?? null);
   const [saving, setSaving] = useState(false);
 
+  // Phase 3 Gemini Registry, Connection Test & Daily Budget Summary
+  const [modelRegistry, setModelRegistry] = useState<GeminiModelCapability[]>([]);
+  const [budgetSummary, setBudgetSummary] = useState<{
+    datePrefix: string;
+    spentUsd: number;
+    requestCount: number;
+    dailyBudgetUsd: number;
+    perMatchBudgetUsd: number;
+    remainingDailyUsd: number;
+  } | null>(null);
+  const [testingConn, setTestingConn] = useState(false);
+  const [connResult, setConnResult] = useState<GeminiConnectionTestResult | null>(null);
+
+  useEffect(() => {
+    if (tab !== 'ai') return;
+    let active = true;
+    Promise.all([
+      desktopBridge.getAiModelRegistry().catch(() => null),
+      desktopBridge.getAiBudgetSummary().catch(() => null),
+    ]).then(([reg, bud]) => {
+      if (!active) return;
+      if (reg) setModelRegistry(reg.models);
+      if (bud) setBudgetSummary(bud);
+    });
+    return () => {
+      active = false;
+    };
+  }, [tab, usageLogs.length]);
+
   // Tactical catalog creation state
   const [catalogCategory, setCatalogCategory] =
     useState<TacticalCatalogItem['category']>('formation');
@@ -58,6 +95,24 @@ export function SettingsView() {
 
   const effectiveCapture = captureDraft ?? settings?.capture;
   const effectiveAi = aiDraft ?? settings?.ai;
+
+  async function handleTestGeminiConnection() {
+    setTestingConn(true);
+    setConnResult(null);
+    try {
+      const res = await desktopBridge.testGeminiConnection(effectiveAi?.modelId);
+      setConnResult(res);
+      if (res.ok) {
+        notify('success', `Gemini API connected (${res.modelId}) in ${res.latencyMs}ms.`);
+      } else {
+        notify('error', res.message);
+      }
+    } catch (err) {
+      notify('error', err instanceof Error ? err.message : 'Connection test failed');
+    } finally {
+      setTestingConn(false);
+    }
+  }
 
   async function handleSaveCapture(e: React.FormEvent) {
     e.preventDefault();
@@ -364,29 +419,107 @@ export function SettingsView() {
 
       {/* TAB 2: AI & Evidence Policy */}
       {tab === 'ai' && effectiveAi && (
-        <div className="space-y-6 max-w-4xl">
+        <div className="space-y-6 max-w-5xl">
+          {/* Server-Side Credential Status & Connection Test */}
+          <section className="border border-white/[0.08] bg-[#12151B] rounded-lg p-5 space-y-4">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <h2 className="text-[16px] font-semibold text-white">
+                  Gemini API Connection &amp; Budget Guardrails
+                </h2>
+                <p className="text-[12px] text-[#8A94A6] mt-0.5">
+                  Credentials are supplied exclusively server-side via{' '}
+                  <code className="font-mono text-[#D7DDE7]">GEMINI_API_KEY</code> (never entered
+                  or stored in the UI or backups).
+                </p>
+              </div>
+              <button
+                type="button"
+                disabled={testingConn}
+                onClick={() => void handleTestGeminiConnection()}
+                className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-md border border-emerald-500/45 bg-emerald-600/15 hover:bg-emerald-600/25 disabled:opacity-50 text-[12px] text-emerald-200 font-medium"
+              >
+                <Wifi className="w-3.5 h-3.5" />
+                {testingConn ? 'Testing Connection...' : 'Test API Connection'}
+              </button>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-4 gap-3 text-[12px]">
+              <div className="rounded border border-white/[0.07] bg-[#0C0F14] p-3">
+                <div className="text-[#7D8798]">Server GEMINI_API_KEY</div>
+                <div
+                  className={`mt-1 font-semibold ${
+                    systemStatus?.gemini.configured ? 'text-emerald-400' : 'text-amber-300'
+                  }`}
+                >
+                  {systemStatus?.gemini.configured ? 'Configured' : 'Not Configured'}
+                </div>
+              </div>
+              <div className="rounded border border-white/[0.07] bg-[#0C0F14] p-3">
+                <div className="text-[#7D8798]">Today&apos;s Est. Spend</div>
+                <div className="mt-1 font-mono text-white">
+                  ${(budgetSummary?.spentUsd ?? 0).toFixed(4)} / $
+                  {(budgetSummary?.dailyBudgetUsd ?? effectiveAi.dailyBudgetUsd ?? 5).toFixed(2)}
+                </div>
+              </div>
+              <div className="rounded border border-white/[0.07] bg-[#0C0F14] p-3">
+                <div className="text-[#7D8798]">Per-Match Budget Cap</div>
+                <div className="mt-1 font-mono text-white">
+                  ${(effectiveAi.perMatchBudgetUsd ?? 1.5).toFixed(2)}
+                </div>
+              </div>
+              <div className="rounded border border-white/[0.07] bg-[#0C0F14] p-3">
+                <div className="text-[#7D8798]">Today&apos;s Requests</div>
+                <div className="mt-1 font-mono text-white">
+                  {budgetSummary?.requestCount ?? 0} calls
+                </div>
+              </div>
+            </div>
+
+            {connResult && (
+              <div
+                className={`rounded border p-3 text-[12px] flex items-start gap-2 ${
+                  connResult.ok
+                    ? 'border-emerald-500/35 bg-emerald-500/[0.07] text-emerald-200'
+                    : 'border-amber-500/35 bg-amber-500/[0.07] text-amber-200'
+                }`}
+              >
+                {connResult.ok ? (
+                  <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
+                ) : (
+                  <ShieldAlert className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
+                )}
+                <div>
+                  <div className="font-medium">
+                    {connResult.ok ? 'Connection Verified' : 'Connection Check Failed'} ·{' '}
+                    {connResult.modelId} ({connResult.latencyMs}ms)
+                  </div>
+                  <div className="text-[11px] opacity-90 mt-0.5">{connResult.message}</div>
+                </div>
+              </div>
+            )}
+          </section>
+
           <form
             onSubmit={(e) => void handleSaveAi(e)}
             className="border border-white/[0.08] bg-[#12151B] rounded-lg p-6 space-y-5"
           >
             <div className="flex items-center justify-between">
               <h2 className="text-[16px] font-semibold text-white">
-                Gemini Model & Evidence Pipeline Policy
+                Gemini Model Routing &amp; Video Evidence Pipeline Policy
               </h2>
-              <span className="text-[12px] text-[#8A94A6]">
-                Server-side @google/genai · Credentials managed outside renderer
-              </span>
+              <span className="text-[12px] text-[#8A94A6]">Server-side @google/genai</span>
             </div>
 
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-[13px]">
-              <div className="md:col-span-2">
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 text-[13px]">
+              <div>
                 <label className="block text-[12px] text-[#9AA4B4] mb-1.5">
-                  Selected Gemini Model Identifier
+                  Primary Default Model
                 </label>
                 <select
                   value={effectiveAi.modelId}
                   onChange={(e) => setAiDraft({ ...effectiveAi, modelId: e.target.value })}
-                  className="w-full bg-[#0C0F14] border border-white/[0.12] rounded-md px-3 py-2 text-white"
+                  className="w-full bg-[#0C0F14] border border-white/[0.12] rounded-md px-3 py-2 text-white text-[12px]"
                 >
                   {ACTIVE_GEMINI_MODELS.map((m) => (
                     <option key={m.id} value={m.id}>
@@ -394,50 +527,235 @@ export function SettingsView() {
                     </option>
                   ))}
                 </select>
-                <p className="mt-1.5 text-[12px] text-[#8A94A6]">
-                  Model identifier is configurable without rewriting the application. Credentials
-                  are supplied exclusively via server environment secrets or Electron safeStorage.
-                </p>
               </div>
 
               <div>
                 <label className="block text-[12px] text-[#9AA4B4] mb-1.5">
-                  Evidence Analysis Quality
+                  Quick Mode Model
                 </label>
                 <select
-                  value={effectiveAi.analysisQuality}
+                  value={effectiveAi.quickAnalysisModelId ?? 'gemini-3.1-flash-lite'}
                   onChange={(e) =>
-                    setAiDraft({
-                      ...effectiveAi,
-                      analysisQuality: e.target.value as 'balanced' | 'detailed' | 'compact',
-                    })
+                    setAiDraft({ ...effectiveAi, quickAnalysisModelId: e.target.value })
                   }
-                  className="w-full bg-[#0C0F14] border border-white/[0.12] rounded-md px-3 py-2 text-white"
+                  className="w-full bg-[#0C0F14] border border-white/[0.12] rounded-md px-3 py-2 text-white text-[12px]"
                 >
-                  <option value="compact">Compact (Lowest Token Usage)</option>
-                  <option value="balanced">Balanced (Recommended)</option>
-                  <option value="detailed">Detailed (Higher Event Frame Density)</option>
+                  {ACTIVE_GEMINI_MODELS.map((m) => (
+                    <option key={m.id} value={m.id}>
+                      {m.id}
+                    </option>
+                  ))}
                 </select>
               </div>
 
               <div>
                 <label className="block text-[12px] text-[#9AA4B4] mb-1.5">
-                  Maximum Evidence Frames per Half (6–60)
+                  Balanced Mode Model
+                </label>
+                <select
+                  value={effectiveAi.balancedAnalysisModelId ?? 'gemini-4-hydrogen'}
+                  onChange={(e) =>
+                    setAiDraft({ ...effectiveAi, balancedAnalysisModelId: e.target.value })
+                  }
+                  className="w-full bg-[#0C0F14] border border-white/[0.12] rounded-md px-3 py-2 text-white text-[12px]"
+                >
+                  {ACTIVE_GEMINI_MODELS.map((m) => (
+                    <option key={m.id} value={m.id}>
+                      {m.id}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div>
+                <label className="block text-[12px] text-[#9AA4B4] mb-1.5">
+                  Deep Mode Model
+                </label>
+                <select
+                  value={effectiveAi.deepAnalysisModelId ?? 'gemini-4-neon'}
+                  onChange={(e) =>
+                    setAiDraft({ ...effectiveAi, deepAnalysisModelId: e.target.value })
+                  }
+                  className="w-full bg-[#0C0F14] border border-white/[0.12] rounded-md px-3 py-2 text-white text-[12px]"
+                >
+                  {ACTIVE_GEMINI_MODELS.map((m) => (
+                    <option key={m.id} value={m.id}>
+                      {m.id}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div>
+                <label className="block text-[12px] text-[#9AA4B4] mb-1.5">
+                  Tactical Synthesis Model
+                </label>
+                <select
+                  value={effectiveAi.tacticalSynthesisModelId ?? 'gemini-4-hydrogen'}
+                  onChange={(e) =>
+                    setAiDraft({ ...effectiveAi, tacticalSynthesisModelId: e.target.value })
+                  }
+                  className="w-full bg-[#0C0F14] border border-white/[0.12] rounded-md px-3 py-2 text-white text-[12px]"
+                >
+                  {ACTIVE_GEMINI_MODELS.map((m) => (
+                    <option key={m.id} value={m.id}>
+                      {m.id}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div>
+                <label className="block text-[12px] text-[#9AA4B4] mb-1.5">
+                  Default Analysis Mode
+                </label>
+                <select
+                  value={effectiveAi.defaultAnalysisMode ?? 'balanced'}
+                  onChange={(e) =>
+                    setAiDraft({
+                      ...effectiveAi,
+                      defaultAnalysisMode: e.target.value as VideoAnalysisMode,
+                    })
+                  }
+                  className="w-full bg-[#0C0F14] border border-white/[0.12] rounded-md px-3 py-2 text-white text-[12px]"
+                >
+                  <option value="quick">Quick (Fastest / Lowest Cost)</option>
+                  <option value="balanced">Balanced (Recommended)</option>
+                  <option value="deep">Deep (Detailed Synthesis)</option>
+                </select>
+              </div>
+
+              <div>
+                <label className="block text-[12px] text-[#9AA4B4] mb-1.5">
+                  Default Briefing Language
+                </label>
+                <select
+                  value={effectiveAi.defaultLanguage ?? 'en'}
+                  onChange={(e) =>
+                    setAiDraft({
+                      ...effectiveAi,
+                      defaultLanguage: e.target.value as AnalysisLanguage,
+                    })
+                  }
+                  className="w-full bg-[#0C0F14] border border-white/[0.12] rounded-md px-3 py-2 text-white text-[12px]"
+                >
+                  <option value="en">English (EN)</option>
+                  <option value="id">Bahasa Indonesia (ID)</option>
+                </select>
+              </div>
+
+              <div>
+                <label className="block text-[12px] text-[#9AA4B4] mb-1.5">
+                  Max Evidence Frames (4–60)
                 </label>
                 <input
                   type="number"
-                  min={6}
+                  min={4}
                   max={60}
                   value={effectiveAi.maxEvidenceFrames}
                   onChange={(e) =>
                     setAiDraft({ ...effectiveAi, maxEvidenceFrames: Number(e.target.value) })
                   }
-                  className="w-full bg-[#0C0F14] border border-white/[0.12] rounded-md px-3 py-2 text-white font-mono tabular-nums"
+                  className="w-full bg-[#0C0F14] border border-white/[0.12] rounded-md px-3 py-2 text-white font-mono tabular-nums text-[12px]"
                 />
+              </div>
+
+              <div>
+                <label className="block text-[12px] text-[#9AA4B4] mb-1.5">
+                  Sampling FPS Hint (0.25–5)
+                </label>
+                <input
+                  type="number"
+                  min={0.25}
+                  max={5}
+                  step={0.25}
+                  value={effectiveAi.samplingFpsBalanced ?? 1}
+                  onChange={(e) =>
+                    setAiDraft({ ...effectiveAi, samplingFpsBalanced: Number(e.target.value) })
+                  }
+                  className="w-full bg-[#0C0F14] border border-white/[0.12] rounded-md px-3 py-2 text-white font-mono tabular-nums text-[12px]"
+                />
+              </div>
+
+              <div>
+                <label className="block text-[12px] text-[#9AA4B4] mb-1.5">
+                  Per-Match Budget Cap (USD)
+                </label>
+                <input
+                  type="number"
+                  min={0.05}
+                  max={25}
+                  step={0.05}
+                  value={effectiveAi.perMatchBudgetUsd ?? 1.5}
+                  onChange={(e) =>
+                    setAiDraft({ ...effectiveAi, perMatchBudgetUsd: Number(e.target.value) })
+                  }
+                  className="w-full bg-[#0C0F14] border border-white/[0.12] rounded-md px-3 py-2 text-white font-mono tabular-nums text-[12px]"
+                />
+              </div>
+
+              <div>
+                <label className="block text-[12px] text-[#9AA4B4] mb-1.5">
+                  Daily Budget Cap (USD)
+                </label>
+                <input
+                  type="number"
+                  min={0.1}
+                  max={100}
+                  step={0.1}
+                  value={effectiveAi.dailyBudgetUsd ?? 5.0}
+                  onChange={(e) =>
+                    setAiDraft({ ...effectiveAi, dailyBudgetUsd: Number(e.target.value) })
+                  }
+                  className="w-full bg-[#0C0F14] border border-white/[0.12] rounded-md px-3 py-2 text-white font-mono tabular-nums text-[12px]"
+                />
+              </div>
+
+              <div>
+                <label className="block text-[12px] text-[#9AA4B4] mb-1.5">
+                  Stage Timeout (sec) / Retries
+                </label>
+                <div className="flex gap-2">
+                  <input
+                    type="number"
+                    min={30}
+                    max={600}
+                    value={effectiveAi.maxAnalysisDurationSeconds ?? 180}
+                    onChange={(e) =>
+                      setAiDraft({
+                        ...effectiveAi,
+                        maxAnalysisDurationSeconds: Number(e.target.value),
+                      })
+                    }
+                    className="w-full bg-[#0C0F14] border border-white/[0.12] rounded-md px-2.5 py-2 text-white font-mono tabular-nums text-[12px]"
+                  />
+                  <input
+                    type="number"
+                    min={0}
+                    max={5}
+                    value={effectiveAi.maxRetryAttempts ?? 2}
+                    onChange={(e) =>
+                      setAiDraft({ ...effectiveAi, maxRetryAttempts: Number(e.target.value) })
+                    }
+                    className="w-20 bg-[#0C0F14] border border-white/[0.12] rounded-md px-2.5 py-2 text-white font-mono tabular-nums text-[12px]"
+                  />
+                </div>
               </div>
             </div>
 
             <div className="pt-3 border-t border-white/[0.08] space-y-2.5 text-[13px] text-[#D7DDE7]">
+              <label className="flex items-center gap-2.5 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={effectiveAi.downscaleForAnalysis ?? true}
+                  onChange={(e) =>
+                    setAiDraft({ ...effectiveAi, downscaleForAnalysis: e.target.checked })
+                  }
+                  className="accent-emerald-500"
+                />
+                Create temporary 720p copy for Gemini upload (keeps original local recording untouched)
+              </label>
+
               <label className="flex items-center gap-2.5 cursor-pointer">
                 <input
                   type="checkbox"
@@ -447,7 +765,7 @@ export function SettingsView() {
                   }
                   className="accent-emerald-500"
                 />
-                Deduplicate static pause/menu frames before sending evidence
+                Deduplicate replays and static menu/pause segments during observation extraction
               </label>
 
               <label className="flex items-center gap-2.5 cursor-pointer">
@@ -459,7 +777,7 @@ export function SettingsView() {
                   }
                   className="accent-emerald-500"
                 />
-                Require explicit manual confirmation before uploading half-time evidence
+                Require explicit manual privacy confirmation before uploading match footage
               </label>
 
               <label className="flex items-center gap-2.5 cursor-pointer">
@@ -471,7 +789,7 @@ export function SettingsView() {
                   }
                   className="accent-emerald-500"
                 />
-                Delete temporary remote uploaded files immediately after analysis (keep local copy)
+                Delete temporary Gemini Files API remote upload immediately after analysis
               </label>
             </div>
 
@@ -486,9 +804,59 @@ export function SettingsView() {
             </div>
           </form>
 
+          {/* Model Capability Registry Table */}
+          {modelRegistry.length > 0 && (
+            <section className="border border-white/[0.08] bg-[#12151B] rounded-lg p-5 space-y-3">
+              <h3 className="text-[15px] font-semibold text-white">
+                Supported Gemini Model Capability Registry
+              </h3>
+              <div className="overflow-x-auto">
+                <table className="w-full text-left text-[12px]">
+                  <thead className="border-b border-white/[0.08] text-[#7D8798]">
+                    <tr>
+                      <th className="py-2 pr-3 font-medium">Model ID</th>
+                      <th className="py-2 pr-3 font-medium">Tier</th>
+                      <th className="py-2 pr-3 font-medium">Video / JSON</th>
+                      <th className="py-2 pr-3 font-medium text-right">Est. In / Out ($/1M)</th>
+                      <th className="py-2 font-medium">Recommended Use</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-white/[0.06]">
+                    {modelRegistry.map((m) => (
+                      <tr key={m.modelId}>
+                        <td className="py-2 pr-3 font-mono text-white">{m.modelId}</td>
+                        <td className="py-2 pr-3 text-[#C5CCD7]">
+                          {m.availability.replace(/_/g, ' ')}
+                        </td>
+                        <td className="py-2 pr-3 font-mono text-emerald-400">
+                          {m.supportsVideoInput ? 'Video' : '—'} ·{' '}
+                          {m.supportsStructuredOutput ? 'JSON' : '—'}
+                        </td>
+                        <td className="py-2 pr-3 text-right font-mono text-[#C5CCD7]">
+                          {m.estimatedInputPricePer1MTokensUsd !== null
+                            ? `$${m.estimatedInputPricePer1MTokensUsd.toFixed(2)}`
+                            : '—'}{' '}
+                          /{' '}
+                          {m.estimatedOutputPricePer1MTokensUsd !== null
+                            ? `$${m.estimatedOutputPricePer1MTokensUsd.toFixed(2)}`
+                            : '—'}
+                        </td>
+                        <td className="py-2 text-[#9AA4B4]">
+                          {m.recommendedStages.join(', ')} — {m.description}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </section>
+          )}
+
           {/* API Usage Logs */}
           <section className="border border-white/[0.08] bg-[#12151B] rounded-lg p-5">
-            <h3 className="text-[15px] font-semibold text-white mb-3">API Request Usage Log</h3>
+            <h3 className="text-[15px] font-semibold text-white mb-3">
+              API Request &amp; Cost Usage Log
+            </h3>
             {usageLogs.length > 0 ? (
               <div className="overflow-x-auto">
                 <table className="w-full text-left text-[12px]">
@@ -530,6 +898,16 @@ export function SettingsView() {
                         className="py-2 pr-3 font-medium"
                       />
                       <SortableTh
+                        label="Est. USD"
+                        columnKey="cost"
+                        activeKey={usageSortKey}
+                        direction={usageSortDir}
+                        onSort={toggleUsageSort}
+                        defaultDir="desc"
+                        align="right"
+                        className="py-2 pr-3 font-medium"
+                      />
+                      <SortableTh
                         label="Status"
                         columnKey="status"
                         activeKey={usageSortKey}
@@ -551,6 +929,9 @@ export function SettingsView() {
                         <td className="py-2 pr-3 text-right font-mono tabular-nums text-[#C5CCD7]">
                           {l.inputTokens} / {l.outputTokens}
                         </td>
+                        <td className="py-2 pr-3 text-right font-mono tabular-nums text-emerald-300">
+                          ${(l.estimatedCostUsd ?? 0).toFixed(4)}
+                        </td>
                         <td className="py-2 text-right capitalize text-white">{l.status}</td>
                       </tr>
                     ))}
@@ -559,8 +940,8 @@ export function SettingsView() {
               </div>
             ) : (
               <p className="text-[13px] text-[#8A94A6]">
-                No Gemini analysis requests logged yet. Usage tracking activates automatically when
-                half-time evidence is submitted in Phase 3.
+                No Gemini analysis requests logged yet. Token counts and estimated USD costs log
+                automatically when half-time or second-half video analysis runs.
               </p>
             )}
           </section>
