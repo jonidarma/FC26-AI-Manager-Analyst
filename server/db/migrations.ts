@@ -1558,6 +1558,119 @@ export const MIGRATIONS: Migration[] = [
       addColumnIfMissing(db, 'recording_segments', 'display_file_name', 'TEXT');
     },
   },
+  {
+    version: 8,
+    name: 'phase_3_0_2_model_routing_and_reliability_v8',
+    disableForeignKeys: true,
+    sql: `
+      CREATE TABLE IF NOT EXISTS gemini_model_capabilities_cache (
+        cache_key TEXT PRIMARY KEY,
+        api_key_fingerprint TEXT NOT NULL,
+        model_id TEXT NOT NULL,
+        display_name TEXT NOT NULL DEFAULT '',
+        source TEXT NOT NULL DEFAULT 'discovered',
+        access_status TEXT NOT NULL DEFAULT 'unverified',
+        supports_generate_content INTEGER NOT NULL DEFAULT 1,
+        supports_video_input INTEGER NOT NULL DEFAULT 1,
+        supports_structured_output INTEGER NOT NULL DEFAULT 1,
+        video_verified INTEGER NOT NULL DEFAULT 0,
+        structured_json_verified INTEGER NOT NULL DEFAULT 0,
+        input_token_limit INTEGER,
+        output_token_limit INTEGER,
+        last_error_code TEXT,
+        last_error_message TEXT,
+        verified_at TEXT NOT NULL,
+        expires_at TEXT NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_gemini_cap_cache_lookup
+      ON gemini_model_capabilities_cache(api_key_fingerprint, model_id);
+    `,
+    afterSql: (db: Database.Database) => {
+      // 1. Non-destructively extend ai_analysis_jobs with heartbeat, stage timing, retry, and sanitized diagnostics
+      addColumnIfMissing(db, 'ai_analysis_jobs', 'last_heartbeat_at', 'TEXT');
+      addColumnIfMissing(db, 'ai_analysis_jobs', 'last_activity_at', 'TEXT');
+      addColumnIfMissing(db, 'ai_analysis_jobs', 'stage_started_at', 'TEXT');
+      addColumnIfMissing(db, 'ai_analysis_jobs', 'current_segment_index', 'INTEGER');
+      addColumnIfMissing(db, 'ai_analysis_jobs', 'retry_attempt', 'INTEGER NOT NULL DEFAULT 0');
+      addColumnIfMissing(db, 'ai_analysis_jobs', 'diagnostics_json', 'TEXT');
+
+      // 2. Rebuild ai_analysis_assets cleanly to widen cleanup_status CHECK constraint for durable cleanup states
+      //    and add original_size_bytes, processed_size_bytes, preprocessing_ms, cleanup_attempts — preserving all rows.
+      const assetCols = new Set(
+        (db.prepare('PRAGMA table_info(ai_analysis_assets)').all() as Array<{ name: string }>).map(
+          (c) => c.name
+        )
+      );
+
+      db.exec(`
+        CREATE TABLE ai_analysis_assets_v8 (
+          id TEXT PRIMARY KEY,
+          job_id TEXT NOT NULL,
+          match_id TEXT NOT NULL,
+          session_id TEXT,
+          segment_id TEXT,
+          local_file_path TEXT NOT NULL,
+          prepared_file_path TEXT,
+          is_temp_asset INTEGER NOT NULL DEFAULT 0 CHECK (is_temp_asset IN (0, 1)),
+          sha256_hash TEXT NOT NULL DEFAULT '',
+          file_size_bytes INTEGER NOT NULL DEFAULT 0,
+          original_size_bytes INTEGER,
+          processed_size_bytes INTEGER,
+          preprocessing_ms INTEGER,
+          duration_seconds REAL NOT NULL DEFAULT 0,
+          width INTEGER,
+          height INTEGER,
+          remote_file_name TEXT,
+          remote_file_uri TEXT,
+          remote_state TEXT,
+          cleanup_status TEXT NOT NULL DEFAULT 'not_uploaded' CHECK (cleanup_status IN (
+            'not_uploaded', 'uploaded', 'cleanup_pending', 'deleting', 'deleted', 'cleanup_failed', 'retained_by_policy', 'pending'
+          )),
+          cleanup_attempts INTEGER NOT NULL DEFAULT 0,
+          cleanup_attempted_at TEXT,
+          cleanup_confirmed_at TEXT,
+          cleanup_error TEXT,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          FOREIGN KEY (job_id) REFERENCES ai_analysis_jobs(id) ON DELETE CASCADE,
+          FOREIGN KEY (match_id) REFERENCES matches(id) ON DELETE CASCADE,
+          FOREIGN KEY (session_id) REFERENCES match_sessions(id) ON DELETE SET NULL,
+          FOREIGN KEY (segment_id) REFERENCES recording_segments(id) ON DELETE SET NULL
+        );
+      `);
+
+      const origExpr = assetCols.has('original_size_bytes') ? 'original_size_bytes' : 'file_size_bytes';
+      const procExpr = assetCols.has('processed_size_bytes') ? 'processed_size_bytes' : 'file_size_bytes';
+      const preMsExpr = assetCols.has('preprocessing_ms') ? 'preprocessing_ms' : '0';
+      const attExpr = assetCols.has('cleanup_attempts') ? 'cleanup_attempts' : '0';
+
+      db.exec(`
+        INSERT INTO ai_analysis_assets_v8 (
+          id, job_id, match_id, session_id, segment_id, local_file_path, prepared_file_path,
+          is_temp_asset, sha256_hash, file_size_bytes, original_size_bytes, processed_size_bytes,
+          preprocessing_ms, duration_seconds, width, height, remote_file_name, remote_file_uri,
+          remote_state, cleanup_status, cleanup_attempts, cleanup_attempted_at, cleanup_confirmed_at,
+          cleanup_error, created_at, updated_at
+        )
+        SELECT
+          id, job_id, match_id, session_id, segment_id, local_file_path, prepared_file_path,
+          is_temp_asset, sha256_hash, file_size_bytes, ${origExpr}, ${procExpr},
+          ${preMsExpr}, duration_seconds, width, height, remote_file_name, remote_file_uri,
+          remote_state,
+          CASE WHEN cleanup_status = 'pending' THEN 'cleanup_pending' ELSE cleanup_status END,
+          ${attExpr}, cleanup_attempted_at, cleanup_confirmed_at,
+          cleanup_error, created_at, updated_at
+        FROM ai_analysis_assets;
+
+        DROP TABLE ai_analysis_assets;
+        ALTER TABLE ai_analysis_assets_v8 RENAME TO ai_analysis_assets;
+
+        CREATE INDEX IF NOT EXISTS idx_ai_assets_job ON ai_analysis_assets(job_id);
+        CREATE INDEX IF NOT EXISTS idx_ai_assets_cleanup ON ai_analysis_assets(cleanup_status);
+      `);
+    },
+  },
 ];
 
 export function runMigrations(db: Database.Database): void {

@@ -19,18 +19,26 @@ import type {
   MatchTacticalSnapshot,
   PlayerRoleAssignment,
   RecommendationDecisionStatus,
+  RemoteCleanupStatus,
+  SanitizedGeminiErrorDiagnostic,
   TacticalPreset,
   VideoAnalysisMode,
 } from '../../src/types/domain.ts';
 import { getDb } from '../db/database.ts';
 import { validateAiRecommendations } from './analysisValidationService.ts';
+import { resolveEffectiveModelRouting } from './geminiModelRouter.ts';
 import {
   classifyGeminiError,
   estimateVideoAnalysisCostUsd,
   isGeminiApiConfigured,
+  runAnalysisPreflight,
+  sanitizeDiagnosticText,
+  type GeminiDiscoveryClientLike,
 } from './geminiService.ts';
 import {
   defaultLiveGeminiVideoProvider,
+  GeminiStageError,
+  isGeminiStageError,
   PROMPT_VERSION,
   SCHEMA_VERSION,
   type GeminiVideoProvider,
@@ -86,8 +94,20 @@ const ACTIVE_JOB_STATUSES: AnalysisJobStatus[] = [
   'validating_results',
 ];
 
+const TERMINAL_JOB_STATUSES = new Set<AnalysisJobStatus>([
+  'completed',
+  'completed_with_limitations',
+  'insufficient_gameplay',
+  'failed',
+  'cancelled',
+  'interrupted',
+]);
+
+const CLEANABLE_ASSET_STATUSES = ['uploaded', 'cleanup_pending', 'deleting', 'cleanup_failed', 'pending'];
+
 const runningJobIds = new Set<string>();
 const cancelRequestedJobIds = new Set<string>();
+const activeJobControllers = new Map<string, AbortController>();
 
 function safeJsonParse<T>(raw: string | null | undefined, fallback: T): T {
   if (!raw) return fallback;
@@ -126,10 +146,17 @@ function mapJobRow(r: Record<string, unknown>): AiAnalysisJobRecord {
     budgetCapUsd: Number(r.budget_cap_usd ?? 1.5),
     segmentsTotal: Number(r.segments_total ?? 0),
     segmentsProcessed: Number(r.segments_processed ?? 0),
+    currentSegmentIndex:
+      r.current_segment_index === null || r.current_segment_index === undefined
+        ? null
+        : Number(r.current_segment_index),
     samplingFps: Number(r.sampling_fps ?? 1.0),
     coverageSummary: String(r.coverage_summary ?? ''),
     startedAt: r.started_at ? String(r.started_at) : null,
     completedAt: r.completed_at ? String(r.completed_at) : null,
+    lastHeartbeatAt: r.last_heartbeat_at ? String(r.last_heartbeat_at) : null,
+    lastActivityAt: r.last_activity_at ? String(r.last_activity_at) : null,
+    stageStartedAt: r.stage_started_at ? String(r.stage_started_at) : null,
     elapsedMs: Number(r.elapsed_ms ?? 0),
     timingBreakdown: safeJsonParse<AnalysisTimingBreakdown | null>(
       r.timing_breakdown_json ? String(r.timing_breakdown_json) : null,
@@ -137,7 +164,12 @@ function mapJobRow(r: Record<string, unknown>): AiAnalysisJobRecord {
     ),
     errorCode: r.error_code ? String(r.error_code) : null,
     errorMessage: r.error_message ? String(r.error_message) : null,
+    diagnostics: safeJsonParse<SanitizedGeminiErrorDiagnostic | null>(
+      r.diagnostics_json ? String(r.diagnostics_json) : null,
+      null
+    ),
     retryCount: Number(r.retry_count ?? 0),
+    retryAttempt: Number(r.retry_attempt ?? 0),
     cancelRequested: Boolean(r.cancel_requested),
     createdAt: String(r.created_at),
     updatedAt: String(r.updated_at),
@@ -156,13 +188,26 @@ function mapAssetRow(r: Record<string, unknown>): AiAnalysisAssetRecord {
     isTempAsset: Boolean(r.is_temp_asset),
     sha256Hash: String(r.sha256_hash ?? ''),
     fileSizeBytes: Number(r.file_size_bytes ?? 0),
+    originalSizeBytes:
+      r.original_size_bytes === null || r.original_size_bytes === undefined
+        ? Number(r.file_size_bytes ?? 0)
+        : Number(r.original_size_bytes),
+    processedSizeBytes:
+      r.processed_size_bytes === null || r.processed_size_bytes === undefined
+        ? Number(r.file_size_bytes ?? 0)
+        : Number(r.processed_size_bytes),
+    preprocessingMs:
+      r.preprocessing_ms === null || r.preprocessing_ms === undefined
+        ? null
+        : Number(r.preprocessing_ms),
     durationSeconds: Number(r.duration_seconds ?? 0),
     width: r.width === null || r.width === undefined ? null : Number(r.width),
     height: r.height === null || r.height === undefined ? null : Number(r.height),
     remoteFileName: r.remote_file_name ? String(r.remote_file_name) : null,
     remoteFileUri: r.remote_file_uri ? String(r.remote_file_uri) : null,
     remoteState: r.remote_state ? String(r.remote_state) : null,
-    cleanupStatus: String(r.cleanup_status) as AiAnalysisAssetRecord['cleanupStatus'],
+    cleanupStatus: String(r.cleanup_status) as RemoteCleanupStatus,
+    cleanupAttempts: Number(r.cleanup_attempts ?? 0),
     cleanupAttemptedAt: r.cleanup_attempted_at ? String(r.cleanup_attempted_at) : null,
     cleanupConfirmedAt: r.cleanup_confirmed_at ? String(r.cleanup_confirmed_at) : null,
     cleanupError: r.cleanup_error ? String(r.cleanup_error) : null,
@@ -323,19 +368,119 @@ export function markInterruptedJobsOnStartup(dbArg?: Database.Database): number 
   const db = dbArg ?? getDb();
   const now = new Date().toISOString();
   const placeholders = ACTIVE_JOB_STATUSES.map(() => '?').join(', ');
+
+  // Mark any orphaned active jobs from a prior app shutdown/crash as interrupted (never auto-restart uploads!)
   const res = db
     .prepare(
       `UPDATE ai_analysis_jobs
        SET status = 'interrupted',
            current_stage = 'interrupted',
-           error_code = 'APP_RESTARTED_MID_JOB',
-           error_message = 'Application restarted while this analysis job was running. You may safely retry the analysis.',
+           error_code = 'ANALYSIS_INTERRUPTED',
+           error_message = 'Application restarted while this analysis job was running. Pending remote uploads are queued for cleanup; you may safely start a fresh analysis run.',
            completed_at = ?,
+           last_activity_at = ?,
            updated_at = ?
        WHERE status IN (${placeholders})`
     )
-    .run(now, now, ...ACTIVE_JOB_STATUSES);
+    .run(now, now, now, ...ACTIVE_JOB_STATUSES);
+
+  // Transition any left-behind 'uploaded' or 'deleting' assets to 'cleanup_pending' so startup cleanup sweeps them
+  db.prepare(
+    `UPDATE ai_analysis_assets
+     SET cleanup_status = 'cleanup_pending', updated_at = ?
+     WHERE remote_file_name IS NOT NULL AND cleanup_status IN ('uploaded', 'deleting', 'pending')`
+  ).run(now);
+
   return res.changes;
+}
+
+/**
+ * Detects stale/stuck active jobs whose heartbeat has expired beyond `staleThresholdMs`
+ * and marks them safely as `interrupted` (`ANALYSIS_INTERRUPTED`) without auto-restarting uploads.
+ */
+export function reconcileStaleAnalysisJobs(options: {
+  staleThresholdMs?: number;
+  db?: Database.Database;
+} = {}): number {
+  const db = options.db ?? getDb();
+  const thresholdMs = options.staleThresholdMs ?? 10 * 60 * 1000;
+  const nowMs = Date.now();
+  const nowIso = new Date(nowMs).toISOString();
+  const placeholders = ACTIVE_JOB_STATUSES.map(() => '?').join(', ');
+
+  const activeRows = db
+    .prepare(
+      `SELECT id, last_heartbeat_at, last_activity_at, updated_at, created_at
+       FROM ai_analysis_jobs
+       WHERE status IN (${placeholders})`
+    )
+    .all(...ACTIVE_JOB_STATUSES) as Array<{
+    id: string;
+    last_heartbeat_at: string | null;
+    last_activity_at: string | null;
+    updated_at: string;
+    created_at: string;
+  }>;
+
+  let reconciled = 0;
+  for (const row of activeRows) {
+    const lastTs = Date.parse(
+      row.last_heartbeat_at ?? row.last_activity_at ?? row.updated_at ?? row.created_at
+    );
+    const ageMs = Number.isFinite(lastTs) ? nowMs - lastTs : thresholdMs + 1;
+    if (ageMs >= thresholdMs) {
+      const ctrl = activeJobControllers.get(row.id);
+      if (ctrl) {
+        try {
+          ctrl.abort();
+        } catch {
+          // ignore
+        }
+        activeJobControllers.delete(row.id);
+      }
+      runningJobIds.delete(row.id);
+
+      const diag: SanitizedGeminiErrorDiagnostic = {
+        code: 'ANALYSIS_INTERRUPTED',
+        httpStatus: null,
+        apiStatus: null,
+        upstreamMessage: `Job heartbeat went stale for ${Math.round(ageMs / 1000)}s and was marked interrupted.`,
+        stage: 'stale_job_reconciliation',
+        modelId: null,
+        segmentIndex: null,
+        attemptNumber: null,
+        elapsedMs: ageMs,
+        retryable: true,
+        retryAfterMs: null,
+        occurredAt: nowIso,
+      };
+
+      const changed = db
+        .prepare(
+          `UPDATE ai_analysis_jobs
+           SET status = 'interrupted',
+               current_stage = 'interrupted',
+               error_code = 'ANALYSIS_INTERRUPTED',
+               error_message = 'Analysis job heartbeat stopped responding and was marked interrupted. You may safely start a fresh analysis run.',
+               diagnostics_json = ?,
+               completed_at = ?,
+               last_activity_at = ?,
+               updated_at = ?
+           WHERE id = ? AND status IN (${placeholders})`
+        )
+        .run(JSON.stringify(diag), nowIso, nowIso, nowIso, row.id, ...ACTIVE_JOB_STATUSES);
+
+      if (changed.changes > 0) {
+        reconciled += 1;
+        db.prepare(
+          `UPDATE ai_analysis_assets
+           SET cleanup_status = 'cleanup_pending', updated_at = ?
+           WHERE job_id = ? AND remote_file_name IS NOT NULL AND cleanup_status IN ('uploaded', 'deleting', 'pending')`
+        ).run(nowIso, row.id);
+      }
+    }
+  }
+  return reconciled;
 }
 
 export function getAnalysisJob(jobId: string, dbArg?: Database.Database): AiAnalysisJobRecord | null {
@@ -457,18 +602,102 @@ export function cancelAnalysisJob(jobId: string, dbArg?: Database.Database): AiA
   if (!job) return null;
 
   cancelRequestedJobIds.add(jobId);
+  // Immediately abort any active AbortController bound to SDK requests for this job
+  const controller = activeJobControllers.get(jobId);
+  if (controller) {
+    try {
+      controller.abort();
+    } catch {
+      // ignore abort error
+    }
+  }
+
   const now = new Date().toISOString();
   if (ACTIVE_JOB_STATUSES.includes(job.status)) {
+    const diag: SanitizedGeminiErrorDiagnostic = {
+      code: 'ANALYSIS_CANCELLED',
+      httpStatus: null,
+      apiStatus: null,
+      upstreamMessage: 'Analysis job was cancelled by the user.',
+      stage: job.currentStage,
+      modelId: job.modelVideoId,
+      segmentIndex: job.currentSegmentIndex ?? null,
+      attemptNumber: job.retryAttempt ?? 0,
+      elapsedMs: job.elapsedMs,
+      retryable: false,
+      retryAfterMs: null,
+      occurredAt: now,
+    };
     db.prepare(
       `UPDATE ai_analysis_jobs
        SET cancel_requested = 1,
-           status = CASE WHEN status = 'queued' THEN 'cancelled' ELSE status END,
-           completed_at = CASE WHEN status = 'queued' THEN ? ELSE completed_at END,
+           status = 'cancelled',
+           current_stage = 'cancelled',
+           error_code = 'ANALYSIS_CANCELLED',
+           error_message = 'Analysis job was cancelled by the user.',
+           diagnostics_json = ?,
+           completed_at = COALESCE(completed_at, ?),
+           last_activity_at = ?,
            updated_at = ?
-       WHERE id = ?`
-    ).run(now, now, jobId);
+       WHERE id = ?
+         AND status NOT IN ('completed', 'completed_with_limitations', 'insufficient_gameplay', 'failed', 'cancelled', 'interrupted')`
+    ).run(JSON.stringify(diag), now, now, now, jobId);
   }
   return getAnalysisJob(jobId, db);
+}
+
+/**
+ * Durably deletes a single uploaded remote Gemini file, transitioning:
+ * uploaded / cleanup_pending / cleanup_failed -> deleting -> deleted | cleanup_failed.
+ * Never touches local gameplay recordings on disk.
+ */
+async function deleteSingleRemoteAsset(
+  db: Database.Database,
+  assetId: string,
+  remoteFileName: string,
+  provider: GeminiVideoProvider
+): Promise<{ deleted: boolean; error: string | null }> {
+  const deletingAt = new Date().toISOString();
+  db.prepare(
+    `UPDATE ai_analysis_assets
+     SET cleanup_status = 'deleting',
+         cleanup_attempts = COALESCE(cleanup_attempts, 0) + 1,
+         cleanup_attempted_at = ?,
+         updated_at = ?
+     WHERE id = ?`
+  ).run(deletingAt, deletingAt, assetId);
+
+  try {
+    const res = await provider.deleteRemoteFile(remoteFileName);
+    const doneAt = new Date().toISOString();
+    const cleanErr = res.error ? sanitizeDiagnosticText(res.error) : null;
+    db.prepare(
+      `UPDATE ai_analysis_assets
+       SET cleanup_status = ?,
+           cleanup_confirmed_at = ?,
+           cleanup_error = ?,
+           updated_at = ?
+       WHERE id = ?`
+    ).run(
+      res.deleted ? 'deleted' : 'cleanup_failed',
+      res.deleted ? doneAt : null,
+      res.deleted ? null : cleanErr,
+      doneAt,
+      assetId
+    );
+    return { deleted: res.deleted, error: res.deleted ? null : cleanErr };
+  } catch (err) {
+    const doneAt = new Date().toISOString();
+    const cleanErr = sanitizeDiagnosticText(err instanceof Error ? err.message : String(err));
+    db.prepare(
+      `UPDATE ai_analysis_assets
+       SET cleanup_status = 'cleanup_failed',
+           cleanup_error = ?,
+           updated_at = ?
+       WHERE id = ?`
+    ).run(cleanErr, doneAt, assetId);
+    return { deleted: false, error: cleanErr };
+  }
 }
 
 export async function retryRemoteCleanup(
@@ -477,35 +706,74 @@ export async function retryRemoteCleanup(
   dbArg?: Database.Database
 ): Promise<AiAnalysisAssetRecord[]> {
   const db = dbArg ?? getDb();
+  const statusPlaceholders = CLEANABLE_ASSET_STATUSES.map(() => '?').join(', ');
   const assetRows = db
     .prepare(
       `SELECT * FROM ai_analysis_assets
-       WHERE job_id = ? AND remote_file_name IS NOT NULL AND cleanup_status IN ('pending', 'cleanup_failed')`
+       WHERE job_id = ? AND remote_file_name IS NOT NULL AND cleanup_status IN (${statusPlaceholders})`
     )
-    .all(jobId) as Array<Record<string, unknown>>;
+    .all(jobId, ...CLEANABLE_ASSET_STATUSES) as Array<Record<string, unknown>>;
 
   for (const row of assetRows) {
-    const remoteName = String(row.remote_file_name);
-    const now = new Date().toISOString();
-    const res = await provider.deleteRemoteFile(remoteName);
-    db.prepare(
-      `UPDATE ai_analysis_assets
-       SET cleanup_status = ?, cleanup_attempted_at = ?, cleanup_confirmed_at = ?, cleanup_error = ?, updated_at = ?
-       WHERE id = ?`
-    ).run(
-      res.deleted ? 'deleted' : 'cleanup_failed',
-      now,
-      res.deleted ? now : null,
-      res.error,
-      now,
-      String(row.id)
-    );
+    await deleteSingleRemoteAsset(db, String(row.id), String(row.remote_file_name), provider);
   }
 
   const refreshed = db
-    .prepare('SELECT * FROM ai_analysis_assets WHERE job_id = ?')
+    .prepare('SELECT * FROM ai_analysis_assets WHERE job_id = ? ORDER BY created_at ASC')
     .all(jobId) as Array<Record<string, unknown>>;
   return refreshed.map(mapAssetRow);
+}
+
+/**
+ * Sweeps all pending remote Gemini uploads across jobs (e.g., on startup after crash/restart
+ * or during graceful shutdown). Never touches local gameplay recordings.
+ */
+export async function cleanupPendingRemoteFiles(
+  provider: GeminiVideoProvider = defaultLiveGeminiVideoProvider,
+  dbArg?: Database.Database
+): Promise<{ attempted: number; deleted: number; failed: number }> {
+  const db = dbArg ?? getDb();
+  const targetStatuses = ['uploaded', 'cleanup_pending', 'deleting', 'pending'];
+  const placeholders = targetStatuses.map(() => '?').join(', ');
+  const rows = db
+    .prepare(
+      `SELECT id, remote_file_name FROM ai_analysis_assets
+       WHERE remote_file_name IS NOT NULL AND cleanup_status IN (${placeholders})`
+    )
+    .all(...targetStatuses) as Array<{ id: string; remote_file_name: string }>;
+
+  let deleted = 0;
+  let failed = 0;
+  for (const row of rows) {
+    const res = await deleteSingleRemoteAsset(db, row.id, row.remote_file_name, provider);
+    if (res.deleted) deleted += 1;
+    else failed += 1;
+  }
+  return { attempted: rows.length, deleted, failed };
+}
+
+/**
+ * Graceful shutdown handler: aborts any in-flight Gemini jobs, marks them interrupted,
+ * and attempts immediate remote media cleanup for uploaded files.
+ */
+export async function shutdownAnalysisOrchestrator(
+  provider: GeminiVideoProvider = defaultLiveGeminiVideoProvider,
+  dbArg?: Database.Database
+): Promise<{ interruptedJobs: number; cleanup: { attempted: number; deleted: number; failed: number } }> {
+  for (const [jobId, ctrl] of activeJobControllers.entries()) {
+    cancelRequestedJobIds.add(jobId);
+    try {
+      ctrl.abort();
+    } catch {
+      // ignore
+    }
+  }
+  activeJobControllers.clear();
+
+  const db = dbArg ?? getDb();
+  const interruptedJobs = markInterruptedJobsOnStartup(db);
+  const cleanup = await cleanupPendingRemoteFiles(provider, db);
+  return { interruptedJobs, cleanup };
 }
 
 function updateJobProgress(
@@ -517,23 +785,42 @@ function updateJobProgress(
     progressDetail: AiAnalysisJobRecord['progressDetail'];
     segmentsTotal: number;
     segmentsProcessed: number;
+    currentSegmentIndex: number | null;
     coverageSummary: string;
     actualCostUsd: number;
     startedAt: string;
     completedAt: string;
+    lastHeartbeatAt: string;
+    lastActivityAt: string;
+    stageStartedAt: string;
     elapsedMs: number;
     timingBreakdown: AnalysisTimingBreakdown;
     errorCode: string | null;
     errorMessage: string | null;
+    diagnostics: SanitizedGeminiErrorDiagnostic | null;
     retryCount: number;
-  }>
+    retryAttempt: number;
+  }>,
+  options: { allowTerminalTransition?: boolean } = {}
 ): void {
   const existing = db.prepare('SELECT * FROM ai_analysis_jobs WHERE id = ?').get(jobId) as
     | Record<string, unknown>
     | undefined;
   if (!existing) return;
 
+  const existingStatus = String(existing.status) as AnalysisJobStatus;
+  // Prevent late background requests from mutating already completed, failed, cancelled, or interrupted jobs
+  if (TERMINAL_JOB_STATUSES.has(existingStatus) && !options.allowTerminalTransition) {
+    return;
+  }
+
   const now = new Date().toISOString();
+  const nextStage = patch.currentStage ?? String(existing.current_stage);
+  const stageChanged = nextStage !== String(existing.current_stage);
+  const stageStartedAt =
+    patch.stageStartedAt ??
+    (stageChanged ? now : existing.stage_started_at ? String(existing.stage_started_at) : now);
+
   db.prepare(`
     UPDATE ai_analysis_jobs
     SET status = ?,
@@ -541,36 +828,54 @@ function updateJobProgress(
         progress_detail_json = ?,
         segments_total = ?,
         segments_processed = ?,
+        current_segment_index = ?,
         coverage_summary = ?,
         actual_cost_usd = ?,
         started_at = ?,
         completed_at = ?,
+        last_heartbeat_at = ?,
+        last_activity_at = ?,
+        stage_started_at = ?,
         elapsed_ms = ?,
         timing_breakdown_json = ?,
         error_code = ?,
         error_message = ?,
+        diagnostics_json = ?,
         retry_count = ?,
+        retry_attempt = ?,
         updated_at = ?
     WHERE id = ?
   `).run(
-    patch.status ?? String(existing.status),
-    patch.currentStage ?? String(existing.current_stage),
+    patch.status ?? existingStatus,
+    nextStage,
     patch.progressDetail
       ? JSON.stringify(patch.progressDetail)
       : String(existing.progress_detail_json ?? '{}'),
     patch.segmentsTotal ?? Number(existing.segments_total ?? 0),
     patch.segmentsProcessed ?? Number(existing.segments_processed ?? 0),
+    patch.currentSegmentIndex !== undefined
+      ? patch.currentSegmentIndex
+      : existing.current_segment_index ?? null,
     patch.coverageSummary ?? String(existing.coverage_summary ?? ''),
     patch.actualCostUsd !== undefined ? patch.actualCostUsd : existing.actual_cost_usd,
     patch.startedAt ?? existing.started_at,
     patch.completedAt ?? existing.completed_at,
+    patch.lastHeartbeatAt ?? existing.last_heartbeat_at ?? now,
+    patch.lastActivityAt ?? now,
+    stageStartedAt,
     patch.elapsedMs ?? Number(existing.elapsed_ms ?? 0),
     patch.timingBreakdown
       ? JSON.stringify(patch.timingBreakdown)
       : existing.timing_breakdown_json,
     patch.errorCode !== undefined ? patch.errorCode : existing.error_code,
     patch.errorMessage !== undefined ? patch.errorMessage : existing.error_message,
+    patch.diagnostics !== undefined
+      ? patch.diagnostics
+        ? JSON.stringify(patch.diagnostics)
+        : null
+      : existing.diagnostics_json ?? null,
     patch.retryCount ?? Number(existing.retry_count ?? 0),
+    patch.retryAttempt !== undefined ? patch.retryAttempt : Number(existing.retry_attempt ?? 0),
     now,
     jobId
   );
@@ -587,6 +892,8 @@ export interface StartAnalysisJobInput {
   forceReanalyze?: boolean;
   /** Test/runtime injection options */
   provider?: GeminiVideoProvider;
+  preflightClientOverride?: GeminiDiscoveryClientLike | null;
+  skipLivePreflight?: boolean;
   allowedMediaDirs?: string[];
   awaitCompletion?: boolean;
 }
@@ -611,6 +918,9 @@ export async function startAnalysisJob(
       'GEMINI_API_KEY is not configured in the local server environment. Configure GEMINI_API_KEY in .env before running real video analysis.'
     );
   }
+
+  // Reconcile any stale jobs before checking duplicates
+  reconcileStaleAnalysisJobs({ db });
 
   // Prevent duplicate active jobs for the same match + half
   const activePlaceholders = ACTIVE_JOB_STATUSES.map(() => '?').join(', ');
@@ -676,25 +986,57 @@ export async function startAnalysisJob(
     );
   }
 
-  const analysisMode: VideoAnalysisMode = input.analysisMode ?? settings.ai.defaultAnalysisMode ?? 'quick';
+  const analysisMode: VideoAnalysisMode = input.analysisMode ?? settings.ai.defaultAnalysisMode ?? 'balanced';
   const language: AnalysisLanguage = input.language ?? settings.ai.defaultLanguage ?? 'en';
 
-  const modelVideoId =
-    analysisMode === 'deep'
-      ? settings.ai.deepAnalysisModelId ?? settings.ai.modelId ?? 'gemini-4-hydrogen'
-      : analysisMode === 'balanced'
-        ? settings.ai.balancedAnalysisModelId ?? settings.ai.modelId ?? 'gemini-4-hydrogen'
-        : settings.ai.quickAnalysisModelId ?? settings.ai.modelId ?? 'gemini-4-hydrogen';
+  // Authoritative single-source model resolution (never silently falls back to unverified hardcoded model IDs)
+  const routing = resolveEffectiveModelRouting(settings.ai, analysisMode);
+  const modelVideoId = routing.effectiveVideoModelId;
+  const modelSynthesisId = routing.effectiveSynthesisModelId;
 
-  const modelSynthesisId =
-    settings.ai.tacticalSynthesisModelId ?? settings.ai.modelId ?? 'gemini-4-hydrogen';
+  if (!modelVideoId || !modelSynthesisId) {
+    throw new Error(
+      routing.warnings[0] ??
+        'No verified Gemini model is configured. Select a Primary Default Model in Settings -> AI & Evidence Policy.'
+    );
+  }
+
+  // Run Preflight live model access & capability validation BEFORE uploading any video bytes
+  if (!provider.isMock && !input.skipLivePreflight) {
+    const preflight = await runAnalysisPreflight({
+      matchId: input.matchId,
+      sessionId: targetSession.id,
+      half: input.half,
+      analysisMode,
+      privacyAuthorized: input.privacyAuthorized,
+      entireDisplayAcknowledged: input.entireDisplayAcknowledged,
+      verifyLiveModelAccess: true,
+      isMockProvider: false,
+      allowedMediaDirs: input.allowedMediaDirs,
+      clientOverride: input.preflightClientOverride,
+      db,
+    });
+    if (!preflight.ok) {
+      if (preflight.diagnostic) {
+        throw new GeminiStageError({
+          code: preflight.diagnostic.code,
+          userMessage: preflight.blockingMessage ?? preflight.diagnostic.upstreamMessage,
+          retryable: preflight.diagnostic.retryable,
+          diagnostic: preflight.diagnostic,
+        });
+      }
+      throw new Error(
+        preflight.blockingMessage ?? `Preflight validation failed (${preflight.blockingErrorCode ?? 'PREFLIGHT_FAILED'}).`
+      );
+    }
+  }
 
   const samplingFps =
     analysisMode === 'deep'
       ? settings.ai.samplingFpsDeep ?? 2.0
       : analysisMode === 'balanced'
-        ? settings.ai.samplingFpsBalanced ?? 1.0
-        : settings.ai.samplingFpsQuick ?? 0.5;
+        ? settings.ai.samplingFpsBalanced ?? 2.0
+        : settings.ai.samplingFpsQuick ?? 1.0;
 
   const validSegments = targetSession.segments.filter(
     (s) => ['finalized', 'recovered'].includes(s.status) && s.sizeBytes > 0 && s.durationSeconds > 0
@@ -849,8 +1191,17 @@ async function executeAnalysisJobPipeline(params: {
   const settings = getSettings();
   const startedWallMs = Date.now();
   const startedAtIso = new Date().toISOString();
-
+  const jobController = new AbortController();
+  activeJobControllers.set(jobId, jobController);
   runningJobIds.add(jobId);
+
+  const uploadTimeoutMs = (settings.ai.uploadTimeoutSeconds ?? 300) * 1000;
+  const processingTimeoutMs =
+    (settings.ai.processingTimeoutSeconds ?? settings.ai.maxAnalysisDurationSeconds ?? 180) * 1000;
+  const inferenceTimeoutMs =
+    (settings.ai.inferenceTimeoutSeconds ?? settings.ai.maxAnalysisDurationSeconds ?? 180) * 1000;
+  const maxRetries = settings.ai.maxRetryAttempts ?? 2;
+
   const timing: AnalysisTimingBreakdown = {
     recordingDurationSeconds: 0,
     validationMs: 0,
@@ -865,14 +1216,42 @@ async function executeAnalysisJobPipeline(params: {
   };
 
   let cumulativeCostUsd = 0;
-  const uploadedAssets: Array<{ assetId: string; remoteFileName: string }> = [];
+  let totalRetryCount = 0;
+  let currentStageName = 'validating_recording';
+  let currentModelInUse = params.modelVideoId;
+  let currentSegmentNumber: number | null = null;
+  let originalBytesTotal = 0;
+  let processedBytesTotal = 0;
+  let proxyAppliedCount = 0;
+  const uploadedAssetsMap = new Map<string, string>(); // assetId -> remoteFileName
+
+  // Periodic heartbeat timer keeps last_heartbeat_at and elapsed_ms fresh while long stages run
+  const heartbeatTimer = setInterval(() => {
+    try {
+      const now = new Date().toISOString();
+      db.prepare(
+        `UPDATE ai_analysis_jobs
+         SET last_heartbeat_at = ?, elapsed_ms = ?, updated_at = ?
+         WHERE id = ? AND status NOT IN ('completed', 'completed_with_limitations', 'insufficient_gameplay', 'failed', 'cancelled', 'interrupted')`
+      ).run(now, Date.now() - startedWallMs, now, jobId);
+    } catch {
+      // non-fatal heartbeat error
+    }
+  }, 4000);
+  if (typeof heartbeatTimer.unref === 'function') {
+    heartbeatTimer.unref();
+  }
 
   const isCancelled = (): boolean => {
-    if (cancelRequestedJobIds.has(jobId)) return true;
+    if (jobController.signal.aborted || cancelRequestedJobIds.has(jobId)) return true;
     const row = db
       .prepare('SELECT cancel_requested FROM ai_analysis_jobs WHERE id = ?')
       .get(jobId) as { cancel_requested: number } | undefined;
-    return Boolean(row?.cancel_requested);
+    if (row?.cancel_requested) {
+      jobController.abort();
+      return true;
+    }
+    return false;
   };
 
   const checkCancelledOrThrow = () => {
@@ -892,13 +1271,18 @@ async function executeAnalysisJobPipeline(params: {
     );
 
     // Stage: validating_recording + preprocessing
+    currentStageName = 'validating_recording';
     updateJobProgress(db, jobId, {
       status: 'validating_recording',
       currentStage: 'validating_recording',
       startedAt: startedAtIso,
+      lastHeartbeatAt: startedAtIso,
+      stageStartedAt: startedAtIso,
+      currentSegmentIndex: 1,
       progressDetail: {
         segmentsTotal: validSegments.length,
         segmentsProcessed: 0,
+        currentSegmentIndex: 1,
         stageLabel: 'Validating local MP4 segment integrity with FFprobe',
       },
     });
@@ -912,6 +1296,9 @@ async function executeAnalysisJobPipeline(params: {
       preparedFilePath: string;
       durationSeconds: number;
       sizeBytes: number;
+      originalSizeBytes: number;
+      processedSizeBytes: number;
+      proxyApplied: boolean;
     }> = [];
 
     const segmentDurationById = new Map<string, number>();
@@ -920,6 +1307,7 @@ async function executeAnalysisJobPipeline(params: {
     for (let i = 0; i < validSegments.length; i++) {
       checkCancelledOrThrow();
       const seg = validSegments[i];
+      currentSegmentNumber = seg.segmentIndex;
       const vStart = Date.now();
       const resolvedMedia = resolveRecordingSegmentMediaPath({
         matchId,
@@ -940,33 +1328,51 @@ async function executeAnalysisJobPipeline(params: {
         );
       }
 
+      currentStageName = 'preprocessing';
       updateJobProgress(db, jobId, {
         status: 'preprocessing',
         currentStage: 'preprocessing',
+        currentSegmentIndex: i + 1,
+        elapsedMs: Date.now() - startedWallMs,
         progressDetail: {
           segmentsTotal: validSegments.length,
           segmentsProcessed: i,
-          stageLabel: `Preparing segment ${i + 1} of ${validSegments.length} for analysis`,
+          currentSegmentIndex: i + 1,
+          stageLabel: `Preparing segment ${i + 1} of ${validSegments.length} (${params.analysisMode} proxy policy)`,
         },
       });
 
       const pStart = Date.now();
+      const proxyEnabled =
+        settings.ai.proxyEnabled !== undefined
+          ? Boolean(settings.ai.proxyEnabled)
+          : Boolean(settings.ai.downscaleForAnalysis);
       const prepared = await prepareAnalysisVideoAsset({
         jobId,
         filePath: resolvedMedia.resolvedPath,
-        downscale: Boolean(settings.ai.downscaleForAnalysis),
+        downscale: proxyEnabled,
+        proxyEnabled,
+        analysisMode: params.analysisMode,
+        proxyAudioInBalanced: Boolean(settings.ai.proxyAudioInBalanced),
+        proxyAudioInDeep: Boolean(settings.ai.proxyAudioInDeep),
+        abortSignal: jobController.signal,
         allowedBaseDirs: params.allowedMediaDirs,
       });
-      timing.preprocessingMs += Date.now() - pStart;
+      const prepMs = Date.now() - pStart;
+      timing.preprocessingMs += prepMs;
+      originalBytesTotal += prepared.originalSizeBytes;
+      processedBytesTotal += prepared.processedSizeBytes;
+      if (prepared.proxyApplied) proxyAppliedCount += 1;
 
       const assetId = crypto.randomUUID();
       const now = new Date().toISOString();
       db.prepare(`
         INSERT INTO ai_analysis_assets (
           id, job_id, match_id, session_id, segment_id, local_file_path, prepared_file_path,
-          is_temp_asset, sha256_hash, file_size_bytes, duration_seconds, width, height,
-          cleanup_status, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'not_uploaded', ?, ?)
+          is_temp_asset, sha256_hash, file_size_bytes, original_size_bytes, processed_size_bytes,
+          preprocessing_ms, duration_seconds, width, height, cleanup_status, cleanup_attempts,
+          created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'not_uploaded', 0, ?, ?)
       `).run(
         assetId,
         jobId,
@@ -978,6 +1384,9 @@ async function executeAnalysisJobPipeline(params: {
         prepared.isTempAsset ? 1 : 0,
         prepared.metadata.sha256Hash,
         prepared.metadata.sizeBytes,
+        prepared.originalSizeBytes,
+        prepared.processedSizeBytes,
+        prepMs,
         prepared.metadata.durationSeconds,
         prepared.metadata.width,
         prepared.metadata.height,
@@ -997,6 +1406,9 @@ async function executeAnalysisJobPipeline(params: {
         preparedFilePath: prepared.preparedFilePath,
         durationSeconds: prepared.metadata.durationSeconds,
         sizeBytes: prepared.metadata.sizeBytes,
+        originalSizeBytes: prepared.originalSizeBytes,
+        processedSizeBytes: prepared.processedSizeBytes,
+        proxyApplied: prepared.proxyApplied,
       });
       runningOffsetSeconds += prepared.metadata.durationSeconds;
     }
@@ -1021,16 +1433,30 @@ async function executeAnalysisJobPipeline(params: {
     for (let i = 0; i < preparedAssets.length; i++) {
       checkCancelledOrThrow();
       const asset = preparedAssets[i];
+      currentSegmentNumber = i + 1;
+      currentModelInUse = params.modelVideoId;
 
+      currentStageName = 'uploading';
       updateJobProgress(db, jobId, {
         status: 'uploading',
         currentStage: 'uploading',
         segmentsProcessed: i,
+        currentSegmentIndex: i + 1,
+        retryAttempt: 0,
+        elapsedMs: Date.now() - startedWallMs,
         progressDetail: {
           segmentsTotal: preparedAssets.length,
           segmentsProcessed: i,
-          stageLabel: `Uploading segment ${i + 1} of ${preparedAssets.length} to Gemini Files API`,
+          currentSegmentIndex: i + 1,
+          stageLabel: `Uploading segment ${i + 1} of ${preparedAssets.length} to Gemini Files API (${(
+            asset.sizeBytes /
+            (1024 * 1024)
+          ).toFixed(2)} MB)`,
           uploadBytesTotal: asset.sizeBytes,
+          uploadIndeterminate: true,
+          proxyAppliedCount,
+          originalBytesTotal,
+          processedBytesTotal,
         },
       });
 
@@ -1039,16 +1465,54 @@ async function executeAnalysisJobPipeline(params: {
         mimeType: 'video/mp4',
         displayName: `fc26_${matchId.slice(0, 8)}_${half}_seg${asset.segmentIndex}.mp4`,
         isCancelled,
-        maxWaitMs: (settings.ai.maxAnalysisDurationSeconds ?? 180) * 1000,
+        abortSignal: jobController.signal,
+        segmentIndex: i + 1,
+        uploadTimeoutMs,
+        processingTimeoutMs,
+        maxWaitMs: processingTimeoutMs,
+        onRemoteFileUploaded: ({ remoteFileName, remoteFileUri, remoteState }) => {
+          // Immediately persist remote_file_name BEFORE processing poll so cleanup is guaranteed even on failure/timeout/cancel!
+          uploadedAssetsMap.set(asset.assetId, remoteFileName);
+          db.prepare(`
+            UPDATE ai_analysis_assets
+            SET remote_file_name = ?, remote_file_uri = ?, remote_state = ?, cleanup_status = 'uploaded', updated_at = ?
+            WHERE id = ?
+          `).run(
+            remoteFileName,
+            remoteFileUri,
+            remoteState ?? 'PROCESSING',
+            new Date().toISOString(),
+            asset.assetId
+          );
+        },
+        onWaitingForProcessing: () => {
+          currentStageName = 'waiting_for_media_processing';
+          updateJobProgress(db, jobId, {
+            status: 'waiting_for_media_processing',
+            currentStage: 'waiting_for_media_processing',
+            currentSegmentIndex: i + 1,
+            elapsedMs: Date.now() - startedWallMs,
+            progressDetail: {
+              segmentsTotal: preparedAssets.length,
+              segmentsProcessed: i,
+              currentSegmentIndex: i + 1,
+              stageLabel: `Waiting for Gemini media processing (segment ${i + 1}/${preparedAssets.length})`,
+              uploadIndeterminate: true,
+              proxyAppliedCount,
+              originalBytesTotal,
+              processedBytesTotal,
+            },
+          });
+        },
       });
 
       timing.uploadMs += uploaded.uploadMs;
       timing.mediaProcessingMs += uploaded.mediaProcessingMs;
-      uploadedAssets.push({ assetId: asset.assetId, remoteFileName: uploaded.remoteFileName });
+      uploadedAssetsMap.set(asset.assetId, uploaded.remoteFileName);
 
       db.prepare(`
         UPDATE ai_analysis_assets
-        SET remote_file_name = ?, remote_file_uri = ?, remote_state = ?, cleanup_status = 'pending', updated_at = ?
+        SET remote_file_name = ?, remote_file_uri = ?, remote_state = ?, cleanup_status = 'uploaded', updated_at = ?
         WHERE id = ?
       `).run(
         uploaded.remoteFileName,
@@ -1061,13 +1525,21 @@ async function executeAnalysisJobPipeline(params: {
       checkCancelledOrThrow();
 
       // Stage 1: Gameplay Content Classification
+      currentStageName = 'classifying_gameplay';
       updateJobProgress(db, jobId, {
         status: 'classifying_gameplay',
         currentStage: 'classifying_gameplay',
+        currentSegmentIndex: i + 1,
+        retryAttempt: 0,
+        elapsedMs: Date.now() - startedWallMs,
         progressDetail: {
           segmentsTotal: preparedAssets.length,
           segmentsProcessed: i,
+          currentSegmentIndex: i + 1,
           stageLabel: `Classifying gameplay vs menus/replays (segment ${i + 1}/${preparedAssets.length})`,
+          proxyAppliedCount,
+          originalBytesTotal,
+          processedBytesTotal,
         },
       });
 
@@ -1078,7 +1550,29 @@ async function executeAnalysisJobPipeline(params: {
         segmentDurationSeconds: asset.durationSeconds,
         samplingFps: params.samplingFps,
         half,
-        maxRetries: settings.ai.maxRetryAttempts ?? 2,
+        maxRetries,
+        segmentIndex: i + 1,
+        inferenceTimeoutMs,
+        abortSignal: jobController.signal,
+        onRetryAttempt: ({ attemptNumber, errorCode }) => {
+          totalRetryCount += 1;
+          updateJobProgress(db, jobId, {
+            retryCount: totalRetryCount,
+            retryAttempt: attemptNumber,
+            elapsedMs: Date.now() - startedWallMs,
+            progressDetail: {
+              segmentsTotal: preparedAssets.length,
+              segmentsProcessed: i,
+              currentSegmentIndex: i + 1,
+              retryAttempt: attemptNumber,
+              maxRetries,
+              stageLabel: `Retrying gameplay classification (segment ${i + 1}/${preparedAssets.length}, attempt ${attemptNumber + 1} after ${errorCode})`,
+              proxyAppliedCount,
+              originalBytesTotal,
+              processedBytesTotal,
+            },
+          });
+        },
       });
 
       timing.classificationMs += classRes.usage.durationMs;
@@ -1168,13 +1662,21 @@ async function executeAnalysisJobPipeline(params: {
       // Stage 2: Extract Gameplay Observations ONLY if this segment has live gameplay / set pieces
       if (liveWindows.length > 0) {
         checkCancelledOrThrow();
+        currentStageName = 'analyzing_gameplay';
         updateJobProgress(db, jobId, {
           status: 'analyzing_gameplay',
           currentStage: 'analyzing_gameplay',
+          currentSegmentIndex: i + 1,
+          retryAttempt: 0,
+          elapsedMs: Date.now() - startedWallMs,
           progressDetail: {
             segmentsTotal: preparedAssets.length,
             segmentsProcessed: i,
+            currentSegmentIndex: i + 1,
             stageLabel: `Extracting tactical observations (segment ${i + 1}/${preparedAssets.length})`,
+            proxyAppliedCount,
+            originalBytesTotal,
+            processedBytesTotal,
           },
         });
 
@@ -1190,7 +1692,29 @@ async function executeAnalysisJobPipeline(params: {
           opponentName: matchContext.opponentName,
           language: params.language,
           liveWindows,
-          maxRetries: settings.ai.maxRetryAttempts ?? 2,
+          maxRetries,
+          segmentIndex: i + 1,
+          inferenceTimeoutMs,
+          abortSignal: jobController.signal,
+          onRetryAttempt: ({ attemptNumber, errorCode }) => {
+            totalRetryCount += 1;
+            updateJobProgress(db, jobId, {
+              retryCount: totalRetryCount,
+              retryAttempt: attemptNumber,
+              elapsedMs: Date.now() - startedWallMs,
+              progressDetail: {
+                segmentsTotal: preparedAssets.length,
+                segmentsProcessed: i,
+                currentSegmentIndex: i + 1,
+                retryAttempt: attemptNumber,
+                maxRetries,
+                stageLabel: `Retrying observation extraction (segment ${i + 1}/${preparedAssets.length}, attempt ${attemptNumber + 1} after ${errorCode})`,
+                proxyAppliedCount,
+                originalBytesTotal,
+                processedBytesTotal,
+              },
+            });
+          },
         });
 
         timing.observationAnalysisMs += obsRes.usage.durationMs;
@@ -1441,13 +1965,21 @@ async function executeAnalysisJobPipeline(params: {
       .prepare('SELECT pre_match_notes FROM matches WHERE id = ?')
       .get(matchId) as { pre_match_notes?: string } | undefined;
 
+    currentStageName = 'generating_briefing';
+    currentModelInUse = params.modelSynthesisId;
+    currentSegmentNumber = null;
     updateJobProgress(db, jobId, {
       status: 'generating_briefing',
       currentStage: 'generating_briefing',
+      retryAttempt: 0,
+      elapsedMs: Date.now() - startedWallMs,
       progressDetail: {
         segmentsTotal: preparedAssets.length,
         segmentsProcessed: preparedAssets.length,
         stageLabel: 'Generating structured half-time briefing and tactical recommendations',
+        proxyAppliedCount,
+        originalBytesTotal,
+        processedBytesTotal,
       },
     });
 
@@ -1461,7 +1993,27 @@ async function executeAnalysisJobPipeline(params: {
       readableHudStats: mergedHudStats,
       coverageSummary,
       userPreMatchNotes: matchNotesRow?.pre_match_notes ?? '',
-      maxRetries: settings.ai.maxRetryAttempts ?? 2,
+      maxRetries,
+      inferenceTimeoutMs,
+      abortSignal: jobController.signal,
+      onRetryAttempt: ({ attemptNumber, errorCode }) => {
+        totalRetryCount += 1;
+        updateJobProgress(db, jobId, {
+          retryCount: totalRetryCount,
+          retryAttempt: attemptNumber,
+          elapsedMs: Date.now() - startedWallMs,
+          progressDetail: {
+            segmentsTotal: preparedAssets.length,
+            segmentsProcessed: preparedAssets.length,
+            retryAttempt: attemptNumber,
+            maxRetries,
+            stageLabel: `Retrying tactical synthesis (attempt ${attemptNumber + 1} after ${errorCode})`,
+            proxyAppliedCount,
+            originalBytesTotal,
+            processedBytesTotal,
+          },
+        });
+      },
     });
 
     timing.tacticalSynthesisMs += synthRes.usage.durationMs;
@@ -1687,7 +2239,9 @@ async function executeAnalysisJobPipeline(params: {
             decisionStatus: r.decision_status,
             appliedInGame: Boolean(r.applied_in_game),
           })),
-          maxRetries: settings.ai.maxRetryAttempts ?? 2,
+          maxRetries,
+          inferenceTimeoutMs,
+          abortSignal: jobController.signal,
         });
 
         cumulativeCostUsd += compRes.usage.estimatedCostUsd;
@@ -1774,130 +2328,187 @@ async function executeAnalysisJobPipeline(params: {
         : 'completed';
 
     timing.totalElapsedMs = Date.now() - startedWallMs;
-    updateJobProgress(db, jobId, {
-      status: finalStatus,
-      currentStage: finalStatus,
-      coverageSummary,
-      actualCostUsd: Number(cumulativeCostUsd.toFixed(6)),
-      completedAt,
-      elapsedMs: timing.totalElapsedMs,
-      timingBreakdown: timing,
-      progressDetail: {
-        segmentsTotal: preparedAssets.length,
-        segmentsProcessed: preparedAssets.length,
-        stageLabel:
-          finalStatus === 'completed'
-            ? 'Half-time briefing ready'
-            : 'Completed with documented limitations',
-        note: coverageSummary,
+    updateJobProgress(
+      db,
+      jobId,
+      {
+        status: finalStatus,
+        currentStage: finalStatus,
+        coverageSummary,
+        actualCostUsd: Number(cumulativeCostUsd.toFixed(6)),
+        completedAt,
+        elapsedMs: timing.totalElapsedMs,
+        timingBreakdown: timing,
+        progressDetail: {
+          segmentsTotal: preparedAssets.length,
+          segmentsProcessed: preparedAssets.length,
+          stageLabel:
+            finalStatus === 'completed'
+              ? 'Half-time briefing ready'
+              : 'Completed with documented limitations',
+          proxyAppliedCount,
+          originalBytesTotal,
+          processedBytesTotal,
+          note: coverageSummary,
+        },
       },
-    });
+      { allowTerminalTransition: false }
+    );
   } catch (err) {
     const finishedAt = new Date().toISOString();
     timing.totalElapsedMs = Date.now() - startedWallMs;
     const isCancel = err instanceof Error && err.message === '__JOB_CANCELLED__';
 
     if (isCancel || isCancelled()) {
-      updateJobProgress(db, jobId, {
-        status: 'cancelled',
-        currentStage: 'cancelled',
-        actualCostUsd: Number(cumulativeCostUsd.toFixed(6)),
-        completedAt: finishedAt,
+      const cancelDiag: SanitizedGeminiErrorDiagnostic = {
+        code: 'ANALYSIS_CANCELLED',
+        httpStatus: null,
+        apiStatus: null,
+        upstreamMessage: 'Analysis job was cancelled by the user.',
+        stage: currentStageName,
+        modelId: currentModelInUse,
+        segmentIndex: currentSegmentNumber,
+        attemptNumber: totalRetryCount + 1,
         elapsedMs: timing.totalElapsedMs,
-        timingBreakdown: timing,
-        errorCode: 'USER_CANCELLED',
-        errorMessage: 'Analysis job was cancelled by the user.',
-      });
+        retryable: false,
+        retryAfterMs: null,
+        occurredAt: finishedAt,
+      };
+      updateJobProgress(
+        db,
+        jobId,
+        {
+          status: 'cancelled',
+          currentStage: 'cancelled',
+          actualCostUsd: Number(cumulativeCostUsd.toFixed(6)),
+          completedAt: finishedAt,
+          elapsedMs: timing.totalElapsedMs,
+          timingBreakdown: timing,
+          errorCode: 'ANALYSIS_CANCELLED',
+          errorMessage: 'Analysis job was cancelled by the user.',
+          diagnostics: cancelDiag,
+        },
+        { allowTerminalTransition: true }
+      );
     } else if (isMediaPathError(err)) {
-      // Local recording media path / security / integrity error — NEVER misclassify as GEMINI_ANALYSIS_ERROR!
+      // Local recording media path / security / integrity error — NEVER misclassify as Gemini error!
       insertApiUsageLog({
         matchId,
         analysisJobId: jobId,
-        modelId: params.modelVideoId,
+        modelId: currentModelInUse,
         stage: 'local_media_validation_error',
         inputTokens: 0,
         outputTokens: 0,
         requestDurationMs: timing.totalElapsedMs,
         status: 'error',
-        errorMessage: `${err.code}: ${err.message}`,
+        errorMessage: `${err.code}: ${sanitizeDiagnosticText(err.message)}`,
       });
-      updateJobProgress(db, jobId, {
-        status: 'failed',
-        currentStage: 'failed',
-        actualCostUsd: Number(cumulativeCostUsd.toFixed(6)),
-        completedAt: finishedAt,
-        elapsedMs: timing.totalElapsedMs,
-        timingBreakdown: timing,
-        errorCode: err.code,
-        errorMessage: err.message,
-      });
+      updateJobProgress(
+        db,
+        jobId,
+        {
+          status: 'failed',
+          currentStage: 'failed',
+          actualCostUsd: Number(cumulativeCostUsd.toFixed(6)),
+          completedAt: finishedAt,
+          elapsedMs: timing.totalElapsedMs,
+          timingBreakdown: timing,
+          errorCode: err.code,
+          errorMessage: err.message,
+        },
+        { allowTerminalTransition: false }
+      );
     } else {
-      const classified = classifyGeminiError(err);
+      const classified = isGeminiStageError(err)
+        ? {
+            code: err.geminiErrorCode,
+            userMessage: err.message,
+            diagnostic: {
+              ...err.diagnostic,
+              stage: err.diagnostic.stage ?? currentStageName,
+              modelId: err.diagnostic.modelId ?? currentModelInUse,
+              segmentIndex: err.diagnostic.segmentIndex ?? currentSegmentNumber,
+              elapsedMs: err.diagnostic.elapsedMs ?? timing.totalElapsedMs,
+            },
+          }
+        : classifyGeminiError(err, {
+            stage: currentStageName,
+            modelId: currentModelInUse,
+            segmentIndex: currentSegmentNumber,
+            attemptNumber: totalRetryCount + 1,
+            elapsedMs: timing.totalElapsedMs,
+          });
+
       insertApiUsageLog({
         matchId,
         analysisJobId: jobId,
-        modelId: params.modelVideoId,
-        stage: 'pipeline_error',
+        modelId: currentModelInUse,
+        stage: currentStageName || 'pipeline_error',
         inputTokens: 0,
         outputTokens: 0,
         requestDurationMs: timing.totalElapsedMs,
         status: 'error',
-        errorMessage: `${classified.code}: ${classified.userMessage}`,
+        errorMessage: sanitizeDiagnosticText(`${classified.code}: ${classified.userMessage}`),
       });
-      updateJobProgress(db, jobId, {
-        status: 'failed',
-        currentStage: 'failed',
-        actualCostUsd: Number(cumulativeCostUsd.toFixed(6)),
-        completedAt: finishedAt,
-        elapsedMs: timing.totalElapsedMs,
-        timingBreakdown: timing,
-        errorCode: classified.code,
-        errorMessage: classified.userMessage,
-      });
+      updateJobProgress(
+        db,
+        jobId,
+        {
+          status: 'failed',
+          currentStage: 'failed',
+          actualCostUsd: Number(cumulativeCostUsd.toFixed(6)),
+          completedAt: finishedAt,
+          elapsedMs: timing.totalElapsedMs,
+          timingBreakdown: timing,
+          errorCode: classified.code,
+          errorMessage: classified.userMessage,
+          diagnostics: classified.diagnostic,
+        },
+        { allowTerminalTransition: false }
+      );
     }
   } finally {
-    // Guaranteed remote file cleanup according to user retention policy
+    clearInterval(heartbeatTimer);
+
+    // Durable guaranteed remote file cleanup for ALL uploaded assets of this job
+    // (runs on success, failure, cancel, timeout, or partial upload — NEVER touches local gameplay recordings)
     const shouldDeleteRemote = settings.ai.deleteRemoteAfterAnalysis !== false;
-    for (const item of uploadedAssets) {
+    const dbUploadedRows = db
+      .prepare(
+        `SELECT id, remote_file_name FROM ai_analysis_assets
+         WHERE job_id = ? AND remote_file_name IS NOT NULL AND cleanup_status != 'deleted'`
+      )
+      .all(jobId) as Array<{ id: string; remote_file_name: string }>;
+
+    for (const r of dbUploadedRows) {
+      if (!uploadedAssetsMap.has(r.id)) {
+        uploadedAssetsMap.set(r.id, r.remote_file_name);
+      }
+    }
+
+    for (const [assetId, remoteFileName] of uploadedAssetsMap.entries()) {
       const now = new Date().toISOString();
       if (!shouldDeleteRemote) {
         db.prepare(
           `UPDATE ai_analysis_assets
            SET cleanup_status = 'retained_by_policy', updated_at = ?
            WHERE id = ?`
-        ).run(now, item.assetId);
+        ).run(now, assetId);
         continue;
       }
 
-      try {
-        const res = await provider.deleteRemoteFile(item.remoteFileName);
-        db.prepare(
-          `UPDATE ai_analysis_assets
-           SET cleanup_status = ?, cleanup_attempted_at = ?, cleanup_confirmed_at = ?, cleanup_error = ?, updated_at = ?
-           WHERE id = ?`
-        ).run(
-          res.deleted ? 'deleted' : 'cleanup_failed',
-          now,
-          res.deleted ? now : null,
-          res.error,
-          now,
-          item.assetId
-        );
-      } catch (cleanupErr) {
-        db.prepare(
-          `UPDATE ai_analysis_assets
-           SET cleanup_status = 'cleanup_failed', cleanup_attempted_at = ?, cleanup_error = ?, updated_at = ?
-           WHERE id = ?`
-        ).run(
-          now,
-          cleanupErr instanceof Error ? cleanupErr.message.slice(0, 200) : String(cleanupErr),
-          now,
-          item.assetId
-        );
-      }
+      // Transition uploaded -> cleanup_pending before attempting deletion
+      db.prepare(
+        `UPDATE ai_analysis_assets
+         SET cleanup_status = 'cleanup_pending', updated_at = ?
+         WHERE id = ? AND cleanup_status != 'deleted'`
+      ).run(now, assetId);
+
+      await deleteSingleRemoteAsset(db, assetId, remoteFileName, provider);
     }
 
     cleanupTempAnalysisDir(jobId);
+    activeJobControllers.delete(jobId);
     runningJobIds.delete(jobId);
     cancelRequestedJobIds.delete(jobId);
   }

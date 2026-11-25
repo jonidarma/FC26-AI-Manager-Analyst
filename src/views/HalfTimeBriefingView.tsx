@@ -5,8 +5,11 @@ import {
   Camera,
   Check,
   CheckCircle2,
+  ChevronDown,
+  ChevronUp,
   ClipboardCheck,
   Clock3,
+  Copy,
   Download,
   Edit3,
   Eye,
@@ -20,6 +23,7 @@ import {
   ShieldAlert,
   ShieldCheck,
   Sparkles,
+  Terminal,
   Trash2,
   Upload,
   X,
@@ -33,6 +37,7 @@ import type {
   AiGameplayObservationRecord,
   AiTacticalRecommendationRecord,
   AnalysisLanguage,
+  EffectiveModelRouting,
   GeminiServiceStatus,
   HalftimeReportData,
   MatchAnalysisBundle,
@@ -82,6 +87,9 @@ function statusBadgeStyle(status: string): string {
     case 'mixed':
     case 'user_modified':
     case 'pending':
+    case 'cleanup_pending':
+    case 'uploaded':
+    case 'deleting':
     case 'insufficient_gameplay':
     case 'unchanged':
       return 'bg-amber-500/15 text-amber-300 border-amber-500/35';
@@ -98,6 +106,7 @@ function statusBadgeStyle(status: string): string {
     case 'unknown':
     case 'unspecified':
     case 'not_uploaded':
+    case 'retained_by_policy':
     case 'insufficient_evidence':
       return 'bg-white/[0.06] text-[#9AA4B4] border-white/[0.14]';
     default:
@@ -123,7 +132,8 @@ function priorityGroupLabel(group: AiTacticalRecommendationRecord['priorityGroup
 type BriefingTab = 'briefing' | 'recommendations' | 'evidence' | 'comparison';
 
 export function HalfTimeBriefingView() {
-  const { matches, selectedMatchId, setSelectedMatchId, setActiveSection, refreshAll } = useApp();
+  const { matches, selectedMatchId, setSelectedMatchId, setActiveSection, settings, refreshAll } =
+    useApp();
   const selectedMatch = matches.find((m) => m.id === selectedMatchId) ?? matches[0] ?? null;
 
   const [selectedHalf, setSelectedHalf] = useState<'first_half' | 'second_half'>('first_half');
@@ -135,19 +145,25 @@ export function HalfTimeBriefingView() {
   const [sessions, setSessions] = useState<MatchSessionWithSegments[]>([]);
   const [snapshots, setSnapshots] = useState<MatchTacticalSnapshot[]>([]);
   const [aiStatus, setAiStatus] = useState<GeminiServiceStatus | null>(null);
+  const [effectiveRouting, setEffectiveRouting] = useState<EffectiveModelRouting | null>(null);
 
   const [loading, setLoading] = useState(false);
   const [errorBanner, setErrorBanner] = useState<string | null>(null);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
 
   // Launcher controls
-  const [analysisMode, setAnalysisMode] = useState<VideoAnalysisMode>('balanced');
-  const [language, setLanguage] = useState<AnalysisLanguage>('en');
+  const [analysisMode, setAnalysisMode] = useState<VideoAnalysisMode>(
+    settings?.ai.defaultAnalysisMode ?? 'balanced'
+  );
+  const [language, setLanguage] = useState<AnalysisLanguage>(settings?.ai.defaultLanguage ?? 'en');
   const [privacyAuthorized, setPrivacyAuthorized] = useState(false);
   const [entireDisplayAcknowledged, setEntireDisplayAcknowledged] = useState(false);
   const [forceReanalyze, setForceReanalyze] = useState(false);
   const [startingAnalysis, setStartingAnalysis] = useState(false);
   const [importingClip, setImportingClip] = useState(false);
+  const [showDiagnostics, setShowDiagnostics] = useState(false);
+  const [copiedDiagnostics, setCopiedDiagnostics] = useState(false);
+  const [liveNowMs, setLiveNowMs] = useState(() => Date.now());
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   // Recommendation decision editing state
@@ -234,16 +250,36 @@ export function HalfTimeBriefingView() {
     void loadData(false);
   }, [loadData]);
 
-  // Poll every 2 seconds while an analysis job is active
+  // Keep pre-launch effective model routing synchronized with settings & selected mode
+  useEffect(() => {
+    let active = true;
+    desktopBridge
+      .getEffectiveModelRouting(analysisMode)
+      .then((routing) => {
+        if (active) setEffectiveRouting(routing);
+      })
+      .catch(() => {});
+    return () => {
+      active = false;
+    };
+  }, [analysisMode, settings?.ai]);
+
+  // Poll every 2 seconds while an analysis job is active, and tick live elapsed timers every 1s
   const activeJob = bundle?.activeJob ?? null;
   const isJobRunning = Boolean(activeJob && !TERMINAL_JOB_STATUSES.has(activeJob.status));
 
   useEffect(() => {
     if (!isJobRunning || !selectedMatch) return;
-    const timer = window.setInterval(() => {
+    const pollTimer = window.setInterval(() => {
       void loadData(true);
     }, 2000);
-    return () => window.clearInterval(timer);
+    const tickTimer = window.setInterval(() => {
+      setLiveNowMs(Date.now());
+    }, 1000);
+    return () => {
+      window.clearInterval(pollTimer);
+      window.clearInterval(tickTimer);
+    };
   }, [isJobRunning, selectedMatch, loadData]);
 
   const halfSessions = useMemo(
@@ -297,10 +333,36 @@ export function HalfTimeBriefingView() {
     return bundle.activeJob ?? bundle.latestFirstHalfJob ?? bundle.latestSecondHalfJob ?? bundle.jobs[0] ?? null;
   }, [bundle, selectedJobId, selectedHalf]);
 
-  const failedCleanupAssets = useMemo(
-    () => (bundle?.assets ?? []).filter((a) => a.cleanupStatus === 'cleanup_failed'),
+  const retryableCleanupAssets = useMemo(
+    () =>
+      (bundle?.assets ?? []).filter((a) =>
+        ['cleanup_failed', 'cleanup_pending', 'uploaded', 'deleting', 'pending'].includes(
+          a.cleanupStatus
+        )
+      ),
     [bundle?.assets]
   );
+
+  const proxySavingsSummary = useMemo(() => {
+    const assets = bundle?.assets ?? [];
+    let origTotal = 0;
+    let procTotal = 0;
+    let proxiedCount = 0;
+    for (const a of assets) {
+      if (a.originalSizeBytes && a.processedSizeBytes && a.processedSizeBytes < a.originalSizeBytes) {
+        origTotal += a.originalSizeBytes;
+        procTotal += a.processedSizeBytes;
+        proxiedCount += 1;
+      }
+    }
+    if (proxiedCount === 0) return null;
+    const pct = Math.round(((origTotal - procTotal) / Math.max(1, origTotal)) * 100);
+    return {
+      originalMb: (origTotal / (1024 * 1024)).toFixed(1),
+      uploadedMb: (procTotal / (1024 * 1024)).toFixed(1),
+      reductionPct: pct,
+    };
+  }, [bundle?.assets]);
 
   const acceptedRecommendationIds = useMemo(
     () =>
@@ -790,6 +852,43 @@ export function HalfTimeBriefingView() {
               </div>
             )}
 
+            {/* Pre-Launch Effective Model Routing Preview (shown BEFORE upload authorization) */}
+            {effectiveRouting && (
+              <div className="rounded-md border border-white/[0.08] bg-[#0C0F14] px-3.5 py-2.5 flex flex-wrap items-center justify-between gap-2 text-[12px]">
+                <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
+                  <span className="text-[11px] uppercase tracking-wider text-[#7D8798]">
+                    Effective Routing ({analysisMode}):
+                  </span>
+                  <span className="font-mono text-emerald-300">
+                    Video: {effectiveRouting.effectiveVideoModelId || 'Not configured'}
+                  </span>
+                  <span className="font-mono text-sky-300">
+                    Synthesis: {effectiveRouting.effectiveSynthesisModelId || 'Not configured'}
+                  </span>
+                  <span className="text-[11px] text-[#8A94A6]">
+                    (
+                    {effectiveRouting.usePrimaryModelForAllStages
+                      ? 'Primary Model for All Stages'
+                      : 'Stage-Specific Overrides'}
+                    )
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setActiveSection('settings')}
+                  className="text-[11px] text-[#9AA4B4] hover:text-white underline"
+                >
+                  Change Models
+                </button>
+              </div>
+            )}
+
+            {effectiveRouting && effectiveRouting.warnings.length > 0 && (
+              <div className="rounded-md border border-amber-500/35 bg-amber-500/10 px-3.5 py-2 text-[12px] text-amber-200">
+                {effectiveRouting.warnings.join(' ')}
+              </div>
+            )}
+
             {/* Launch Controls */}
             <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 pt-2 border-t border-white/[0.06] items-end">
               <div className="lg:col-span-3">
@@ -936,66 +1035,143 @@ export function HalfTimeBriefingView() {
                     </button>
                   )}
 
-                  {failedCleanupAssets.length > 0 && (
+                  {retryableCleanupAssets.length > 0 && (
                     <button
                       type="button"
                       onClick={() => void handleRetryCleanup(displayedJob.id)}
                       className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md border border-amber-500/40 text-amber-200 hover:bg-amber-500/10 text-[12px]"
                     >
                       <Trash2 className="w-3.5 h-3.5" />
-                      Retry Remote Cleanup ({failedCleanupAssets.length})
+                      Retry Remote Cleanup ({retryableCleanupAssets.length})
                     </button>
                   )}
                 </div>
               </div>
 
-              {/* Progress Bar */}
-              <div className="space-y-1.5">
-                <div className="flex items-center justify-between text-[11px] text-[#8A94A6] font-mono">
-                  <span>
-                    Segments: {displayedJob.segmentsProcessed} / {Math.max(1, displayedJob.segmentsTotal)} ·
-                    Video Model: {displayedJob.modelVideoId} · Synthesis: {displayedJob.modelSynthesisId}
-                  </span>
-                  <span>
-                    Est. ${displayedJob.estimatedCostUsd.toFixed(4)}
-                    {displayedJob.actualCostUsd !== null
-                      ? ` · Actual $${displayedJob.actualCostUsd.toFixed(4)}`
-                      : ''}{' '}
-                    / Cap ${displayedJob.budgetCapUsd.toFixed(2)} ·{' '}
-                    {(displayedJob.elapsedMs / 1000).toFixed(1)}s
-                  </span>
-                </div>
-                <div className="h-2 rounded-full bg-white/[0.06] overflow-hidden">
-                  <div
-                    className={`h-full transition-all duration-500 ${
-                      displayedJob.status === 'failed' || displayedJob.status === 'interrupted'
-                        ? 'bg-rose-500'
-                        : displayedJob.status === 'insufficient_gameplay'
-                          ? 'bg-amber-500'
-                          : 'bg-emerald-500'
-                    }`}
-                    style={{
-                      width: `${
-                        displayedJob.status === 'completed' ||
-                        displayedJob.status === 'completed_with_limitations' ||
-                        displayedJob.status === 'insufficient_gameplay'
-                          ? 100
-                          : Math.min(
-                              95,
-                              Math.max(
-                                8,
-                                Math.round(
-                                  (displayedJob.segmentsProcessed /
-                                    Math.max(1, displayedJob.segmentsTotal)) *
-                                    100
-                                )
-                              )
-                            )
-                      }%`,
-                    }}
-                  />
-                </div>
-              </div>
+              {/* Honest Progress & Live Telemetry Strip (No Fabricated % or ETA) */}
+              {(() => {
+                const runningThisJob = !TERMINAL_JOB_STATUSES.has(displayedJob.status);
+                const startedMs = displayedJob.startedAt ? Date.parse(displayedJob.startedAt) : NaN;
+                const stageStartedMs = displayedJob.stageStartedAt
+                  ? Date.parse(displayedJob.stageStartedAt)
+                  : NaN;
+                const totalElapsedSec =
+                  runningThisJob && Number.isFinite(startedMs)
+                    ? Math.max(0, (liveNowMs - startedMs) / 1000)
+                    : displayedJob.elapsedMs / 1000;
+                const stageElapsedSec =
+                  runningThisJob && Number.isFinite(stageStartedMs)
+                    ? Math.max(0, (liveNowMs - stageStartedMs) / 1000)
+                    : null;
+                const totalSegs = Math.max(1, displayedJob.segmentsTotal);
+                const completedSegs = Math.min(totalSegs, displayedJob.segmentsProcessed);
+                const activeSegNum =
+                  displayedJob.currentSegmentIndex ?? displayedJob.progressDetail?.currentSegmentIndex ?? null;
+
+                return (
+                  <div className="space-y-2.5">
+                    <div className="grid grid-cols-2 lg:grid-cols-5 gap-2 text-[11px] font-mono">
+                      <div className="rounded border border-white/[0.07] bg-[#0C0F14] px-2.5 py-2">
+                        <div className="text-[#7D8798] uppercase text-[10px]">Active Segment</div>
+                        <div className="text-white mt-0.5">
+                          {activeSegNum ? `Seg ${activeSegNum} / ${totalSegs}` : `${completedSegs} / ${totalSegs} done`}
+                        </div>
+                      </div>
+                      <div className="rounded border border-white/[0.07] bg-[#0C0F14] px-2.5 py-2">
+                        <div className="text-[#7D8798] uppercase text-[10px]">Models Used</div>
+                        <div className="text-emerald-300 mt-0.5 truncate" title={`Video: ${displayedJob.modelVideoId} | Synthesis: ${displayedJob.modelSynthesisId}`}>
+                          {displayedJob.modelVideoId}
+                          {displayedJob.modelSynthesisId !== displayedJob.modelVideoId
+                            ? ` -> ${displayedJob.modelSynthesisId}`
+                            : ''}
+                        </div>
+                      </div>
+                      <div className="rounded border border-white/[0.07] bg-[#0C0F14] px-2.5 py-2">
+                        <div className="text-[#7D8798] uppercase text-[10px]">Elapsed (Total / Stage)</div>
+                        <div className="text-white mt-0.5 tabular-nums">
+                          {totalElapsedSec.toFixed(1)}s
+                          {stageElapsedSec !== null ? ` · stage ${stageElapsedSec.toFixed(0)}s` : ''}
+                        </div>
+                      </div>
+                      <div className="rounded border border-white/[0.07] bg-[#0C0F14] px-2.5 py-2">
+                        <div className="text-[#7D8798] uppercase text-[10px]">Cost / Cap</div>
+                        <div className="text-white mt-0.5 tabular-nums">
+                          Est ${displayedJob.estimatedCostUsd.toFixed(4)}
+                          {displayedJob.actualCostUsd !== null
+                            ? ` · Act $${displayedJob.actualCostUsd.toFixed(4)}`
+                            : ''}{' '}
+                          / ${displayedJob.budgetCapUsd.toFixed(2)}
+                        </div>
+                      </div>
+                      <div className="rounded border border-white/[0.07] bg-[#0C0F14] px-2.5 py-2">
+                        <div className="text-[#7D8798] uppercase text-[10px]">Activity / Retries</div>
+                        <div className="text-[#C5CCD7] mt-0.5 truncate">
+                          {displayedJob.retryAttempt && displayedJob.retryAttempt > 0
+                            ? `Retry #${displayedJob.retryAttempt} · `
+                            : ''}
+                          {displayedJob.lastActivityAt
+                            ? new Date(displayedJob.lastActivityAt).toLocaleTimeString()
+                            : new Date(displayedJob.updatedAt).toLocaleTimeString()}
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Discrete per-segment status blocks + indeterminate live activity indicator */}
+                    <div className="flex items-center gap-1.5">
+                      {Array.from({ length: totalSegs }, (_, idx) => {
+                        const segNum = idx + 1;
+                        const isDone =
+                          displayedJob.status === 'completed' ||
+                          displayedJob.status === 'completed_with_limitations' ||
+                          displayedJob.status === 'insufficient_gameplay' ||
+                          segNum <= completedSegs;
+                        const isCurrent = runningThisJob && activeSegNum === segNum && !isDone;
+                        const isFailedSeg =
+                          (displayedJob.status === 'failed' ||
+                            displayedJob.status === 'interrupted') &&
+                          (activeSegNum === segNum || (!activeSegNum && segNum === completedSegs + 1));
+                        return (
+                          <div
+                            key={segNum}
+                            title={`Segment ${segNum} of ${totalSegs}`}
+                            className={`h-2 flex-1 rounded-full transition-colors ${
+                              isFailedSeg
+                                ? 'bg-rose-500'
+                                : isDone
+                                  ? 'bg-emerald-500'
+                                  : isCurrent
+                                    ? 'bg-sky-400 animate-pulse'
+                                    : 'bg-white/[0.08]'
+                            }`}
+                          />
+                        );
+                      })}
+                    </div>
+
+                    {runningThisJob && (
+                      <div className="flex items-center justify-between text-[11px] text-[#8A94A6]">
+                        <span className="inline-flex items-center gap-1.5">
+                          <Loader2 className="w-3 h-3 animate-spin text-sky-400" />
+                          {displayedJob.progressDetail?.stageLabel ||
+                            displayedJob.progressDetail?.note ||
+                            `Executing ${displayedJob.currentStage}...`}
+                        </span>
+                        <span className="font-mono text-[10px] text-[#6F7A8C]">
+                          {completedSegs}/{totalSegs} segment(s) finished · live network/model stage in progress
+                        </span>
+                      </div>
+                    )}
+
+                    {proxySavingsSummary && (
+                      <div className="text-[11px] font-mono text-[#9AA4B4]">
+                        Analysis Upload Proxy: {proxySavingsSummary.originalMb} MB original →{' '}
+                        <span className="text-emerald-300">{proxySavingsSummary.uploadedMb} MB uploaded</span>{' '}
+                        ({proxySavingsSummary.reductionPct}% smaller · original recording untouched)
+                      </div>
+                    )}
+                  </div>
+                );
+              })()}
 
               {/* Truthful Status Explanations for Special Terminal States */}
               {displayedJob.status === 'insufficient_gameplay' && (
@@ -1015,34 +1191,173 @@ export function HalfTimeBriefingView() {
               {(displayedJob.status === 'failed' ||
                 displayedJob.status === 'interrupted' ||
                 displayedJob.status === 'cancelled') && (
-                <div className="border border-rose-500/35 bg-rose-500/10 rounded-md p-3.5 text-[13px] text-rose-100">
-                  <div className="font-semibold">
-                    {displayedJob.status === 'interrupted'
-                      ? 'Analysis Interrupted (App Restarted Mid-Job)'
-                      : displayedJob.status === 'cancelled'
-                        ? 'Analysis Cancelled by Manager'
-                        : `Analysis Failed${displayedJob.errorCode ? ` (${displayedJob.errorCode})` : ''}`}
+                <div className="border border-rose-500/35 bg-rose-500/10 rounded-md p-3.5 text-[13px] text-rose-100 space-y-2.5">
+                  <div className="flex flex-wrap items-start justify-between gap-2">
+                    <div>
+                      <div className="font-semibold">
+                        {displayedJob.status === 'interrupted'
+                          ? `Analysis Interrupted (${displayedJob.errorCode ?? 'ANALYSIS_INTERRUPTED'})`
+                          : displayedJob.status === 'cancelled'
+                            ? `Analysis Cancelled by Manager (${displayedJob.errorCode ?? 'ANALYSIS_CANCELLED'})`
+                            : `Analysis Failed${displayedJob.errorCode ? ` (${displayedJob.errorCode})` : ''}`}
+                      </div>
+                      {displayedJob.errorMessage && (
+                        <p className="mt-1 text-[12px] text-rose-200/90">
+                          {displayedJob.errorMessage}
+                        </p>
+                      )}
+                    </div>
+
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => setShowDiagnostics((prev) => !prev)}
+                        className="inline-flex items-center gap-1 px-2.5 py-1 rounded border border-rose-400/35 bg-[#0C0F14]/70 hover:bg-[#0C0F14] text-[11px] text-rose-200"
+                      >
+                        <Terminal className="w-3 h-3" />
+                        Technical Diagnostics
+                        {showDiagnostics ? (
+                          <ChevronUp className="w-3 h-3" />
+                        ) : (
+                          <ChevronDown className="w-3 h-3" />
+                        )}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const payload = {
+                            jobId: displayedJob.id,
+                            status: displayedJob.status,
+                            half: displayedJob.half,
+                            analysisMode: displayedJob.analysisMode,
+                            modelVideoId: displayedJob.modelVideoId,
+                            modelSynthesisId: displayedJob.modelSynthesisId,
+                            currentStage: displayedJob.currentStage,
+                            errorCode: displayedJob.errorCode,
+                            errorMessage: displayedJob.errorMessage,
+                            elapsedMs: displayedJob.elapsedMs,
+                            retryAttempt: displayedJob.retryAttempt ?? 0,
+                            diagnostics: displayedJob.diagnostics ?? null,
+                            remoteAssets: (bundle?.assets ?? []).map((a) => ({
+                              segmentId: a.segmentId,
+                              cleanupStatus: a.cleanupStatus,
+                              cleanupAttempts: a.cleanupAttempts ?? 0,
+                              cleanupError: a.cleanupError,
+                            })),
+                          };
+                          void navigator.clipboard
+                            .writeText(JSON.stringify(payload, null, 2))
+                            .then(() => {
+                              setCopiedDiagnostics(true);
+                              window.setTimeout(() => setCopiedDiagnostics(false), 2000);
+                            });
+                        }}
+                        className="inline-flex items-center gap-1 px-2.5 py-1 rounded border border-white/[0.14] bg-[#0C0F14]/70 hover:bg-[#0C0F14] text-[11px] text-[#D7DDE7]"
+                      >
+                        {copiedDiagnostics ? (
+                          <Check className="w-3 h-3 text-emerald-400" />
+                        ) : (
+                          <Copy className="w-3 h-3" />
+                        )}
+                        {copiedDiagnostics ? 'Copied' : 'Copy Diagnostics'}
+                      </button>
+                    </div>
                   </div>
-                  {displayedJob.errorMessage && (
-                    <p className="mt-1 text-[12px] text-rose-200/90">{displayedJob.errorMessage}</p>
+
+                  {showDiagnostics && (
+                    <div className="rounded border border-white/[0.1] bg-[#0A0D12] p-3 font-mono text-[11px] text-[#C5CCD7] space-y-1.5">
+                      <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                        <div>
+                          <span className="text-[#7D8798]">Code: </span>
+                          <span className="text-rose-300">
+                            {displayedJob.diagnostics?.code ?? displayedJob.errorCode ?? '—'}
+                          </span>
+                        </div>
+                        <div>
+                          <span className="text-[#7D8798]">HTTP / API: </span>
+                          <span>
+                            {displayedJob.diagnostics?.httpStatus ?? '—'} /{' '}
+                            {displayedJob.diagnostics?.apiStatus ?? '—'}
+                          </span>
+                        </div>
+                        <div>
+                          <span className="text-[#7D8798]">Stage: </span>
+                          <span>{displayedJob.diagnostics?.stage ?? displayedJob.currentStage}</span>
+                        </div>
+                        <div>
+                          <span className="text-[#7D8798]">Model: </span>
+                          <span className="text-amber-300">
+                            {displayedJob.diagnostics?.modelId ?? displayedJob.modelVideoId}
+                          </span>
+                        </div>
+                        <div>
+                          <span className="text-[#7D8798]">Segment: </span>
+                          <span>
+                            {displayedJob.diagnostics?.segmentIndex ??
+                              displayedJob.currentSegmentIndex ??
+                              '—'}
+                          </span>
+                        </div>
+                        <div>
+                          <span className="text-[#7D8798]">Attempt: </span>
+                          <span>
+                            {displayedJob.diagnostics?.attemptNumber ??
+                              displayedJob.retryAttempt ??
+                              1}
+                          </span>
+                        </div>
+                        <div>
+                          <span className="text-[#7D8798]">Retryable: </span>
+                          <span>
+                            {displayedJob.diagnostics
+                              ? displayedJob.diagnostics.retryable
+                                ? 'Yes'
+                                : 'No (Permanent)'
+                              : '—'}
+                          </span>
+                        </div>
+                        <div>
+                          <span className="text-[#7D8798]">Elapsed: </span>
+                          <span>
+                            {(
+                              (displayedJob.diagnostics?.elapsedMs ?? displayedJob.elapsedMs) / 1000
+                            ).toFixed(1)}
+                            s
+                          </span>
+                        </div>
+                      </div>
+                      {displayedJob.diagnostics?.upstreamMessage && (
+                        <div className="pt-1.5 border-t border-white/[0.08] text-rose-200/90 break-words">
+                          <span className="text-[#7D8798]">Sanitized Upstream: </span>
+                          {displayedJob.diagnostics.upstreamMessage}
+                        </div>
+                      )}
+                    </div>
                   )}
                 </div>
               )}
 
-              {/* Remote Cleanup Verification Strip */}
+              {/* Durable Remote Cleanup Verification Strip */}
               {(bundle?.assets.length ?? 0) > 0 && (
                 <div className="flex flex-wrap items-center gap-2 pt-1 text-[11px] text-[#8A94A6]">
                   <span className="uppercase tracking-wider">Remote Media Cleanup:</span>
-                  {bundle?.assets.map((asset) => (
+                  {bundle?.assets.map((asset, idx) => (
                     <span
                       key={asset.id}
+                      title={asset.cleanupError || `Remote status: ${asset.cleanupStatus}`}
                       className={`px-2 py-0.5 rounded border font-mono ${statusBadgeStyle(
                         asset.cleanupStatus
                       )}`}
                     >
-                      {asset.id.slice(0, 6)}: {asset.cleanupStatus}
+                      Seg #{idx + 1}: {asset.cleanupStatus}
+                      {asset.cleanupAttempts && asset.cleanupAttempts > 1
+                        ? ` (${asset.cleanupAttempts} tries)`
+                        : ''}
                     </span>
                   ))}
+                  <span className="text-[10px] text-[#6F7A8C]">
+                    (Local recordings on disk are never deleted)
+                  </span>
                 </div>
               )}
             </section>

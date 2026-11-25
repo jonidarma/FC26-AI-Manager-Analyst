@@ -24,10 +24,14 @@ import {
 } from './server/services/catalogReconciler.ts';
 import * as catalogRepo from './server/services/catalogRepository.ts';
 import {
-  GEMINI_MODEL_REGISTRY,
+  discoverAvailableGeminiModels,
   getGeminiStatus,
+  runAnalysisPreflight,
   testGeminiConnection,
+  verifyModelCapabilities,
 } from './server/services/geminiService.ts';
+import { resolveEffectiveModelRouting } from './server/services/geminiModelRouter.ts';
+import { isGeminiStageError } from './server/services/geminiVideoService.ts';
 import * as repo from './server/services/repository.ts';
 import {
   buildAiMatchTacticalContext,
@@ -40,7 +44,7 @@ import {
   resolveEvidenceFrameFilePath,
 } from './server/services/videoPreprocessingService.ts';
 import { isMediaPathError } from './shared/recordingStorage.ts';
-import type { CatalogDatasetType } from './src/types/domain.ts';
+import type { CatalogDatasetType, VideoAnalysisMode } from './src/types/domain.ts';
 
 const IS_DESKTOP_MODE = process.env.FC26_DESKTOP_MODE === '1';
 const IS_PRODUCTION = process.env.NODE_ENV === 'production' || IS_DESKTOP_MODE;
@@ -366,21 +370,42 @@ const settingsPatchSchema = z.object({
   ai: z
     .object({
       modelId: z.string().trim().min(1).max(100).optional(),
-      quickModelId: z.string().trim().min(1).max(100).optional(),
-      balancedModelId: z.string().trim().min(1).max(100).optional(),
-      deepModelId: z.string().trim().min(1).max(100).optional(),
-      synthesisModelId: z.string().trim().min(1).max(100).optional(),
+      usePrimaryModelForAllStages: z.boolean().optional(),
+      quickAnalysisModelId: z.string().trim().max(100).optional(),
+      balancedAnalysisModelId: z.string().trim().max(100).optional(),
+      deepAnalysisModelId: z.string().trim().max(100).optional(),
+      tacticalSynthesisModelId: z.string().trim().max(100).optional(),
+      // Legacy aliases preserved for backward compatibility
+      quickModelId: z.string().trim().max(100).optional(),
+      balancedModelId: z.string().trim().max(100).optional(),
+      deepModelId: z.string().trim().max(100).optional(),
+      synthesisModelId: z.string().trim().max(100).optional(),
       defaultAnalysisMode: z.enum(['quick', 'balanced', 'deep']).optional(),
       defaultLanguage: z.enum(['en', 'id']).optional(),
       analysisQuality: z.enum(['balanced', 'detailed', 'compact']).optional(),
       maxEvidenceFrames: z.number().int().min(4).max(60).optional(),
+      samplingFpsQuick: z.number().min(0.25).max(5).optional(),
+      samplingFpsBalanced: z.number().min(0.25).max(5).optional(),
+      samplingFpsDeep: z.number().min(0.25).max(5).optional(),
       samplingFps: z.number().min(0.25).max(5).optional(),
+      downscaleForAnalysis: z.boolean().optional(),
       downscaleTo720pForAnalysis: z.boolean().optional(),
+      proxyEnabled: z.boolean().optional(),
+      proxyAudioInBalanced: z.boolean().optional(),
+      proxyAudioInDeep: z.boolean().optional(),
+      maxConcurrentRequests: z.number().int().min(1).max(4).optional(),
       maxConcurrentSegments: z.number().int().min(1).max(4).optional(),
+      maxAnalysisDurationSeconds: z.number().int().min(30).max(1200).optional(),
       perStageTimeoutSeconds: z.number().int().min(30).max(600).optional(),
+      uploadTimeoutSeconds: z.number().int().min(30).max(900).optional(),
+      processingTimeoutSeconds: z.number().int().min(30).max(600).optional(),
+      inferenceTimeoutSeconds: z.number().int().min(30).max(600).optional(),
+      maxRetryAttempts: z.number().int().min(0).max(5).optional(),
       maxRetriesPerStage: z.number().int().min(0).max(5).optional(),
       perMatchBudgetUsd: z.number().min(0.01).max(25).optional(),
       dailyBudgetUsd: z.number().min(0.05).max(100).optional(),
+      minLiveGameplaySeconds: z.number().int().min(5).max(300).optional(),
+      autoAnalyzeAfterStop: z.boolean().optional(),
       removeDuplicateFrames: z.boolean().optional(),
       requireUploadConfirmation: z.boolean().optional(),
       deleteRemoteAfterAnalysis: z.boolean().optional(),
@@ -419,7 +444,15 @@ async function startServer() {
   // Initialize SQLite database and run versioned migrations on startup
   getDb();
   // Mark any orphaned active AI analysis jobs from a prior app shutdown/crash as interrupted
+  // (NEVER auto-restarts uploads without explicit user authorization)
   aiOrchestrator.markInterruptedJobsOnStartup();
+  // Best-effort non-blocking cleanup of any orphaned remote Gemini Files API media
+  void aiOrchestrator.cleanupPendingRemoteFiles().catch((err) => {
+    console.warn(
+      'Startup remote Gemini cleanup sweep skipped:',
+      err instanceof Error ? err.message : String(err)
+    );
+  });
 
   const app = express();
   app.disable('x-powered-by');
@@ -1754,12 +1787,91 @@ async function startServer() {
     presetName: z.string().trim().min(1).max(120),
   });
 
-  app.get('/api/ai/models', (_req, res) => {
+  const collectConfiguredModelIds = () => {
+    const ai = repo.getSettings().ai;
+    return [
+      ai.modelId,
+      ai.quickAnalysisModelId,
+      ai.balancedAnalysisModelId,
+      ai.deepAnalysisModelId,
+      ai.tacticalSynthesisModelId,
+    ].filter((v): v is string => typeof v === 'string' && v.trim().length > 0);
+  };
+
+  app.get('/api/ai/models', async (_req, res) => {
     const settings = repo.getSettings();
-    res.json({
-      models: GEMINI_MODEL_REGISTRY,
-      status: getGeminiStatus(settings.ai.modelId),
+    const discovery = await discoverAvailableGeminiModels({
+      forceRefresh: false,
+      configuredModelIds: collectConfiguredModelIds(),
     });
+    const routing = resolveEffectiveModelRouting(settings.ai);
+    const status = getGeminiStatus(settings.ai.modelId, settings.ai);
+    res.json({
+      models: discovery.models,
+      status: {
+        ...status,
+        models: discovery.models,
+        supportedModels: discovery.models.map((m) => m.modelId),
+        routing,
+        discoveredAt: discovery.discoveredAt,
+      },
+      routing,
+      discoveredAt: discovery.discoveredAt,
+      fromCache: discovery.fromCache,
+      discoveryError: discovery.discoveryError,
+    });
+  });
+
+  app.post('/api/ai/models/refresh', async (_req, res) => {
+    const settings = repo.getSettings();
+    const discovery = await discoverAvailableGeminiModels({
+      forceRefresh: true,
+      configuredModelIds: collectConfiguredModelIds(),
+    });
+    const routing = resolveEffectiveModelRouting(settings.ai);
+    const status = getGeminiStatus(settings.ai.modelId, settings.ai);
+    res.json({
+      models: discovery.models,
+      status: {
+        ...status,
+        models: discovery.models,
+        supportedModels: discovery.models.map((m) => m.modelId),
+        routing,
+        discoveredAt: discovery.discoveredAt,
+      },
+      routing,
+      discoveredAt: discovery.discoveredAt,
+      fromCache: discovery.fromCache,
+      discoveryError: discovery.discoveryError,
+    });
+  });
+
+  app.post('/api/ai/models/test', async (req, res) => {
+    const settings = repo.getSettings();
+    const requestedModel =
+      typeof req.body?.modelId === 'string' && req.body.modelId.trim()
+        ? req.body.modelId.trim()
+        : settings.ai.modelId;
+    const result = await verifyModelCapabilities({
+      modelId: requestedModel,
+      testVideo: false,
+      forceRefresh: true,
+    });
+    return res.json(result);
+  });
+
+  app.post('/api/ai/models/test-video', async (req, res) => {
+    const settings = repo.getSettings();
+    const requestedModel =
+      typeof req.body?.modelId === 'string' && req.body.modelId.trim()
+        ? req.body.modelId.trim()
+        : settings.ai.modelId;
+    const result = await verifyModelCapabilities({
+      modelId: requestedModel,
+      testVideo: true,
+      forceRefresh: true,
+    });
+    return res.json(result);
   });
 
   app.post('/api/ai/test-connection', async (req, res) => {
@@ -1767,7 +1879,48 @@ async function startServer() {
       typeof req.body?.modelId === 'string' && req.body.modelId.trim()
         ? req.body.modelId.trim()
         : repo.getSettings().ai.modelId;
-    const result = await testGeminiConnection(requestedModel);
+    const result = await testGeminiConnection(requestedModel, {
+      testVideo: Boolean(req.body?.testVideo),
+      forceRefresh: true,
+    });
+    return res.json(result);
+  });
+
+  app.get('/api/ai/model-routing', (req, res) => {
+    const settings = repo.getSettings();
+    const rawMode = typeof req.query.mode === 'string' ? req.query.mode.trim() : '';
+    const mode: VideoAnalysisMode | undefined =
+      rawMode === 'quick' || rawMode === 'balanced' || rawMode === 'deep'
+        ? rawMode
+        : undefined;
+    res.json(resolveEffectiveModelRouting(settings.ai, mode));
+  });
+
+  const preflightSchema = z.object({
+    sessionId: z.string().uuid().nullable().optional(),
+    half: z.enum(['first_half', 'second_half']).default('first_half'),
+    analysisMode: z.enum(['quick', 'balanced', 'deep']).optional(),
+    privacyAuthorized: z.boolean().optional(),
+    entireDisplayAcknowledged: z.boolean().optional(),
+    verifyLiveModelAccess: z.boolean().optional(),
+  });
+
+  app.post('/api/matches/:id/analysis/preflight', async (req, res) => {
+    const parsed = preflightSchema.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      return res
+        .status(400)
+        .json({ error: 'Invalid preflight request', details: parsed.error.flatten() });
+    }
+    const result = await runAnalysisPreflight({
+      matchId: req.params.id,
+      sessionId: parsed.data.sessionId ?? null,
+      half: parsed.data.half,
+      analysisMode: parsed.data.analysisMode,
+      privacyAuthorized: parsed.data.privacyAuthorized,
+      entireDisplayAcknowledged: parsed.data.entireDisplayAcknowledged,
+      verifyLiveModelAccess: parsed.data.verifyLiveModelAccess ?? false,
+    });
     return res.json(result);
   });
 
@@ -1813,6 +1966,13 @@ async function startServer() {
       });
       return res.status(202).json(result);
     } catch (err) {
+      if (isGeminiStageError(err)) {
+        return res.status(400).json({
+          error: err.message,
+          errorCode: err.geminiErrorCode,
+          diagnostic: err.diagnostic,
+        });
+      }
       return res.status(400).json({
         error: err instanceof Error ? err.message : 'Failed to start AI video analysis',
       });
@@ -2035,15 +2195,28 @@ async function startServer() {
     );
   });
 
+  let shuttingDown = false;
   const shutdown = () => {
-    server.close(() => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+
+    const hardExit = setTimeout(() => {
       closeDb();
       process.exit(0);
-    });
-    setTimeout(() => {
-      closeDb();
-      process.exit(0);
-    }, 2500).unref();
+    }, 3500);
+    hardExit.unref();
+
+    void Promise.race([
+      aiOrchestrator.shutdownAnalysisOrchestrator(),
+      new Promise<void>((resolve) => setTimeout(resolve, 2500)),
+    ])
+      .catch(() => undefined)
+      .finally(() => {
+        server.close(() => {
+          closeDb();
+          process.exit(0);
+        });
+      });
   };
 
   process.on('SIGTERM', shutdown);

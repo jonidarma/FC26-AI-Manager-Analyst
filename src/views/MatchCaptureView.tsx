@@ -1557,6 +1557,30 @@ export function MatchCaptureView() {
                                 </label>
                               </div>
 
+                              {settings?.ai && (() => {
+                                const ai = settings.ai;
+                                const primary = (ai.modelId || '').trim();
+                                const usePrimary = Boolean(ai.usePrimaryModelForAllStages);
+                                const pick = (ov?: string) => (usePrimary ? primary : (ov || '').trim() || primary);
+                                const videoModel =
+                                  analysisMode === 'deep'
+                                    ? pick(ai.deepAnalysisModelId)
+                                    : analysisMode === 'balanced'
+                                      ? pick(ai.balancedAnalysisModelId)
+                                      : pick(ai.quickAnalysisModelId);
+                                const synthModel = pick(ai.tacticalSynthesisModelId);
+                                return (
+                                  <div className="rounded bg-[#0C0F14] border border-white/[0.08] px-2.5 py-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] font-mono">
+                                    <span className="text-[#7D8798] uppercase">Effective Models:</span>
+                                    <span className="text-emerald-300">Video: {videoModel || 'Unset'}</span>
+                                    <span className="text-sky-300">Synthesis: {synthModel || 'Unset'}</span>
+                                    <span className="text-[#8A94A6]">
+                                      ({usePrimary ? 'Primary Override' : 'Stage-Specific'})
+                                    </span>
+                                  </div>
+                                );
+                              })()}
+
                               <label className="flex items-start gap-2 cursor-pointer text-[11px] text-[#D7DDE7]">
                                 <input
                                   type="checkbox"

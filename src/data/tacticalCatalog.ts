@@ -140,28 +140,28 @@ export const DEFAULT_TACTICAL_CATALOG_SEED: Array<{
 
 export const ACTIVE_GEMINI_MODELS = [
   {
-    id: 'gemini-4-hydrogen',
-    label: 'Gemini 4 Hydrogen (Fast Multimodal Default)',
-    description: 'High-speed multimodal video & tactical analysis with structured JSON support.',
+    id: 'gemini-2.5-flash',
+    label: 'Gemini 2.5 Flash (Balanced Multimodal Default)',
+    description: 'Fast multimodal video & tactical analysis with structured JSON output support.',
     tier: 'Standard',
   },
   {
-    id: 'gemini-3.1-flash-lite',
-    label: 'Gemini 3.1 Flash-Lite (Quick / Low-Cost Video Triage)',
-    description: 'Fast, cost-efficient multimodal model ideal for Quick mode and Stage 1 classification.',
+    id: 'gemini-2.5-flash-lite',
+    label: 'Gemini 2.5 Flash-Lite (Quick / Low-Cost Video Triage)',
+    description: 'Fast, low-cost multimodal model suitable for Quick mode and rapid triage.',
     tier: 'Budget',
   },
   {
-    id: 'gemini-4-neon',
-    label: 'Gemini 4 Neon (Advanced Tactical Reasoning — Paid Tier)',
-    description: 'Deep tactical synthesis for complex opposition breakdown and multi-stage game plans.',
-    tier: 'Advanced',
+    id: 'gemini-3.1-flash-lite',
+    label: 'Gemini 3.1 Flash-Lite (Low-Latency Multimodal)',
+    description: 'Low-latency multimodal model for fast structured gameplay classification and analysis.',
+    tier: 'Budget',
   },
   {
-    id: 'gemini-4-carbon',
-    label: 'Gemini 4 Carbon (Deep Strategic Reasoning — Paid Tier)',
-    description: 'Maximum reasoning depth for deep match analysis and multi-match tactical memory.',
-    tier: 'Deep Reasoning',
+    id: 'gemini-2.5-pro',
+    label: 'Gemini 2.5 Pro (Deep Tactical Reasoning)',
+    description: 'High-depth tactical synthesis for complex opposition breakdown and adjustments.',
+    tier: 'Advanced',
   },
 ] as const;
 

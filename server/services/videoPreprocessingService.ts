@@ -37,14 +37,6 @@ export interface ProbedVideoMetadata {
   error?: string;
 }
 
-export interface PreparedVideoAsset {
-  localFilePath: string;
-  preparedFilePath: string;
-  isTempAsset: boolean;
-  metadata: ProbedVideoMetadata;
-  downscaled: boolean;
-}
-
 export function resolveServerFfmpegBinaries(): ServerFfmpegBinaries {
   const isWin = process.platform === 'win32';
   const ffmpegBin = isWin ? 'ffmpeg.exe' : 'ffmpeg';
@@ -421,62 +413,181 @@ export async function validateVideoFile(
   }
 }
 
+export interface PreparedVideoAsset {
+  localFilePath: string;
+  preparedFilePath: string;
+  isTempAsset: boolean;
+  metadata: ProbedVideoMetadata;
+  originalMetadata?: ProbedVideoMetadata;
+  originalSizeBytes: number;
+  processedSizeBytes: number;
+  preprocessingMs: number;
+  downscaled: boolean;
+  proxyApplied: boolean;
+  proxyProfile: 'none' | 'quick_720p_15fps' | 'balanced_1080p_24fps' | 'deep_1080p_30fps';
+}
+
+export interface AnalysisProxyProfileSpec {
+  profile: PreparedVideoAsset['proxyProfile'];
+  maxWidth: number;
+  maxHeight: number;
+  maxFps: number;
+  crf: number;
+  stripAudio: boolean;
+  recommendedSamplingFps: number;
+}
+
+export function getAnalysisProxyProfileSpec(
+  analysisMode: 'quick' | 'balanced' | 'deep',
+  options?: { proxyAudioInBalanced?: boolean; proxyAudioInDeep?: boolean }
+): AnalysisProxyProfileSpec {
+  if (analysisMode === 'quick') {
+    return {
+      profile: 'quick_720p_15fps',
+      maxWidth: 1280,
+      maxHeight: 720,
+      maxFps: 15,
+      crf: 28,
+      stripAudio: true,
+      recommendedSamplingFps: 1.0,
+    };
+  }
+  if (analysisMode === 'balanced') {
+    return {
+      profile: 'balanced_1080p_24fps',
+      maxWidth: 1920,
+      maxHeight: 1080,
+      maxFps: 24,
+      crf: 24,
+      stripAudio: !options?.proxyAudioInBalanced,
+      recommendedSamplingFps: 2.0,
+    };
+  }
+  return {
+    profile: 'deep_1080p_30fps',
+    maxWidth: 1920,
+    maxHeight: 1080,
+    maxFps: 30,
+    crf: 20,
+    stripAudio: !options?.proxyAudioInDeep,
+    recommendedSamplingFps: 2.0,
+  };
+}
+
 export async function prepareAnalysisVideoAsset(input: {
   jobId: string;
   filePath: string;
-  downscale: boolean;
+  downscale?: boolean;
+  proxyEnabled?: boolean;
+  analysisMode?: 'quick' | 'balanced' | 'deep';
+  proxyAudioInBalanced?: boolean;
+  proxyAudioInDeep?: boolean;
+  abortSignal?: AbortSignal;
   allowedBaseDirs?: string[];
 }): Promise<PreparedVideoAsset> {
+  const started = Date.now();
   const metadata = await validateVideoFile(input.filePath, input.allowedBaseDirs);
   if (!metadata.valid) {
     throw new Error(metadata.error ?? 'Video validation failed.');
   }
 
   const bins = resolveServerFfmpegBinaries();
-  const shouldDownscale =
-    input.downscale &&
-    Boolean(bins.ffmpegPath) &&
-    ((metadata.width ?? 0) > 1280 || (metadata.height ?? 0) > 720);
+  const proxyRequested =
+    input.proxyEnabled !== undefined ? Boolean(input.proxyEnabled) : Boolean(input.downscale);
+  const mode = input.analysisMode ?? (input.downscale ? 'quick' : 'balanced');
+  const spec = getAnalysisProxyProfileSpec(mode, {
+    proxyAudioInBalanced: input.proxyAudioInBalanced,
+    proxyAudioInDeep: input.proxyAudioInDeep,
+  });
 
-  if (!shouldDownscale || !bins.ffmpegPath) {
+  const width = metadata.width ?? 0;
+  const height = metadata.height ?? 0;
+  const fps = metadata.fps ?? 0;
+  const codec = (metadata.codec ?? '').toLowerCase();
+  const bitrateBps =
+    metadata.durationSeconds > 0 ? (metadata.sizeBytes * 8) / metadata.durationSeconds : 0;
+
+  // Determine whether transcoding actually helps; skip unnecessary work when source already fits target profile
+  const exceedsDimensions = width > spec.maxWidth || height > spec.maxHeight;
+  const exceedsFps = fps > spec.maxFps + 1.5;
+  const needsAudioStrip = spec.stripAudio && metadata.hasAudio;
+  const nonH264 = codec !== '' && codec !== 'h264';
+  // High bitrate footage (> 3.2 Mbps for quick, > 6 Mbps for balanced, > 10 Mbps for deep) benefits from CRF proxy
+  const bitrateThresholdBps =
+    mode === 'quick' ? 3_200_000 : mode === 'balanced' ? 6_000_000 : 10_000_000;
+  const exceedsBitrate = metadata.sizeBytes > 2 * 1024 * 1024 && bitrateBps > bitrateThresholdBps;
+
+  const shouldTranscode =
+    proxyRequested &&
+    Boolean(bins.ffmpegPath) &&
+    (exceedsDimensions || exceedsFps || needsAudioStrip || nonH264 || exceedsBitrate);
+
+  if (!shouldTranscode || !bins.ffmpegPath) {
     return {
       localFilePath: metadata.filePath,
       preparedFilePath: metadata.filePath,
       isTempAsset: false,
       metadata,
+      originalMetadata: metadata,
+      originalSizeBytes: metadata.sizeBytes,
+      processedSizeBytes: metadata.sizeBytes,
+      preprocessingMs: Date.now() - started,
       downscaled: false,
+      proxyApplied: false,
+      proxyProfile: 'none',
     };
   }
 
-  // Create a temporary downscaled copy without modifying the original recorded MP4
+  if (input.abortSignal?.aborted) {
+    throw new Error('__JOB_CANCELLED__');
+  }
+
+  // Create a temporary analysis proxy without modifying the original recorded MP4
   const tempDir = getAnalysisTempDir(input.jobId);
-  const outName = `analysis_${crypto.randomUUID().slice(0, 8)}.mp4`;
+  const outName = `proxy_${mode}_${crypto.randomUUID().slice(0, 8)}.mp4`;
   const tempOutPath = path.join(tempDir, outName);
 
-  await execFileAsync(
-    bins.ffmpegPath,
-    [
-      '-y',
-      '-i',
-      metadata.filePath,
-      '-vf',
-      'scale=min(1280\\,iw):-2',
-      '-c:v',
-      'libx264',
-      '-preset',
-      'veryfast',
-      '-crf',
-      '28',
-      '-an',
-      '-movflags',
-      '+faststart',
-      tempOutPath,
-    ],
-    { timeout: 120_000, maxBuffer: 4 * 1024 * 1024 }
+  const vfParts: string[] = [];
+  // Scale down only if larger than target, preserving aspect ratio and even dimensions
+  vfParts.push(
+    `scale=min(${spec.maxWidth}\\,iw):min(${spec.maxHeight}\\,ih):force_original_aspect_ratio=decrease:force_divisible_by=2`
   );
+  if (fps <= 0 || fps > spec.maxFps) {
+    vfParts.push(`fps=${spec.maxFps}`);
+  }
 
-  const downscaledMeta = await validateVideoFile(tempOutPath, [tempDir]);
-  if (!downscaledMeta.valid) {
+  const ffmpegArgs: string[] = [
+    '-y',
+    '-i',
+    metadata.filePath,
+    '-vf',
+    vfParts.join(','),
+    '-c:v',
+    'libx264',
+    '-preset',
+    'veryfast',
+    '-crf',
+    String(spec.crf),
+    '-pix_fmt',
+    'yuv420p',
+  ];
+
+  if (spec.stripAudio) {
+    ffmpegArgs.push('-an');
+  } else if (metadata.hasAudio) {
+    ffmpegArgs.push('-c:a', 'aac', '-b:a', '96k');
+  }
+
+  ffmpegArgs.push('-movflags', '+faststart', tempOutPath);
+
+  await execFileAsync(bins.ffmpegPath, ffmpegArgs, {
+    timeout: 180_000,
+    maxBuffer: 4 * 1024 * 1024,
+    signal: input.abortSignal,
+  });
+
+  const proxyMeta = await validateVideoFile(tempOutPath, [tempDir]);
+  if (!proxyMeta.valid || proxyMeta.sizeBytes <= 0) {
     try {
       fs.unlinkSync(tempOutPath);
     } catch {
@@ -487,7 +598,35 @@ export async function prepareAnalysisVideoAsset(input: {
       preparedFilePath: metadata.filePath,
       isTempAsset: false,
       metadata,
+      originalMetadata: metadata,
+      originalSizeBytes: metadata.sizeBytes,
+      processedSizeBytes: metadata.sizeBytes,
+      preprocessingMs: Date.now() - started,
       downscaled: false,
+      proxyApplied: false,
+      proxyProfile: 'none',
+    };
+  }
+
+  // If proxy somehow ended up larger than original and wasn't required for codec/dimension/fps reduction, keep original
+  if (proxyMeta.sizeBytes >= metadata.sizeBytes && !exceedsDimensions && !nonH264 && !needsAudioStrip) {
+    try {
+      fs.unlinkSync(tempOutPath);
+    } catch {
+      // ignore
+    }
+    return {
+      localFilePath: metadata.filePath,
+      preparedFilePath: metadata.filePath,
+      isTempAsset: false,
+      metadata,
+      originalMetadata: metadata,
+      originalSizeBytes: metadata.sizeBytes,
+      processedSizeBytes: metadata.sizeBytes,
+      preprocessingMs: Date.now() - started,
+      downscaled: false,
+      proxyApplied: false,
+      proxyProfile: 'none',
     };
   }
 
@@ -495,8 +634,14 @@ export async function prepareAnalysisVideoAsset(input: {
     localFilePath: metadata.filePath,
     preparedFilePath: tempOutPath,
     isTempAsset: true,
-    metadata: downscaledMeta,
-    downscaled: true,
+    metadata: proxyMeta,
+    originalMetadata: metadata,
+    originalSizeBytes: metadata.sizeBytes,
+    processedSizeBytes: proxyMeta.sizeBytes,
+    preprocessingMs: Date.now() - started,
+    downscaled: exceedsDimensions,
+    proxyApplied: true,
+    proxyProfile: spec.profile,
   };
 }
 

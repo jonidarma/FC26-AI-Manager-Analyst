@@ -59,6 +59,76 @@ function safeJsonParse<T>(raw: string | null | undefined, fallback: T): T {
   }
 }
 
+function normalizeAiSettings(
+  stored: Partial<ApplicationSettings['ai']> | undefined
+): ApplicationSettings['ai'] {
+  const merged: ApplicationSettings['ai'] = {
+    ...DEFAULT_APP_SETTINGS.ai,
+    ...(stored ?? {}),
+  };
+
+  // Normalize legacy alias keys if any older client wrote quickModelId / balancedModelId / etc.
+  const raw = (stored ?? {}) as Record<string, unknown>;
+  if (typeof raw.quickModelId === 'string' && !stored?.quickAnalysisModelId) {
+    merged.quickAnalysisModelId = raw.quickModelId;
+  }
+  if (typeof raw.balancedModelId === 'string' && !stored?.balancedAnalysisModelId) {
+    merged.balancedAnalysisModelId = raw.balancedModelId;
+  }
+  if (typeof raw.deepModelId === 'string' && !stored?.deepAnalysisModelId) {
+    merged.deepAnalysisModelId = raw.deepModelId;
+  }
+  if (typeof raw.synthesisModelId === 'string' && !stored?.tacticalSynthesisModelId) {
+    merged.tacticalSynthesisModelId = raw.synthesisModelId;
+  }
+  if (typeof raw.perStageTimeoutSeconds === 'number' && stored?.inferenceTimeoutSeconds === undefined) {
+    merged.inferenceTimeoutSeconds = raw.perStageTimeoutSeconds;
+  }
+  if (typeof raw.maxRetriesPerStage === 'number' && stored?.maxRetryAttempts === undefined) {
+    merged.maxRetryAttempts = raw.maxRetriesPerStage;
+  }
+  if (typeof raw.downscaleTo720pForAnalysis === 'boolean' && stored?.downscaleForAnalysis === undefined) {
+    merged.downscaleForAnalysis = raw.downscaleTo720pForAnalysis;
+  }
+
+  // Upgrade safety for Phase 3.0.0/3.0.1 persisted settings:
+  // Previously, Zod stripped quickAnalysisModelId/balancedAnalysisModelId/deepAnalysisModelId/tacticalSynthesisModelId,
+  // leaving them pinned to legacy unreleased defaults ('gemini-4-hydrogen' / 'gemini-4-neon') even after the user chose
+  // e.g. 'gemini-3.1-flash-lite' as Primary Default Model.
+  const LEGACY_PLACEHOLDER_MODELS = new Set(['gemini-4-hydrogen', 'gemini-4-neon']);
+  const hadLegacyPlaceholderStage = [
+    merged.quickAnalysisModelId,
+    merged.balancedAnalysisModelId,
+    merged.deepAnalysisModelId,
+    merged.tacticalSynthesisModelId,
+  ].some((id) => typeof id === 'string' && LEGACY_PLACEHOLDER_MODELS.has(id.trim()));
+
+  if (stored?.usePrimaryModelForAllStages === undefined) {
+    if (hadLegacyPlaceholderStage) {
+      if (LEGACY_PLACEHOLDER_MODELS.has((merged.quickAnalysisModelId ?? '').trim())) merged.quickAnalysisModelId = '';
+      if (LEGACY_PLACEHOLDER_MODELS.has((merged.balancedAnalysisModelId ?? '').trim())) merged.balancedAnalysisModelId = '';
+      if (LEGACY_PLACEHOLDER_MODELS.has((merged.deepAnalysisModelId ?? '').trim())) merged.deepAnalysisModelId = '';
+      if (LEGACY_PLACEHOLDER_MODELS.has((merged.tacticalSynthesisModelId ?? '').trim())) merged.tacticalSynthesisModelId = '';
+      merged.usePrimaryModelForAllStages = true;
+    } else {
+      const allStagesEmptyOrMatchPrimary = [
+        merged.quickAnalysisModelId,
+        merged.balancedAnalysisModelId,
+        merged.deepAnalysisModelId,
+        merged.tacticalSynthesisModelId,
+      ].every((id) => !id || id.trim() === '' || id.trim() === merged.modelId.trim());
+      merged.usePrimaryModelForAllStages = allStagesEmptyOrMatchPrimary;
+    }
+  }
+
+  // Keep proxyEnabled synced with downscaleForAnalysis when upgrading old configs
+  if (stored?.proxyEnabled === undefined && stored?.downscaleForAnalysis !== undefined) {
+    merged.proxyEnabled = Boolean(stored.downscaleForAnalysis);
+  }
+
+  return merged;
+}
+
 export function getSettings(): ApplicationSettings {
   const db = getDb();
   const row = db
@@ -73,19 +143,33 @@ export function getSettings(): ApplicationSettings {
       ...(parsed.capture ?? {}),
       microphoneEnabled: false,
     },
-    ai: {
-      ...DEFAULT_APP_SETTINGS.ai,
-      ...(parsed.ai ?? {}),
-    },
+    ai: normalizeAiSettings(parsed.ai),
     activeClubId: parsed.activeClubId ?? null,
     updatedAt: parsed.updatedAt ?? new Date().toISOString(),
   };
 }
 
-export function updateSettings(patch: Partial<ApplicationSettings>): ApplicationSettings {
+export function updateSettings(patch: {
+  capture?: Partial<ApplicationSettings['capture']>;
+  ai?: Partial<ApplicationSettings['ai']>;
+  activeClubId?: string | null;
+  updatedAt?: string;
+}): ApplicationSettings {
   const db = getDb();
   const current = getSettings();
   const now = new Date().toISOString();
+
+  const nextAiRaw = {
+    ...current.ai,
+    ...(patch.ai ?? {}),
+  };
+
+  // Keep downscaleForAnalysis and proxyEnabled mutually consistent when either is updated
+  if (patch.ai?.proxyEnabled !== undefined && patch.ai?.downscaleForAnalysis === undefined) {
+    nextAiRaw.downscaleForAnalysis = patch.ai.proxyEnabled;
+  } else if (patch.ai?.downscaleForAnalysis !== undefined && patch.ai?.proxyEnabled === undefined) {
+    nextAiRaw.proxyEnabled = patch.ai.downscaleForAnalysis;
+  }
 
   const merged: ApplicationSettings = {
     capture: {
@@ -93,10 +177,7 @@ export function updateSettings(patch: Partial<ApplicationSettings>): Application
       ...(patch.capture ?? {}),
       microphoneEnabled: false, // Microphone is never recorded per specification
     },
-    ai: {
-      ...current.ai,
-      ...(patch.ai ?? {}),
-    },
+    ai: normalizeAiSettings(nextAiRaw),
     activeClubId: patch.activeClubId !== undefined ? patch.activeClubId : current.activeClubId,
     updatedAt: now,
   };

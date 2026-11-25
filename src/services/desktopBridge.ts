@@ -4,6 +4,7 @@ import type {
   AiMatchTacticalContext,
   AiRecommendationDecisionRecord,
   AnalysisLanguage,
+  AnalysisPreflightResult,
   ApiUsageLog,
   ApplicationSettings,
   CaptureManifest,
@@ -33,6 +34,7 @@ import type {
   DefaultRosterPreview,
   DesktopBridgeCapabilities,
   DiskSpaceInfo,
+  EffectiveModelRouting,
   FeedbackChoice,
   GeminiConnectionTestResult,
   GeminiModelCapability,
@@ -65,6 +67,7 @@ import type {
   RendererCaptureDiagnostics,
   RoleFamiliarityTier,
   RoleFocusValidationResult,
+  SanitizedGeminiErrorDiagnostic,
   SquadStatus,
   StorageOverviewInfo,
   TacticalCatalogItem,
@@ -1577,15 +1580,74 @@ class DesktopBridgeService {
   public getAiModelRegistry(): Promise<{
     models: GeminiModelCapability[];
     status: GeminiServiceStatus;
+    routing?: EffectiveModelRouting;
+    discoveredAt?: string | null;
+    fromCache?: boolean;
+    discoveryError?: SanitizedGeminiErrorDiagnostic | null;
   }> {
     return this.apiFetch('/api/ai/models');
   }
 
-  public testGeminiConnection(modelId?: string): Promise<GeminiConnectionTestResult> {
-    return this.apiFetch<GeminiConnectionTestResult>('/api/ai/test-connection', {
+  public refreshAiModels(): Promise<{
+    models: GeminiModelCapability[];
+    status: GeminiServiceStatus;
+    routing: EffectiveModelRouting;
+    discoveredAt: string | null;
+    fromCache: boolean;
+    discoveryError: SanitizedGeminiErrorDiagnostic | null;
+  }> {
+    return this.apiFetch('/api/ai/models/refresh', {
+      method: 'POST',
+    });
+  }
+
+  public testGeminiModel(modelId?: string): Promise<GeminiConnectionTestResult> {
+    return this.apiFetch<GeminiConnectionTestResult>('/api/ai/models/test', {
       method: 'POST',
       body: JSON.stringify({ modelId }),
     });
+  }
+
+  public testGeminiModelVideo(modelId?: string): Promise<GeminiConnectionTestResult> {
+    return this.apiFetch<GeminiConnectionTestResult>('/api/ai/models/test-video', {
+      method: 'POST',
+      body: JSON.stringify({ modelId }),
+    });
+  }
+
+  public testGeminiConnection(
+    modelId?: string,
+    testVideo = false
+  ): Promise<GeminiConnectionTestResult> {
+    return this.apiFetch<GeminiConnectionTestResult>('/api/ai/test-connection', {
+      method: 'POST',
+      body: JSON.stringify({ modelId, testVideo }),
+    });
+  }
+
+  public getEffectiveModelRouting(mode?: VideoAnalysisMode): Promise<EffectiveModelRouting> {
+    const qs = mode ? `?mode=${encodeURIComponent(mode)}` : '';
+    return this.apiFetch<EffectiveModelRouting>(`/api/ai/model-routing${qs}`);
+  }
+
+  public runMatchAnalysisPreflight(
+    matchId: string,
+    payload: {
+      sessionId?: string | null;
+      half: 'first_half' | 'second_half';
+      analysisMode?: VideoAnalysisMode;
+      privacyAuthorized?: boolean;
+      entireDisplayAcknowledged?: boolean;
+      verifyLiveModelAccess?: boolean;
+    }
+  ): Promise<AnalysisPreflightResult> {
+    return this.apiFetch<AnalysisPreflightResult>(
+      `/api/matches/${encodeURIComponent(matchId)}/analysis/preflight`,
+      {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      }
+    );
   }
 
   public getAiBudgetSummary(): Promise<{

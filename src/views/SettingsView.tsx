@@ -1,8 +1,10 @@
 import {
   CheckCircle2,
   Download,
+  Film,
   FolderOpen,
   Plus,
+  RefreshCw,
   ShieldAlert,
   Trash2,
   Upload,
@@ -15,10 +17,13 @@ import { ACTIVE_GEMINI_MODELS } from '../data/tacticalCatalog';
 import { useTableSort } from '../hooks/useTableSort';
 import { desktopBridge } from '../services/desktopBridge';
 import type {
+  AiSettings,
   AnalysisLanguage,
   ApiUsageLog,
+  EffectiveModelRouting,
   GeminiConnectionTestResult,
   GeminiModelCapability,
+  SanitizedGeminiErrorDiagnostic,
   StorageOverviewInfo,
   TacticalCatalogItem,
   VideoAnalysisMode,
@@ -64,11 +69,15 @@ export function SettingsView() {
 
   // Local editable state for capture & AI settings
   const [captureDraft, setCaptureDraft] = useState(settings?.capture ?? null);
-  const [aiDraft, setAiDraft] = useState(settings?.ai ?? null);
+  const [aiDraft, setAiDraft] = useState<AiSettings | null>(settings?.ai ?? null);
   const [saving, setSaving] = useState(false);
+  const [savedAiTimestamp, setSavedAiTimestamp] = useState<string | null>(null);
 
-  // Phase 3 Gemini Registry, Connection Test & Daily Budget Summary
+  // Phase 3.0.2 Dynamic Gemini Discovery, Verification & Budget Summary
   const [modelRegistry, setModelRegistry] = useState<GeminiModelCapability[]>([]);
+  const [modelsDiscoveredAt, setModelsDiscoveredAt] = useState<string | null>(null);
+  const [discoveryError, setDiscoveryError] = useState<SanitizedGeminiErrorDiagnostic | null>(null);
+  const [refreshingModels, setRefreshingModels] = useState(false);
   const [budgetSummary, setBudgetSummary] = useState<{
     datePrefix: string;
     spentUsd: number;
@@ -78,7 +87,14 @@ export function SettingsView() {
     remainingDailyUsd: number;
   } | null>(null);
   const [testingConn, setTestingConn] = useState(false);
+  const [testingVideo, setTestingVideo] = useState(false);
   const [connResult, setConnResult] = useState<GeminiConnectionTestResult | null>(null);
+
+  useEffect(() => {
+    if (settings?.ai && !aiDraft) {
+      setAiDraft(settings.ai);
+    }
+  }, [settings?.ai, aiDraft]);
 
   useEffect(() => {
     if (tab !== 'ai') return;
@@ -88,7 +104,11 @@ export function SettingsView() {
       desktopBridge.getAiBudgetSummary().catch(() => null),
     ]).then(([reg, bud]) => {
       if (!active) return;
-      if (reg) setModelRegistry(reg.models);
+      if (reg) {
+        setModelRegistry(reg.models);
+        setModelsDiscoveredAt(reg.discoveredAt ?? null);
+        setDiscoveryError(reg.discoveryError ?? null);
+      }
       if (bud) setBudgetSummary(bud);
     });
     return () => {
@@ -123,21 +143,164 @@ export function SettingsView() {
   const effectiveCapture = captureDraft ?? settings?.capture;
   const effectiveAi = aiDraft ?? settings?.ai;
 
-  async function handleTestGeminiConnection() {
-    setTestingConn(true);
-    setConnResult(null);
+  const hasUnsavedAiChanges = useMemo(() => {
+    if (!effectiveAi || !settings?.ai) return false;
+    return JSON.stringify(effectiveAi) !== JSON.stringify(settings.ai);
+  }, [effectiveAi, settings?.ai]);
+
+  // Live preview mirroring server resolveEffectiveModelRouting()
+  const routingPreview = useMemo<EffectiveModelRouting | null>(() => {
+    if (!effectiveAi) return null;
+    const primary = (effectiveAi.modelId || '').trim();
+    const usePrimary = Boolean(effectiveAi.usePrimaryModelForAllStages);
+    const pick = (override?: string) => (usePrimary ? primary : (override || '').trim() || primary);
+    const quick = pick(effectiveAi.quickAnalysisModelId);
+    const balanced = pick(effectiveAi.balancedAnalysisModelId);
+    const deep = pick(effectiveAi.deepAnalysisModelId);
+    const synth = pick(effectiveAi.tacticalSynthesisModelId);
+    const mode = effectiveAi.defaultAnalysisMode ?? 'balanced';
+    const effectiveVideo = mode === 'deep' ? deep : mode === 'balanced' ? balanced : quick;
+    return {
+      analysisMode: mode,
+      usePrimaryModelForAllStages: usePrimary,
+      primaryModelId: primary,
+      classificationModelId: effectiveVideo,
+      quickVideoModelId: quick,
+      balancedVideoModelId: balanced,
+      deepVideoModelId: deep,
+      synthesisModelId: synth,
+      comparisonModelId: synth,
+      effectiveVideoModelId: effectiveVideo,
+      effectiveSynthesisModelId: synth,
+      routingSource: usePrimary ? 'primary_override' : 'stage_specific',
+      warnings: [],
+    };
+  }, [effectiveAi]);
+
+  // Merge discovered models + any currently configured IDs so dropdowns always reflect live availability
+  const selectableModels = useMemo(() => {
+    const map = new Map<string, GeminiModelCapability>();
+    for (const m of modelRegistry) {
+      map.set(m.modelId, m);
+    }
+    if (map.size === 0) {
+      for (const fallback of ACTIVE_GEMINI_MODELS) {
+        map.set(fallback.id, {
+          modelId: fallback.id,
+          displayName: fallback.label,
+          availability: 'available_default',
+          source: 'registry',
+          accessStatus: 'unverified',
+          supportsVideoInput: true,
+          supportsStructuredOutput: true,
+          recommendedStages: ['balanced'],
+          estimatedInputPricePer1MTokensUsd: null,
+          estimatedOutputPricePer1MTokensUsd: null,
+          pricingVerified: false,
+          pricingNote: '',
+          description: fallback.description,
+        });
+      }
+    }
+    const configured = [
+      effectiveAi?.modelId,
+      effectiveAi?.quickAnalysisModelId,
+      effectiveAi?.balancedAnalysisModelId,
+      effectiveAi?.deepAnalysisModelId,
+      effectiveAi?.tacticalSynthesisModelId,
+    ].filter((v): v is string => typeof v === 'string' && v.trim().length > 0);
+
+    for (const cid of configured) {
+      if (!map.has(cid)) {
+        map.set(cid, {
+          modelId: cid,
+          displayName: cid,
+          availability: 'available_optional',
+          source: 'configured',
+          accessStatus: 'unverified',
+          supportsVideoInput: true,
+          supportsStructuredOutput: true,
+          recommendedStages: ['balanced'],
+          estimatedInputPricePer1MTokensUsd: null,
+          estimatedOutputPricePer1MTokensUsd: null,
+          pricingVerified: false,
+          pricingNote: '',
+          description: 'Configured custom model ID.',
+        });
+      }
+    }
+    return Array.from(map.values());
+  }, [modelRegistry, effectiveAi]);
+
+  const inaccessibleRoutedModels = useMemo(() => {
+    if (!routingPreview) return [];
+    const routedIds = Array.from(
+      new Set([
+        routingPreview.primaryModelId,
+        routingPreview.quickVideoModelId,
+        routingPreview.balancedVideoModelId,
+        routingPreview.deepVideoModelId,
+        routingPreview.synthesisModelId,
+      ])
+    ).filter(Boolean);
+    return routedIds
+      .map((id) => selectableModels.find((m) => m.modelId === id))
+      .filter(
+        (m): m is GeminiModelCapability =>
+          Boolean(m) && (m!.accessStatus === 'inaccessible' || m!.accessStatus === 'unsupported')
+      );
+  }, [routingPreview, selectableModels]);
+
+  async function handleRefreshAvailableModels() {
+    setRefreshingModels(true);
     try {
-      const res = await desktopBridge.testGeminiConnection(effectiveAi?.modelId);
-      setConnResult(res);
-      if (res.ok) {
-        notify('success', `Gemini API connected (${res.modelId}) in ${res.latencyMs}ms.`);
+      const res = await desktopBridge.refreshAiModels();
+      setModelRegistry(res.models);
+      setModelsDiscoveredAt(res.discoveredAt);
+      setDiscoveryError(res.discoveryError);
+      if (res.discoveryError) {
+        notify('error', `Model discovery failed (${res.discoveryError.code}): ${res.discoveryError.upstreamMessage}`);
       } else {
-        notify('error', res.message);
+        notify('success', `Discovered ${res.models.length} Gemini model(s) for your API key.`);
       }
     } catch (err) {
-      notify('error', err instanceof Error ? err.message : 'Connection test failed');
+      notify('error', err instanceof Error ? err.message : 'Failed to refresh Gemini models');
+    } finally {
+      setRefreshingModels(false);
+    }
+  }
+
+  async function handleTestGeminiConnection(testVideo = false) {
+    if (testVideo) setTestingVideo(true);
+    else setTestingConn(true);
+    setConnResult(null);
+    try {
+      const targetModel = effectiveAi?.modelId;
+      const res = testVideo
+        ? await desktopBridge.testGeminiModelVideo(targetModel)
+        : await desktopBridge.testGeminiModel(targetModel);
+      setConnResult(res);
+      // Refresh registry state so verified/inaccessible badges update immediately
+      const reg = await desktopBridge.getAiModelRegistry().catch(() => null);
+      if (reg) {
+        setModelRegistry(reg.models);
+        setModelsDiscoveredAt(reg.discoveredAt ?? null);
+      }
+      if (res.ok) {
+        notify(
+          'success',
+          testVideo
+            ? `Video + JSON verified for ${res.modelId} (${res.latencyMs}ms).`
+            : `Connected & JSON verified for ${res.modelId} (${res.latencyMs}ms).`
+        );
+      } else {
+        notify('error', `${res.errorCode ? `[${res.errorCode}] ` : ''}${res.message}`);
+      }
+    } catch (err) {
+      notify('error', err instanceof Error ? err.message : 'Model verification failed');
     } finally {
       setTestingConn(false);
+      setTestingVideo(false);
     }
   }
 
@@ -161,9 +324,16 @@ export function SettingsView() {
     if (!effectiveAi) return;
     setSaving(true);
     try {
-      await desktopBridge.updateSettings({ ai: effectiveAi });
+      const updated = await desktopBridge.updateSettings({ ai: effectiveAi });
+      setAiDraft(updated.ai);
+      setSavedAiTimestamp(new Date().toLocaleTimeString());
       await refreshAll();
-      notify('success', 'AI model and evidence policy saved.');
+      const reg = await desktopBridge.getAiModelRegistry().catch(() => null);
+      if (reg) {
+        setModelRegistry(reg.models);
+        setModelsDiscoveredAt(reg.discoveredAt ?? null);
+      }
+      notify('success', 'AI model routing, timeouts, and evidence policy saved to SQLite.');
     } catch (err) {
       notify('error', err instanceof Error ? err.message : 'Failed to save AI settings');
     } finally {
@@ -544,28 +714,53 @@ export function SettingsView() {
       {/* TAB 2: AI & Evidence Policy */}
       {tab === 'ai' && effectiveAi && (
         <div className="space-y-6 max-w-5xl">
-          {/* Server-Side Credential Status & Connection Test */}
+          {/* Server-Side Credential Status, Discovery & Verification */}
           <section className="border border-white/[0.08] bg-[#12151B] rounded-lg p-5 space-y-4">
             <div className="flex flex-wrap items-center justify-between gap-3">
               <div>
                 <h2 className="text-[16px] font-semibold text-white">
-                  Gemini API Connection &amp; Budget Guardrails
+                  Gemini API Discovery, Verification &amp; Budget Guardrails
                 </h2>
                 <p className="text-[12px] text-[#8A94A6] mt-0.5">
                   Credentials are supplied exclusively server-side via{' '}
                   <code className="font-mono text-[#D7DDE7]">GEMINI_API_KEY</code> (never entered
                   or stored in the UI or backups).
+                  {modelsDiscoveredAt && (
+                    <span className="ml-2 text-[#6F7A8C]">
+                      Last discovery: {new Date(modelsDiscoveredAt).toLocaleTimeString()}
+                    </span>
+                  )}
                 </p>
               </div>
-              <button
-                type="button"
-                disabled={testingConn}
-                onClick={() => void handleTestGeminiConnection()}
-                className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-md border border-emerald-500/45 bg-emerald-600/15 hover:bg-emerald-600/25 disabled:opacity-50 text-[12px] text-emerald-200 font-medium"
-              >
-                <Wifi className="w-3.5 h-3.5" />
-                {testingConn ? 'Testing Connection...' : 'Test API Connection'}
-              </button>
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  disabled={refreshingModels}
+                  onClick={() => void handleRefreshAvailableModels()}
+                  className="inline-flex items-center gap-1.5 px-3 py-2 rounded-md border border-white/[0.14] hover:border-sky-400/60 bg-[#0C0F14] disabled:opacity-50 text-[12px] text-[#D7DDE7] font-medium"
+                >
+                  <RefreshCw className={`w-3.5 h-3.5 text-sky-400 ${refreshingModels ? 'animate-spin' : ''}`} />
+                  {refreshingModels ? 'Refreshing...' : 'Refresh Available Models'}
+                </button>
+                <button
+                  type="button"
+                  disabled={testingConn || testingVideo}
+                  onClick={() => void handleTestGeminiConnection(false)}
+                  className="inline-flex items-center gap-1.5 px-3 py-2 rounded-md border border-emerald-500/45 bg-emerald-600/15 hover:bg-emerald-600/25 disabled:opacity-50 text-[12px] text-emerald-200 font-medium"
+                >
+                  <Wifi className="w-3.5 h-3.5" />
+                  {testingConn ? 'Testing Model...' : 'Test Selected Model'}
+                </button>
+                <button
+                  type="button"
+                  disabled={testingConn || testingVideo}
+                  onClick={() => void handleTestGeminiConnection(true)}
+                  className="inline-flex items-center gap-1.5 px-3 py-2 rounded-md border border-sky-500/45 bg-sky-600/15 hover:bg-sky-600/25 disabled:opacity-50 text-[12px] text-sky-200 font-medium"
+                >
+                  <Film className="w-3.5 h-3.5" />
+                  {testingVideo ? 'Testing Video...' : 'Test Video Compatibility'}
+                </button>
+              </div>
             </div>
 
             <div className="grid grid-cols-1 sm:grid-cols-4 gap-3 text-[12px]">
@@ -600,23 +795,58 @@ export function SettingsView() {
               </div>
             </div>
 
+            {discoveryError && (
+              <div className="rounded border border-rose-500/35 bg-rose-500/[0.07] p-3 text-[12px] text-rose-200 flex items-start gap-2">
+                <ShieldAlert className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
+                <div>
+                  <div className="font-medium">
+                    Model Discovery Error ({discoveryError.code})
+                    {discoveryError.httpStatus ? ` · HTTP ${discoveryError.httpStatus}` : ''}
+                  </div>
+                  <div className="text-[11px] opacity-90 mt-0.5">
+                    {discoveryError.upstreamMessage}
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {inaccessibleRoutedModels.length > 0 && (
+              <div className="rounded border border-amber-500/40 bg-amber-500/[0.08] p-3 text-[12px] text-amber-200 flex items-start gap-2">
+                <ShieldAlert className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
+                <div>
+                  <div className="font-medium">
+                    Inaccessible or Unsupported Routed Model Detected
+                  </div>
+                  <div className="text-[11px] opacity-90 mt-0.5">
+                    {inaccessibleRoutedModels.map((m) => `${m.modelId} (${m.accessStatus})`).join(', ')}{' '}
+                    — Select a verified model discovered for your API key or enable &ldquo;Use Primary
+                    Model for All Stages&rdquo; before launching analysis.
+                  </div>
+                </div>
+              </div>
+            )}
+
             {connResult && (
               <div
                 className={`rounded border p-3 text-[12px] flex items-start gap-2 ${
                   connResult.ok
                     ? 'border-emerald-500/35 bg-emerald-500/[0.07] text-emerald-200'
-                    : 'border-amber-500/35 bg-amber-500/[0.07] text-amber-200'
+                    : 'border-rose-500/35 bg-rose-500/[0.07] text-rose-200'
                 }`}
               >
                 {connResult.ok ? (
                   <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
                 ) : (
-                  <ShieldAlert className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
+                  <ShieldAlert className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
                 )}
                 <div>
                   <div className="font-medium">
-                    {connResult.ok ? 'Connection Verified' : 'Connection Check Failed'} ·{' '}
-                    {connResult.modelId} ({connResult.latencyMs}ms)
+                    {connResult.ok
+                      ? connResult.videoTested
+                        ? 'Video + Structured JSON Verified'
+                        : 'Model Access & JSON Verified'
+                      : `Verification Failed${connResult.errorCode ? ` (${connResult.errorCode})` : ''}`}{' '}
+                    · {connResult.modelId} ({connResult.latencyMs}ms)
                   </div>
                   <div className="text-[11px] opacity-90 mt-0.5">{connResult.message}</div>
                 </div>
@@ -628,11 +858,73 @@ export function SettingsView() {
             onSubmit={(e) => void handleSaveAi(e)}
             className="border border-white/[0.08] bg-[#12151B] rounded-lg p-6 space-y-5"
           >
-            <div className="flex items-center justify-between">
+            <div className="flex flex-wrap items-center justify-between gap-2">
               <h2 className="text-[16px] font-semibold text-white">
-                Gemini Model Routing &amp; Video Evidence Pipeline Policy
+                Gemini Model Routing, Timeouts &amp; Video Proxy Policy
               </h2>
-              <span className="text-[12px] text-[#8A94A6]">Server-side @google/genai</span>
+              <div className="flex items-center gap-2 text-[11px] font-mono">
+                {hasUnsavedAiChanges ? (
+                  <span className="px-2 py-0.5 rounded border border-amber-500/40 bg-amber-500/15 text-amber-200">
+                    Unsaved Changes
+                  </span>
+                ) : (
+                  <span className="px-2 py-0.5 rounded border border-emerald-500/35 bg-emerald-500/10 text-emerald-300">
+                    Saved{savedAiTimestamp ? ` · ${savedAiTimestamp}` : ''}
+                  </span>
+                )}
+                <span className="text-[#8A94A6]">Server-side @google/genai</span>
+              </div>
+            </div>
+
+            {/* Primary Model Override Toggle + Effective Routing Preview */}
+            <div className="rounded-md border border-white/[0.08] bg-[#0C0F14] p-4 space-y-3">
+              <label className="flex items-start gap-2.5 cursor-pointer text-[13px] text-white">
+                <input
+                  type="checkbox"
+                  checked={effectiveAi.usePrimaryModelForAllStages ?? true}
+                  onChange={(e) =>
+                    setAiDraft({ ...effectiveAi, usePrimaryModelForAllStages: e.target.checked })
+                  }
+                  className="mt-0.5 accent-emerald-500"
+                />
+                <span>
+                  <strong className="font-semibold">Use Primary Model for All Stages</strong>
+                  <span className="block text-[11px] text-[#8A94A6] mt-0.5">
+                    Recommended: routes Stage 1 classification, video observation, tactical
+                    synthesis, and second-half comparison strictly to the Primary Default Model so
+                    stale per-stage overrides never break analysis.
+                  </span>
+                </span>
+              </label>
+
+              {routingPreview && (
+                <div className="pt-2.5 border-t border-white/[0.07] grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2.5 text-[11px]">
+                  <div className="rounded bg-[#12151B] border border-white/[0.06] px-2.5 py-2">
+                    <div className="text-[#7D8798] uppercase tracking-wider">Quick Mode</div>
+                    <div className="font-mono text-emerald-300 mt-0.5 truncate">
+                      {routingPreview.quickVideoModelId || 'Not set'}
+                    </div>
+                  </div>
+                  <div className="rounded bg-[#12151B] border border-white/[0.06] px-2.5 py-2">
+                    <div className="text-[#7D8798] uppercase tracking-wider">Balanced Mode</div>
+                    <div className="font-mono text-emerald-300 mt-0.5 truncate">
+                      {routingPreview.balancedVideoModelId || 'Not set'}
+                    </div>
+                  </div>
+                  <div className="rounded bg-[#12151B] border border-white/[0.06] px-2.5 py-2">
+                    <div className="text-[#7D8798] uppercase tracking-wider">Deep Mode</div>
+                    <div className="font-mono text-emerald-300 mt-0.5 truncate">
+                      {routingPreview.deepVideoModelId || 'Not set'}
+                    </div>
+                  </div>
+                  <div className="rounded bg-[#12151B] border border-white/[0.06] px-2.5 py-2">
+                    <div className="text-[#7D8798] uppercase tracking-wider">Tactical Synthesis</div>
+                    <div className="font-mono text-sky-300 mt-0.5 truncate">
+                      {routingPreview.synthesisModelId || 'Not set'}
+                    </div>
+                  </div>
+                </div>
+              )}
             </div>
 
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 text-[13px]">
@@ -645,9 +937,14 @@ export function SettingsView() {
                   onChange={(e) => setAiDraft({ ...effectiveAi, modelId: e.target.value })}
                   className="w-full bg-[#0C0F14] border border-white/[0.12] rounded-md px-3 py-2 text-white text-[12px]"
                 >
-                  {ACTIVE_GEMINI_MODELS.map((m) => (
-                    <option key={m.id} value={m.id}>
-                      {m.label}
+                  {selectableModels.map((m) => (
+                    <option key={m.modelId} value={m.modelId}>
+                      {m.modelId}
+                      {m.accessStatus === 'verified'
+                        ? ' [Verified]'
+                        : m.accessStatus === 'inaccessible' || m.accessStatus === 'unsupported'
+                          ? ` [${m.accessStatus.toUpperCase()}]`
+                          : ''}
                     </option>
                   ))}
                 </select>
@@ -655,18 +952,25 @@ export function SettingsView() {
 
               <div>
                 <label className="block text-[12px] text-[#9AA4B4] mb-1.5">
-                  Quick Mode Model
+                  Quick Mode Override
                 </label>
                 <select
-                  value={effectiveAi.quickAnalysisModelId ?? 'gemini-3.1-flash-lite'}
+                  disabled={Boolean(effectiveAi.usePrimaryModelForAllStages)}
+                  value={
+                    effectiveAi.usePrimaryModelForAllStages
+                      ? ''
+                      : (effectiveAi.quickAnalysisModelId ?? '')
+                  }
                   onChange={(e) =>
                     setAiDraft({ ...effectiveAi, quickAnalysisModelId: e.target.value })
                   }
-                  className="w-full bg-[#0C0F14] border border-white/[0.12] rounded-md px-3 py-2 text-white text-[12px]"
+                  className="w-full bg-[#0C0F14] border border-white/[0.12] rounded-md px-3 py-2 text-white text-[12px] disabled:opacity-50"
                 >
-                  {ACTIVE_GEMINI_MODELS.map((m) => (
-                    <option key={m.id} value={m.id}>
-                      {m.id}
+                  <option value="">Inherit Primary ({effectiveAi.modelId})</option>
+                  {selectableModels.map((m) => (
+                    <option key={m.modelId} value={m.modelId}>
+                      {m.modelId}
+                      {m.accessStatus === 'verified' ? ' [Verified]' : ''}
                     </option>
                   ))}
                 </select>
@@ -674,18 +978,25 @@ export function SettingsView() {
 
               <div>
                 <label className="block text-[12px] text-[#9AA4B4] mb-1.5">
-                  Balanced Mode Model
+                  Balanced Mode Override
                 </label>
                 <select
-                  value={effectiveAi.balancedAnalysisModelId ?? 'gemini-4-hydrogen'}
+                  disabled={Boolean(effectiveAi.usePrimaryModelForAllStages)}
+                  value={
+                    effectiveAi.usePrimaryModelForAllStages
+                      ? ''
+                      : (effectiveAi.balancedAnalysisModelId ?? '')
+                  }
                   onChange={(e) =>
                     setAiDraft({ ...effectiveAi, balancedAnalysisModelId: e.target.value })
                   }
-                  className="w-full bg-[#0C0F14] border border-white/[0.12] rounded-md px-3 py-2 text-white text-[12px]"
+                  className="w-full bg-[#0C0F14] border border-white/[0.12] rounded-md px-3 py-2 text-white text-[12px] disabled:opacity-50"
                 >
-                  {ACTIVE_GEMINI_MODELS.map((m) => (
-                    <option key={m.id} value={m.id}>
-                      {m.id}
+                  <option value="">Inherit Primary ({effectiveAi.modelId})</option>
+                  {selectableModels.map((m) => (
+                    <option key={m.modelId} value={m.modelId}>
+                      {m.modelId}
+                      {m.accessStatus === 'verified' ? ' [Verified]' : ''}
                     </option>
                   ))}
                 </select>
@@ -693,18 +1004,25 @@ export function SettingsView() {
 
               <div>
                 <label className="block text-[12px] text-[#9AA4B4] mb-1.5">
-                  Deep Mode Model
+                  Deep Mode Override
                 </label>
                 <select
-                  value={effectiveAi.deepAnalysisModelId ?? 'gemini-4-neon'}
+                  disabled={Boolean(effectiveAi.usePrimaryModelForAllStages)}
+                  value={
+                    effectiveAi.usePrimaryModelForAllStages
+                      ? ''
+                      : (effectiveAi.deepAnalysisModelId ?? '')
+                  }
                   onChange={(e) =>
                     setAiDraft({ ...effectiveAi, deepAnalysisModelId: e.target.value })
                   }
-                  className="w-full bg-[#0C0F14] border border-white/[0.12] rounded-md px-3 py-2 text-white text-[12px]"
+                  className="w-full bg-[#0C0F14] border border-white/[0.12] rounded-md px-3 py-2 text-white text-[12px] disabled:opacity-50"
                 >
-                  {ACTIVE_GEMINI_MODELS.map((m) => (
-                    <option key={m.id} value={m.id}>
-                      {m.id}
+                  <option value="">Inherit Primary ({effectiveAi.modelId})</option>
+                  {selectableModels.map((m) => (
+                    <option key={m.modelId} value={m.modelId}>
+                      {m.modelId}
+                      {m.accessStatus === 'verified' ? ' [Verified]' : ''}
                     </option>
                   ))}
                 </select>
@@ -712,18 +1030,25 @@ export function SettingsView() {
 
               <div>
                 <label className="block text-[12px] text-[#9AA4B4] mb-1.5">
-                  Tactical Synthesis Model
+                  Tactical Synthesis Override
                 </label>
                 <select
-                  value={effectiveAi.tacticalSynthesisModelId ?? 'gemini-4-hydrogen'}
+                  disabled={Boolean(effectiveAi.usePrimaryModelForAllStages)}
+                  value={
+                    effectiveAi.usePrimaryModelForAllStages
+                      ? ''
+                      : (effectiveAi.tacticalSynthesisModelId ?? '')
+                  }
                   onChange={(e) =>
                     setAiDraft({ ...effectiveAi, tacticalSynthesisModelId: e.target.value })
                   }
-                  className="w-full bg-[#0C0F14] border border-white/[0.12] rounded-md px-3 py-2 text-white text-[12px]"
+                  className="w-full bg-[#0C0F14] border border-white/[0.12] rounded-md px-3 py-2 text-white text-[12px] disabled:opacity-50"
                 >
-                  {ACTIVE_GEMINI_MODELS.map((m) => (
-                    <option key={m.id} value={m.id}>
-                      {m.id}
+                  <option value="">Inherit Primary ({effectiveAi.modelId})</option>
+                  {selectableModels.map((m) => (
+                    <option key={m.modelId} value={m.modelId}>
+                      {m.modelId}
+                      {m.accessStatus === 'verified' ? ' [Verified]' : ''}
                     </option>
                   ))}
                 </select>
@@ -743,9 +1068,9 @@ export function SettingsView() {
                   }
                   className="w-full bg-[#0C0F14] border border-white/[0.12] rounded-md px-3 py-2 text-white text-[12px]"
                 >
-                  <option value="quick">Quick (Fastest / Lowest Cost)</option>
-                  <option value="balanced">Balanced (Recommended)</option>
-                  <option value="deep">Deep (Detailed Synthesis)</option>
+                  <option value="quick">Quick (720p/15fps proxy · Fastest)</option>
+                  <option value="balanced">Balanced (1080p/24fps proxy · Recommended)</option>
+                  <option value="deep">Deep (≤1080p/30fps · Detailed Synthesis)</option>
                 </select>
               </div>
 
@@ -837,33 +1162,72 @@ export function SettingsView() {
 
               <div>
                 <label className="block text-[12px] text-[#9AA4B4] mb-1.5">
-                  Stage Timeout (sec) / Retries
+                  Max Transient Retries (0–5)
                 </label>
-                <div className="flex gap-2">
-                  <input
-                    type="number"
-                    min={30}
-                    max={600}
-                    value={effectiveAi.maxAnalysisDurationSeconds ?? 180}
-                    onChange={(e) =>
-                      setAiDraft({
-                        ...effectiveAi,
-                        maxAnalysisDurationSeconds: Number(e.target.value),
-                      })
-                    }
-                    className="w-full bg-[#0C0F14] border border-white/[0.12] rounded-md px-2.5 py-2 text-white font-mono tabular-nums text-[12px]"
-                  />
-                  <input
-                    type="number"
-                    min={0}
-                    max={5}
-                    value={effectiveAi.maxRetryAttempts ?? 2}
-                    onChange={(e) =>
-                      setAiDraft({ ...effectiveAi, maxRetryAttempts: Number(e.target.value) })
-                    }
-                    className="w-20 bg-[#0C0F14] border border-white/[0.12] rounded-md px-2.5 py-2 text-white font-mono tabular-nums text-[12px]"
-                  />
-                </div>
+                <input
+                  type="number"
+                  min={0}
+                  max={5}
+                  value={effectiveAi.maxRetryAttempts ?? 2}
+                  onChange={(e) =>
+                    setAiDraft({ ...effectiveAi, maxRetryAttempts: Number(e.target.value) })
+                  }
+                  className="w-full bg-[#0C0F14] border border-white/[0.12] rounded-md px-3 py-2 text-white font-mono tabular-nums text-[12px]"
+                />
+              </div>
+
+              <div>
+                <label className="block text-[12px] text-[#9AA4B4] mb-1.5">
+                  Upload Timeout (sec, 30–900)
+                </label>
+                <input
+                  type="number"
+                  min={30}
+                  max={900}
+                  value={effectiveAi.uploadTimeoutSeconds ?? 300}
+                  onChange={(e) =>
+                    setAiDraft({ ...effectiveAi, uploadTimeoutSeconds: Number(e.target.value) })
+                  }
+                  className="w-full bg-[#0C0F14] border border-white/[0.12] rounded-md px-3 py-2 text-white font-mono tabular-nums text-[12px]"
+                />
+              </div>
+
+              <div>
+                <label className="block text-[12px] text-[#9AA4B4] mb-1.5">
+                  Media Processing Timeout (sec, 30–600)
+                </label>
+                <input
+                  type="number"
+                  min={30}
+                  max={600}
+                  value={effectiveAi.processingTimeoutSeconds ?? 180}
+                  onChange={(e) =>
+                    setAiDraft({
+                      ...effectiveAi,
+                      processingTimeoutSeconds: Number(e.target.value),
+                    })
+                  }
+                  className="w-full bg-[#0C0F14] border border-white/[0.12] rounded-md px-3 py-2 text-white font-mono tabular-nums text-[12px]"
+                />
+              </div>
+
+              <div>
+                <label className="block text-[12px] text-[#9AA4B4] mb-1.5">
+                  Inference Timeout (sec, 30–600)
+                </label>
+                <input
+                  type="number"
+                  min={30}
+                  max={600}
+                  value={effectiveAi.inferenceTimeoutSeconds ?? 180}
+                  onChange={(e) =>
+                    setAiDraft({
+                      ...effectiveAi,
+                      inferenceTimeoutSeconds: Number(e.target.value),
+                    })
+                  }
+                  className="w-full bg-[#0C0F14] border border-white/[0.12] rounded-md px-3 py-2 text-white font-mono tabular-nums text-[12px]"
+                />
               </div>
             </div>
 
@@ -871,14 +1235,45 @@ export function SettingsView() {
               <label className="flex items-center gap-2.5 cursor-pointer">
                 <input
                   type="checkbox"
-                  checked={effectiveAi.downscaleForAnalysis ?? true}
+                  checked={effectiveAi.proxyEnabled ?? effectiveAi.downscaleForAnalysis ?? true}
                   onChange={(e) =>
-                    setAiDraft({ ...effectiveAi, downscaleForAnalysis: e.target.checked })
+                    setAiDraft({
+                      ...effectiveAi,
+                      proxyEnabled: e.target.checked,
+                      downscaleForAnalysis: e.target.checked,
+                    })
                   }
                   className="accent-emerald-500"
                 />
-                Create temporary 720p copy for Gemini upload (keeps original local recording untouched)
+                Enable FFmpeg analysis upload proxy (Quick: 720p/15fps/no audio · Balanced: 1080p/24fps · Deep: ≤1080p/30fps — keeps original recording untouched)
               </label>
+
+              <div className="pl-6 flex flex-wrap gap-5 text-[12px] text-[#9AA4B4]">
+                <label className="flex items-center gap-2 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    disabled={!(effectiveAi.proxyEnabled ?? effectiveAi.downscaleForAnalysis ?? true)}
+                    checked={Boolean(effectiveAi.proxyAudioInBalanced)}
+                    onChange={(e) =>
+                      setAiDraft({ ...effectiveAi, proxyAudioInBalanced: e.target.checked })
+                    }
+                    className="accent-sky-500"
+                  />
+                  Keep audio in Balanced proxy
+                </label>
+                <label className="flex items-center gap-2 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    disabled={!(effectiveAi.proxyEnabled ?? effectiveAi.downscaleForAnalysis ?? true)}
+                    checked={Boolean(effectiveAi.proxyAudioInDeep)}
+                    onChange={(e) =>
+                      setAiDraft({ ...effectiveAi, proxyAudioInDeep: e.target.checked })
+                    }
+                    className="accent-sky-500"
+                  />
+                  Keep audio in Deep proxy
+                </label>
+              </div>
 
               <label className="flex items-center gap-2.5 cursor-pointer">
                 <input
@@ -913,60 +1308,105 @@ export function SettingsView() {
                   }
                   className="accent-emerald-500"
                 />
-                Delete temporary Gemini Files API remote upload immediately after analysis
+                Delete temporary Gemini Files API remote upload immediately after analysis (and on failure/cancel)
               </label>
             </div>
 
-            <div className="flex justify-end">
+            <div className="flex items-center justify-between pt-2 border-t border-white/[0.06]">
+              <span className="text-[12px] text-[#8A94A6]">
+                {hasUnsavedAiChanges
+                  ? 'You have unsaved AI routing or timeout changes.'
+                  : 'All AI routing, timeout, and proxy settings are persisted in SQLite.'}
+              </span>
               <button
                 type="submit"
                 disabled={saving}
-                className="px-4 py-2 rounded-md bg-emerald-600 hover:bg-emerald-500 text-white text-[13px] font-medium"
+                className="px-4 py-2 rounded-md bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white text-[13px] font-medium"
               >
-                Save AI Policy
+                {saving ? 'Saving...' : 'Save AI Policy'}
               </button>
             </div>
           </form>
 
-          {/* Model Capability Registry Table */}
-          {modelRegistry.length > 0 && (
+          {/* Discovered & Verified Model Capability Registry Table */}
+          {selectableModels.length > 0 && (
             <section className="border border-white/[0.08] bg-[#12151B] rounded-lg p-5 space-y-3">
-              <h3 className="text-[15px] font-semibold text-white">
-                Supported Gemini Model Capability Registry
-              </h3>
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <h3 className="text-[15px] font-semibold text-white">
+                  Discovered &amp; Verified Gemini Model Registry
+                </h3>
+                <span className="text-[11px] font-mono text-[#8A94A6]">
+                  {selectableModels.length} model(s)
+                </span>
+              </div>
               <div className="overflow-x-auto">
                 <table className="w-full text-left text-[12px]">
                   <thead className="border-b border-white/[0.08] text-[#7D8798]">
                     <tr>
                       <th className="py-2 pr-3 font-medium">Model ID</th>
-                      <th className="py-2 pr-3 font-medium">Tier</th>
+                      <th className="py-2 pr-3 font-medium">Source</th>
+                      <th className="py-2 pr-3 font-medium">Access Status</th>
                       <th className="py-2 pr-3 font-medium">Video / JSON</th>
-                      <th className="py-2 pr-3 font-medium text-right">Est. In / Out ($/1M)</th>
-                      <th className="py-2 font-medium">Recommended Use</th>
+                      <th className="py-2 pr-3 font-medium">Last Verified</th>
+                      <th className="py-2 font-medium">Notes / Error</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-white/[0.06]">
-                    {modelRegistry.map((m) => (
+                    {selectableModels.map((m) => (
                       <tr key={m.modelId}>
                         <td className="py-2 pr-3 font-mono text-white">{m.modelId}</td>
-                        <td className="py-2 pr-3 text-[#C5CCD7]">
-                          {m.availability.replace(/_/g, ' ')}
+                        <td className="py-2 pr-3 font-mono text-[11px] text-[#9AA4B4]">
+                          {m.source ?? 'registry'}
                         </td>
-                        <td className="py-2 pr-3 font-mono text-emerald-400">
-                          {m.supportsVideoInput ? 'Video' : '—'} ·{' '}
-                          {m.supportsStructuredOutput ? 'JSON' : '—'}
+                        <td className="py-2 pr-3">
+                          <span
+                            className={`px-2 py-0.5 rounded border text-[10px] font-mono uppercase ${
+                              m.accessStatus === 'verified'
+                                ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/35'
+                                : m.accessStatus === 'inaccessible' ||
+                                    m.accessStatus === 'unsupported'
+                                  ? 'bg-rose-500/15 text-rose-300 border-rose-500/35'
+                                  : 'bg-white/[0.06] text-[#9AA4B4] border-white/[0.12]'
+                            }`}
+                          >
+                            {m.accessStatus ?? 'unverified'}
+                          </span>
                         </td>
-                        <td className="py-2 pr-3 text-right font-mono text-[#C5CCD7]">
-                          {m.estimatedInputPricePer1MTokensUsd !== null
-                            ? `$${m.estimatedInputPricePer1MTokensUsd.toFixed(2)}`
-                            : '—'}{' '}
-                          /{' '}
-                          {m.estimatedOutputPricePer1MTokensUsd !== null
-                            ? `$${m.estimatedOutputPricePer1MTokensUsd.toFixed(2)}`
+                        <td className="py-2 pr-3 font-mono text-[11px]">
+                          <span className={m.videoVerified ? 'text-emerald-300' : 'text-[#C5CCD7]'}>
+                            {m.videoVerified
+                              ? 'Video ✓'
+                              : m.supportsVideoInput
+                                ? 'Video'
+                                : 'No Video'}
+                          </span>{' '}
+                          ·{' '}
+                          <span
+                            className={
+                              m.structuredJsonVerified ? 'text-emerald-300' : 'text-[#C5CCD7]'
+                            }
+                          >
+                            {m.structuredJsonVerified
+                              ? 'JSON ✓'
+                              : m.supportsStructuredOutput
+                                ? 'JSON'
+                                : 'No JSON'}
+                          </span>
+                        </td>
+                        <td className="py-2 pr-3 font-mono text-[11px] text-[#8A94A6]">
+                          {m.lastVerifiedAt
+                            ? new Date(m.lastVerifiedAt).toLocaleTimeString()
                             : '—'}
                         </td>
                         <td className="py-2 text-[#9AA4B4]">
-                          {m.recommendedStages.join(', ')} — {m.description}
+                          {m.lastErrorMessage ? (
+                            <span className="text-rose-300">
+                              {m.lastErrorCode ? `[${m.lastErrorCode}] ` : ''}
+                              {m.lastErrorMessage}
+                            </span>
+                          ) : (
+                            m.description
+                          )}
                         </td>
                       </tr>
                     ))}

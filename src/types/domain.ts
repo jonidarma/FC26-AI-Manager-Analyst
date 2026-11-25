@@ -591,6 +591,7 @@ export interface CaptureSettings {
 
 export interface AiSettings {
   modelId: string;
+  usePrimaryModelForAllStages?: boolean;
   quickAnalysisModelId?: string;
   balancedAnalysisModelId?: string;
   deepAnalysisModelId?: string;
@@ -603,8 +604,14 @@ export interface AiSettings {
   samplingFpsBalanced?: number;
   samplingFpsDeep?: number;
   downscaleForAnalysis?: boolean;
+  proxyEnabled?: boolean;
+  proxyAudioInBalanced?: boolean;
+  proxyAudioInDeep?: boolean;
   maxConcurrentRequests?: number;
   maxAnalysisDurationSeconds?: number;
+  uploadTimeoutSeconds?: number;
+  processingTimeoutSeconds?: number;
+  inferenceTimeoutSeconds?: number;
   maxRetryAttempts?: number;
   perMatchBudgetUsd?: number;
   dailyBudgetUsd?: number;
@@ -1723,18 +1730,94 @@ export interface VisionOptimizationResult {
 export type VideoAnalysisMode = 'quick' | 'balanced' | 'deep';
 export type AnalysisLanguage = 'en' | 'id';
 
+export type GeminiErrorCode =
+  | 'INVALID_API_KEY'
+  | 'API_KEY_REVOKED'
+  | 'MODEL_NOT_FOUND'
+  | 'MODEL_ACCESS_DENIED'
+  | 'MODEL_VIDEO_UNSUPPORTED'
+  | 'MODEL_STRUCTURED_OUTPUT_UNSUPPORTED'
+  | 'BILLING_REQUIRED'
+  | 'RATE_LIMIT_EXCEEDED'
+  | 'QUOTA_EXCEEDED'
+  | 'VIDEO_UPLOAD_FAILED'
+  | 'VIDEO_UPLOAD_TIMEOUT'
+  | 'VIDEO_PROCESSING_FAILED'
+  | 'VIDEO_PROCESSING_TIMEOUT'
+  | 'INFERENCE_TIMEOUT'
+  | 'NETWORK_CONNECTION_FAILED'
+  | 'UPSTREAM_SERVICE_UNAVAILABLE'
+  | 'INVALID_MODEL_RESPONSE'
+  | 'ANALYSIS_CANCELLED'
+  | 'ANALYSIS_INTERRUPTED';
+
+export interface SanitizedGeminiErrorDiagnostic {
+  code: GeminiErrorCode;
+  httpStatus: number | null;
+  apiStatus: string | null;
+  upstreamMessage: string;
+  stage: string | null;
+  modelId: string | null;
+  segmentIndex: number | null;
+  attemptNumber: number | null;
+  elapsedMs: number | null;
+  retryable: boolean;
+  retryAfterMs: number | null;
+  occurredAt: string;
+}
+
+export type GeminiModelAccessStatus =
+  | 'verified'
+  | 'unverified'
+  | 'inaccessible'
+  | 'unsupported';
+
 export interface GeminiModelCapability {
   modelId: string;
   displayName: string;
   availability: 'available_default' | 'available_optional' | 'requires_paid_tier';
+  source?: 'discovered' | 'configured' | 'registry';
+  accessStatus?: GeminiModelAccessStatus;
+  supportsGenerateContent?: boolean;
   supportsVideoInput: boolean;
   supportsStructuredOutput: boolean;
+  videoVerified?: boolean;
+  structuredJsonVerified?: boolean;
+  inputTokenLimit?: number | null;
+  outputTokenLimit?: number | null;
   recommendedStages: Array<'classification' | 'quick' | 'balanced' | 'deep' | 'synthesis'>;
   estimatedInputPricePer1MTokensUsd: number | null;
   estimatedOutputPricePer1MTokensUsd: number | null;
   pricingVerified: boolean;
   pricingNote: string;
   description: string;
+  lastVerifiedAt?: string | null;
+  lastErrorCode?: GeminiErrorCode | null;
+  lastErrorMessage?: string | null;
+}
+
+export interface EffectiveModelRouting {
+  analysisMode: VideoAnalysisMode;
+  usePrimaryModelForAllStages: boolean;
+  primaryModelId: string;
+  classificationModelId: string;
+  quickVideoModelId: string;
+  balancedVideoModelId: string;
+  deepVideoModelId: string;
+  synthesisModelId: string;
+  comparisonModelId: string;
+  effectiveVideoModelId: string;
+  effectiveSynthesisModelId: string;
+  routingSource: 'primary_override' | 'stage_specific';
+  warnings: string[];
+}
+
+export interface GeminiModelDiscoveryResult {
+  configured: boolean;
+  discoveredAt: string | null;
+  fromCache: boolean;
+  models: GeminiModelCapability[];
+  discoveryError?: SanitizedGeminiErrorDiagnostic | null;
 }
 
 export interface GeminiServiceStatus {
@@ -1742,6 +1825,8 @@ export interface GeminiServiceStatus {
   defaultModel: string;
   supportedModels: string[];
   models: GeminiModelCapability[];
+  routing?: EffectiveModelRouting;
+  discoveredAt?: string | null;
   phaseNote: string;
 }
 
@@ -1751,10 +1836,50 @@ export interface GeminiConnectionTestResult {
   modelId: string;
   latencyMs: number;
   videoSupported: boolean;
+  videoTested?: boolean;
   structuredOutputSupported: boolean;
+  accessStatus?: GeminiModelAccessStatus;
+  verifiedAt?: string | null;
   listedModelsCount?: number;
   message: string;
   errorCode?: string;
+  diagnostic?: SanitizedGeminiErrorDiagnostic | null;
+}
+
+export interface AnalysisPreflightCheck {
+  key:
+    | 'api_key'
+    | 'model_routing'
+    | 'model_access'
+    | 'model_capabilities'
+    | 'session_ownership'
+    | 'local_media_integrity'
+    | 'budget_guardrails'
+    | 'upload_authorization';
+  label: string;
+  ok: boolean;
+  blocking: boolean;
+  detail: string;
+  errorCode?: string | null;
+}
+
+export interface AnalysisPreflightResult {
+  ok: boolean;
+  matchId: string;
+  sessionId: string | null;
+  half: 'first_half' | 'second_half';
+  analysisMode: VideoAnalysisMode;
+  routing: EffectiveModelRouting;
+  estimatedCostUsd: number;
+  perMatchBudgetUsd: number;
+  dailyBudgetUsd: number;
+  segmentCount: number;
+  totalDurationSeconds: number;
+  totalBytes: number;
+  checks: AnalysisPreflightCheck[];
+  blockingErrorCode: string | null;
+  blockingMessage: string | null;
+  diagnostic?: SanitizedGeminiErrorDiagnostic | null;
 }
 
 export type AnalysisJobStatus =
@@ -1827,6 +1952,16 @@ export interface AnalysisTimingBreakdown {
   totalElapsedMs: number;
 }
 
+export type RemoteCleanupStatus =
+  | 'not_uploaded'
+  | 'uploaded'
+  | 'cleanup_pending'
+  | 'deleting'
+  | 'deleted'
+  | 'cleanup_failed'
+  | 'retained_by_policy'
+  | 'pending';
+
 export interface AiAnalysisJobRecord {
   id: string;
   matchId: string;
@@ -1839,9 +1974,16 @@ export interface AiAnalysisJobRecord {
   progressDetail: {
     segmentsTotal: number;
     segmentsProcessed: number;
+    currentSegmentIndex?: number | null;
     stageLabel: string;
     uploadBytesSent?: number;
     uploadBytesTotal?: number;
+    uploadIndeterminate?: boolean;
+    retryAttempt?: number;
+    maxRetries?: number;
+    proxyAppliedCount?: number;
+    originalBytesTotal?: number;
+    processedBytesTotal?: number;
     note?: string;
   };
   modelVideoId: string;
@@ -1857,15 +1999,21 @@ export interface AiAnalysisJobRecord {
   budgetCapUsd: number;
   segmentsTotal: number;
   segmentsProcessed: number;
+  currentSegmentIndex?: number | null;
   samplingFps: number;
   coverageSummary: string;
   startedAt: string | null;
   completedAt: string | null;
+  lastHeartbeatAt?: string | null;
+  lastActivityAt?: string | null;
+  stageStartedAt?: string | null;
   elapsedMs: number;
   timingBreakdown: AnalysisTimingBreakdown | null;
   errorCode: string | null;
   errorMessage: string | null;
+  diagnostics?: SanitizedGeminiErrorDiagnostic | null;
   retryCount: number;
+  retryAttempt?: number;
   cancelRequested: boolean;
   createdAt: string;
   updatedAt: string;
@@ -1882,13 +2030,17 @@ export interface AiAnalysisAssetRecord {
   isTempAsset: boolean;
   sha256Hash: string;
   fileSizeBytes: number;
+  originalSizeBytes?: number | null;
+  processedSizeBytes?: number | null;
+  preprocessingMs?: number | null;
   durationSeconds: number;
   width: number | null;
   height: number | null;
   remoteFileName: string | null;
   remoteFileUri: string | null;
   remoteState: string | null;
-  cleanupStatus: 'not_uploaded' | 'pending' | 'deleted' | 'cleanup_failed' | 'retained_by_policy';
+  cleanupStatus: RemoteCleanupStatus;
+  cleanupAttempts?: number;
   cleanupAttemptedAt: string | null;
   cleanupConfirmedAt: string | null;
   cleanupError: string | null;

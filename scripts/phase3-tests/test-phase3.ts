@@ -1098,10 +1098,10 @@ test('B3: Menu-only footage yields insufficient_gameplay with 0 fabricated event
   assert.equal(tsCheck.valid, false);
   assert.equal(tsCheck.errors.length, 2);
 
-  // 5. Gemini error classification (auth, rate limit, network)
-  assert.equal(classifyGeminiError({ status: 401, message: 'API key invalid' }).code, 'AUTH_INVALID_KEY');
-  assert.equal(classifyGeminiError({ status: 429, message: 'RESOURCE_EXHAUSTED quota' }).code, 'RATE_LIMIT_OR_QUOTA');
-  assert.equal(classifyGeminiError(new Error('ECONNRESET fetch failed')).code, 'NETWORK_OR_UPSTREAM_TRANSIENT');
+  // 5. Gemini error classification (auth, rate limit/quota, network — Phase 3.0.2 19-code taxonomy)
+  assert.equal(classifyGeminiError({ status: 401, message: 'API key invalid' }).code, 'INVALID_API_KEY');
+  assert.equal(classifyGeminiError({ status: 429, message: 'RESOURCE_EXHAUSTED quota exceeded' }).code, 'QUOTA_EXCEEDED');
+  assert.equal(classifyGeminiError(new Error('ECONNRESET fetch failed')).code, 'NETWORK_CONNECTION_FAILED');
 });
 
 // ============================================================
@@ -1617,12 +1617,13 @@ test('D2: Non-destructive v5->v6 migration preserves existing rows & marks legac
   assert.equal(v5FkViolations.length, 0, 'Migrated v5->v6+ database must have zero FK violations');
   v5Db.close();
 
-  // Test Backup v6/v7 Export -> Restore -> PRAGMA foreign_key_check
+  // Test Backup v6/v7/v8 Export -> Restore -> PRAGMA foreign_key_check
   const backupV6 = exportDatabaseBackup();
   assert.ok(
     backupV6.format === 'fc26-ai-manager-backup-v6' ||
-      backupV6.format === 'fc26-ai-manager-backup-v7',
-    `Expected backup format v6 or v7, got ${backupV6.format}`
+      backupV6.format === 'fc26-ai-manager-backup-v7' ||
+      backupV6.format === 'fc26-ai-manager-backup-v8',
+    `Expected backup format v6/v7/v8, got ${backupV6.format}`
   );
   const clubCountBefore = listClubs().length;
   restoreDatabaseBackup(backupV6);

@@ -88,24 +88,31 @@ export const DEFAULT_APP_SETTINGS: ApplicationSettings = {
     autoRecoveryEnabled: true,
   },
   ai: {
-    modelId: 'gemini-4-hydrogen',
+    modelId: 'gemini-2.5-flash',
+    usePrimaryModelForAllStages: true,
     analysisQuality: 'balanced',
     maxEvidenceFrames: 24,
     removeDuplicateFrames: true,
     requireUploadConfirmation: true,
     deleteRemoteAfterAnalysis: true,
-    quickAnalysisModelId: 'gemini-4-hydrogen',
-    balancedAnalysisModelId: 'gemini-4-hydrogen',
-    deepAnalysisModelId: 'gemini-4-hydrogen',
-    tacticalSynthesisModelId: 'gemini-4-hydrogen',
-    defaultAnalysisMode: 'quick',
+    quickAnalysisModelId: '',
+    balancedAnalysisModelId: '',
+    deepAnalysisModelId: '',
+    tacticalSynthesisModelId: '',
+    defaultAnalysisMode: 'balanced',
     defaultLanguage: 'en',
-    samplingFpsQuick: 0.5,
-    samplingFpsBalanced: 1.0,
+    samplingFpsQuick: 1.0,
+    samplingFpsBalanced: 2.0,
     samplingFpsDeep: 2.0,
-    downscaleForAnalysis: false,
+    downscaleForAnalysis: true,
+    proxyEnabled: true,
+    proxyAudioInBalanced: false,
+    proxyAudioInDeep: false,
     maxConcurrentRequests: 1,
     maxAnalysisDurationSeconds: 180,
+    uploadTimeoutSeconds: 300,
+    processingTimeoutSeconds: 180,
+    inferenceTimeoutSeconds: 180,
     maxRetryAttempts: 2,
     perMatchBudgetUsd: 1.5,
     dailyBudgetUsd: 5.0,
@@ -297,7 +304,7 @@ export function getDatabaseMetadata(): {
     storageMode,
     dbDirectory: dataDir,
     sizeBytes,
-    schemaVersion: versionRow?.version ?? 7,
+    schemaVersion: versionRow?.version ?? 8,
     tableCounts,
   };
 }
@@ -315,9 +322,9 @@ export function exportDatabaseBackup(): Record<string, unknown> {
     .get() as { version: number | null };
 
   return {
-    format: 'fc26-ai-manager-backup-v7',
+    format: 'fc26-ai-manager-backup-v8',
     exportedAt: new Date().toISOString(),
-    schemaVersion: versionRow?.version ?? 7,
+    schemaVersion: versionRow?.version ?? 8,
     tables: data,
   };
 }
@@ -333,11 +340,12 @@ export function restoreDatabaseBackup(payload: {
     payload.format === 'fc26-ai-manager-backup-v4' ||
     payload.format === 'fc26-ai-manager-backup-v5' ||
     payload.format === 'fc26-ai-manager-backup-v6' ||
-    payload.format === 'fc26-ai-manager-backup-v7';
+    payload.format === 'fc26-ai-manager-backup-v7' ||
+    payload.format === 'fc26-ai-manager-backup-v8';
 
   if ((!isV1 && !isFullBackup) || !payload.tables) {
     throw new Error(
-      'Invalid backup format. Expected fc26-ai-manager-backup-v7 (or legacy v1–v6).'
+      'Invalid backup format. Expected fc26-ai-manager-backup-v8 (or legacy v1–v7).'
     );
   }
 
