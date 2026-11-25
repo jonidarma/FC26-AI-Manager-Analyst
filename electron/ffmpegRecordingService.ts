@@ -19,6 +19,7 @@ import type {
   CapturePrerequisiteCheck,
   MediaProbeResult,
 } from './captureTypes';
+import { parsePartOrSegmentIndexFromFileName } from '../shared/recordingStorage';
 
 export interface FfmpegBinaryResolution {
   ffmpegPath: string | null;
@@ -39,6 +40,7 @@ export interface FfmpegSegmentConfig {
   startSegmentIndex: number;
   outputDirectory: string;
   segmentListPath: string;
+  segmentFilePrefix?: string;
 }
 
 export interface FfmpegProgressSnapshot {
@@ -479,7 +481,9 @@ export function buildFfmpegSegmentArgs(config: FfmpegSegmentConfig): string[] {
 
   // Preserve aspect ratio without distortion, then guarantee even width & height required by yuv420p
   const scaleFilter = `scale='min(${rawW},iw)':'min(${rawH},ih)':force_original_aspect_ratio=decrease,scale=trunc(iw/2)*2:trunc(ih/2)*2`;
-  const outputPattern = path.join(config.outputDirectory, 'segment_%03d.mp4');
+  const rawPrefix = config.segmentFilePrefix?.trim() || 'segment_';
+  const safePrefix = /^[a-zA-Z0-9._-]+$/.test(rawPrefix) ? rawPrefix : 'segment_';
+  const outputPattern = path.join(config.outputDirectory, `${safePrefix}%03d.mp4`);
 
   const args: string[] = [
     '-hide_banner',
@@ -571,10 +575,7 @@ export function buildFfmpegSegmentArgs(config: FfmpegSegmentConfig): string[] {
 }
 
 export function parseSegmentIndexFromFileName(fileName: string): number | null {
-  const match = /^segment_(\d+)\.mp4$/i.exec(path.basename(fileName));
-  if (!match) return null;
-  const parsed = Number.parseInt(match[1], 10);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+  return parsePartOrSegmentIndexFromFileName(fileName);
 }
 
 export async function computeFileSha256(filePath: string): Promise<string> {

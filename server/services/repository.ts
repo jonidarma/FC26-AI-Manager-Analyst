@@ -2084,6 +2084,12 @@ function mapMatchRow(r: Record<string, unknown>, db: ReturnType<typeof getDb>): 
     finalScoreFor: r.final_score_for === null ? null : Number(r.final_score_for),
     finalScoreAgainst: r.final_score_against === null ? null : Number(r.final_score_against),
     hasSecondHalfRecording: Boolean(r.has_second_half_recording),
+    storageLayoutVersion:
+      r.storage_layout_version === null || r.storage_layout_version === undefined
+        ? 1
+        : Number(r.storage_layout_version),
+    storageCareerDirectory: r.storage_career_directory ? String(r.storage_career_directory) : null,
+    storageMatchDirectory: r.storage_match_directory ? String(r.storage_match_directory) : null,
     createdAt: String(r.created_at),
     updatedAt: String(r.updated_at),
     tacticalConfiguration,
@@ -2797,6 +2803,9 @@ function mapRecordingSegmentRow(r: Record<string, unknown>): RecordingSegment {
     matchId: String(r.match_id),
     segmentIndex: Number(r.segment_index),
     filePath: String(r.file_path),
+    relativeMediaPath: r.relative_media_path ? String(r.relative_media_path) : null,
+    originalFileName: r.original_file_name ? String(r.original_file_name) : null,
+    displayFileName: r.display_file_name ? String(r.display_file_name) : null,
     durationSeconds: Number(r.duration_seconds ?? 0),
     sizeBytes: Number(r.size_bytes ?? 0),
     checksum: r.checksum ? String(r.checksum) : null,
@@ -2832,6 +2841,15 @@ function mapMatchSessionRow(
     encoder: r.encoder ? String(r.encoder) : null,
     audioEnabled: Boolean(r.audio_enabled),
     outputDirectory: r.output_directory ? String(r.output_directory) : null,
+    storageLayoutVersion:
+      r.storage_layout_version === null || r.storage_layout_version === undefined
+        ? 1
+        : Number(r.storage_layout_version),
+    careerDirectory: r.career_directory ? String(r.career_directory) : null,
+    matchDirectory: r.match_directory ? String(r.match_directory) : null,
+    sessionDirectory: r.session_directory ? String(r.session_directory) : null,
+    recordedFormationName: r.recorded_formation_name ? String(r.recorded_formation_name) : null,
+    tacticalSnapshotId: r.tactical_snapshot_id ? String(r.tactical_snapshot_id) : null,
     integrityStatus: (r.integrity_status
       ? String(r.integrity_status)
       : 'pending') as RecordingIntegrityStatus,
@@ -2948,6 +2966,12 @@ export function createOrUpsertMatchSession(input: {
   encoder?: string | null;
   audioEnabled?: boolean;
   outputDirectory?: string | null;
+  storageLayoutVersion?: number;
+  careerDirectory?: string | null;
+  matchDirectory?: string | null;
+  sessionDirectory?: string | null;
+  recordedFormationName?: string | null;
+  tacticalSnapshotId?: string | null;
   integrityStatus?: RecordingIntegrityStatus;
   aiEligible?: boolean;
   analysisState?: RecordingAnalysisState;
@@ -2998,15 +3022,19 @@ export function createOrUpsertMatchSession(input: {
   const now = new Date().toISOString();
   const derivedAnalysisState: RecordingAnalysisState =
     input.analysisState ?? (input.aiEligible ? 'verified_awaiting_phase3' : 'not_ready');
+  const resolvedLayoutVersion =
+    input.storageLayoutVersion ?? (input.careerDirectory || input.matchDirectory ? 2 : 1);
 
   const tx = db.transaction(() => {
     db.prepare(`
       INSERT INTO match_sessions (
         id, match_id, half, status, capture_source_id, capture_source_name,
         resolution, fps, duration_seconds, total_bytes, encoder, audio_enabled,
-        output_directory, integrity_status, ai_eligible, analysis_state, failure_reason, diagnostics_path,
+        output_directory, storage_layout_version, career_directory, match_directory,
+        session_directory, recorded_formation_name, tactical_snapshot_id,
+        integrity_status, ai_eligible, analysis_state, failure_reason, diagnostics_path,
         recovery_notes, started_at, ended_at, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET
         status = excluded.status,
         capture_source_id = COALESCE(excluded.capture_source_id, match_sessions.capture_source_id),
@@ -3018,6 +3046,12 @@ export function createOrUpsertMatchSession(input: {
         encoder = COALESCE(excluded.encoder, match_sessions.encoder),
         audio_enabled = excluded.audio_enabled,
         output_directory = COALESCE(excluded.output_directory, match_sessions.output_directory),
+        storage_layout_version = MAX(match_sessions.storage_layout_version, excluded.storage_layout_version),
+        career_directory = COALESCE(excluded.career_directory, match_sessions.career_directory),
+        match_directory = COALESCE(excluded.match_directory, match_sessions.match_directory),
+        session_directory = COALESCE(excluded.session_directory, match_sessions.session_directory),
+        recorded_formation_name = COALESCE(excluded.recorded_formation_name, match_sessions.recorded_formation_name),
+        tactical_snapshot_id = COALESCE(excluded.tactical_snapshot_id, match_sessions.tactical_snapshot_id),
         integrity_status = excluded.integrity_status,
         ai_eligible = excluded.ai_eligible,
         analysis_state = excluded.analysis_state,
@@ -3040,7 +3074,13 @@ export function createOrUpsertMatchSession(input: {
       Math.max(0, Math.round(input.totalBytes ?? 0)),
       input.encoder ?? null,
       input.audioEnabled ? 1 : 0,
-      input.outputDirectory ?? null,
+      input.outputDirectory ?? input.sessionDirectory ?? null,
+      resolvedLayoutVersion,
+      input.careerDirectory ?? null,
+      input.matchDirectory ?? null,
+      input.sessionDirectory ?? input.outputDirectory ?? null,
+      input.recordedFormationName ?? null,
+      input.tacticalSnapshotId ?? null,
       input.integrityStatus ?? 'pending',
       input.aiEligible ? 1 : 0,
       derivedAnalysisState,
@@ -3202,6 +3242,12 @@ export function updateMatchSession(
     encoder: string | null;
     audioEnabled: boolean;
     outputDirectory: string | null;
+    storageLayoutVersion: number;
+    careerDirectory: string | null;
+    matchDirectory: string | null;
+    sessionDirectory: string | null;
+    recordedFormationName: string | null;
+    tacticalSnapshotId: string | null;
     integrityStatus: RecordingIntegrityStatus;
     aiEligible: boolean;
     analysisState: RecordingAnalysisState;
@@ -3245,6 +3291,12 @@ export function updateMatchSession(
           encoder = ?,
           audio_enabled = ?,
           output_directory = ?,
+          storage_layout_version = ?,
+          career_directory = ?,
+          match_directory = ?,
+          session_directory = ?,
+          recorded_formation_name = ?,
+          tactical_snapshot_id = ?,
           integrity_status = ?,
           ai_eligible = ?,
           analysis_state = ?,
@@ -3271,6 +3323,18 @@ export function updateMatchSession(
           : 0
         : Number(existing.audio_enabled ?? 0),
       input.outputDirectory !== undefined ? input.outputDirectory : existing.output_directory,
+      input.storageLayoutVersion !== undefined
+        ? input.storageLayoutVersion
+        : Number(existing.storage_layout_version ?? 1),
+      input.careerDirectory !== undefined ? input.careerDirectory : existing.career_directory,
+      input.matchDirectory !== undefined ? input.matchDirectory : existing.match_directory,
+      input.sessionDirectory !== undefined ? input.sessionDirectory : existing.session_directory,
+      input.recordedFormationName !== undefined
+        ? input.recordedFormationName
+        : existing.recorded_formation_name,
+      input.tacticalSnapshotId !== undefined
+        ? input.tacticalSnapshotId
+        : existing.tactical_snapshot_id,
       input.integrityStatus ?? String(existing.integrity_status ?? 'pending'),
       nextAiEligible ? 1 : 0,
       nextAnalysisState,
@@ -3294,6 +3358,9 @@ export function upsertRecordingSegment(input: {
   matchId: string;
   segmentIndex: number;
   filePath: string;
+  relativeMediaPath?: string | null;
+  originalFileName?: string | null;
+  displayFileName?: string | null;
   durationSeconds: number;
   sizeBytes: number;
   checksum?: string | null;
@@ -3322,12 +3389,16 @@ export function upsertRecordingSegment(input: {
 
   db.prepare(`
     INSERT INTO recording_segments (
-      id, session_id, match_id, segment_index, file_path, duration_seconds,
+      id, session_id, match_id, segment_index, file_path, relative_media_path,
+      original_file_name, display_file_name, duration_seconds,
       size_bytes, checksum, status, resolution, fps, codec, has_audio,
       integrity_status, started_at, ended_at, created_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(session_id, segment_index) DO UPDATE SET
       file_path = excluded.file_path,
+      relative_media_path = COALESCE(excluded.relative_media_path, recording_segments.relative_media_path),
+      original_file_name = COALESCE(excluded.original_file_name, recording_segments.original_file_name),
+      display_file_name = COALESCE(excluded.display_file_name, recording_segments.display_file_name),
       duration_seconds = excluded.duration_seconds,
       size_bytes = excluded.size_bytes,
       checksum = COALESCE(excluded.checksum, recording_segments.checksum),
@@ -3345,6 +3416,9 @@ export function upsertRecordingSegment(input: {
     input.matchId,
     input.segmentIndex,
     input.filePath,
+    input.relativeMediaPath ?? null,
+    input.originalFileName ?? null,
+    input.displayFileName ?? null,
     Math.max(0, Math.round(input.durationSeconds)),
     Math.max(0, Math.round(input.sizeBytes)),
     input.checksum ?? null,

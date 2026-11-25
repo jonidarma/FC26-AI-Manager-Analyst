@@ -42,8 +42,10 @@ import type {
   ImportPreviewResult,
   MatchAnalysisBundle,
   MatchRecord,
+  MatchRecordingStoragePreview,
   MatchSessionWithSegments,
   MatchStatus,
+  MatchStorageFoldersInfo,
   MatchTacticalSnapshot,
   MatchVenue,
   Opponent,
@@ -64,6 +66,7 @@ import type {
   RoleFamiliarityTier,
   RoleFocusValidationResult,
   SquadStatus,
+  StorageOverviewInfo,
   TacticalCatalogItem,
   TacticalFlexibility,
   TacticalMemoryEntry,
@@ -73,6 +76,7 @@ import type {
   TacticalVisionCatalogResponse,
   TacticalVisionRecord,
   ThreeLayerTacticalEvaluation,
+  TrustedFolderKind,
   VideoAnalysisMode,
   VisionOptimizationMode,
   VisionOptimizationResult,
@@ -159,6 +163,11 @@ interface ElectronPreloadApi {
   recoverSession: (sessionId: string) => Promise<RecoveryExecutionResult>;
   openRecordingSegment: (filePath: string) => Promise<{ opened: boolean; path: string }>;
   openSessionFolder: (folderPath: string) => Promise<{ opened: boolean; path: string }>;
+  openTrustedFolder: (payload: {
+    kind: TrustedFolderKind;
+    matchId?: string;
+    sessionId?: string;
+  }) => Promise<{ opened: boolean; path: string }>;
   openDiagnosticsFolder: () => Promise<{ opened: boolean; path: string }>;
   exportSessionDiagnostics: (payload?: {
     sessionId?: string;
@@ -561,6 +570,19 @@ class DesktopBridgeService {
       throw new Error('Opening local folders requires the Windows Electron desktop application.');
     }
     return window.fc26Desktop.openSessionFolder(folderPath);
+  }
+
+  public async openTrustedFolder(payload: {
+    kind: TrustedFolderKind;
+    matchId?: string;
+    sessionId?: string;
+  }): Promise<{ opened: boolean; path: string }> {
+    if (!this.isElectron() || !window.fc26Desktop) {
+      throw new Error(
+        'Opening local recording folders in File Explorer requires the Windows Electron desktop application.'
+      );
+    }
+    return window.fc26Desktop.openTrustedFolder(payload);
   }
 
   public async minimizeWindow(): Promise<boolean> {
@@ -1729,6 +1751,35 @@ class DesktopBridgeService {
     }
     const blob = await res.blob();
     return URL.createObjectURL(blob);
+  }
+
+  // ============================================================
+  // Phase 3.0.1 — Structured Career Mode Recording Storage API
+  // ============================================================
+
+  public getStorageInfo(): Promise<StorageOverviewInfo> {
+    return this.apiFetch<StorageOverviewInfo>('/api/storage/info');
+  }
+
+  public previewMatchStoragePlan(payload: {
+    clubId?: string;
+    clubName: string;
+    opponentName: string;
+    competition: string;
+    matchDate: string;
+    formationName: string;
+    half?: 'first_half' | 'second_half';
+  }): Promise<MatchRecordingStoragePreview> {
+    return this.apiFetch<MatchRecordingStoragePreview>('/api/storage/preview-match-plan', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  }
+
+  public getMatchStorageFolders(matchId: string): Promise<MatchStorageFoldersInfo> {
+    return this.apiFetch<MatchStorageFoldersInfo>(
+      `/api/matches/${encodeURIComponent(matchId)}/storage-folders`
+    );
   }
 }
 

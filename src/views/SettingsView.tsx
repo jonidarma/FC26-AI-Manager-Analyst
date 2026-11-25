@@ -1,4 +1,13 @@
-import { CheckCircle2, Download, Plus, ShieldAlert, Trash2, Upload, Wifi } from 'lucide-react';
+import {
+  CheckCircle2,
+  Download,
+  FolderOpen,
+  Plus,
+  ShieldAlert,
+  Trash2,
+  Upload,
+  Wifi,
+} from 'lucide-react';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { SortableTh } from '../components/common/SortableTh';
 import { useApp } from '../context/AppContext';
@@ -10,6 +19,7 @@ import type {
   ApiUsageLog,
   GeminiConnectionTestResult,
   GeminiModelCapability,
+  StorageOverviewInfo,
   TacticalCatalogItem,
   VideoAnalysisMode,
 } from '../types/domain';
@@ -26,8 +36,11 @@ const CATALOG_CATEGORY_LABELS: Record<TacticalCatalogItem['category'], string> =
 };
 
 export function SettingsView() {
-  const { settings, systemStatus, tacticalCatalog, usageLogs, refreshAll, notify } = useApp();
+  const { capabilities, settings, systemStatus, tacticalCatalog, usageLogs, refreshAll, notify } =
+    useApp();
   const [tab, setTab] = useState<SettingsTab>('capture');
+  const [storageOverview, setStorageOverview] = useState<StorageOverviewInfo | null>(null);
+  const isNativeElectron = capabilities?.environment === 'electron-native';
 
   const usageAccessors = useMemo<
     Record<UsageLogSortKey, (l: ApiUsageLog) => string | number | null>
@@ -82,6 +95,20 @@ export function SettingsView() {
       active = false;
     };
   }, [tab, usageLogs.length]);
+
+  useEffect(() => {
+    if (tab !== 'capture') return;
+    let active = true;
+    desktopBridge
+      .getStorageInfo()
+      .then((info) => {
+        if (active) setStorageOverview(info);
+      })
+      .catch(() => {});
+    return () => {
+      active = false;
+    };
+  }, [tab]);
 
   // Tactical catalog creation state
   const [catalogCategory, setCatalogCategory] =
@@ -256,165 +283,262 @@ export function SettingsView() {
 
       {/* TAB 1: Capture & Storage */}
       {tab === 'capture' && effectiveCapture && (
-        <form
-          onSubmit={(e) => void handleSaveCapture(e)}
-          className="border border-white/[0.08] bg-[#12151B] rounded-lg p-6 space-y-5 max-w-4xl"
-        >
-          <h2 className="text-[16px] font-semibold text-white">Local Recording Configuration</h2>
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-[13px]">
-            <div>
-              <label className="block text-[12px] text-[#9AA4B4] mb-1.5">Primary Resolution</label>
-              <select
-                value={effectiveCapture.resolution}
-                onChange={(e) =>
-                  setCaptureDraft({
-                    ...effectiveCapture,
-                    resolution: e.target.value as '1920x1080' | '1280x720',
-                  })
-                }
-                className="w-full bg-[#0C0F14] border border-white/[0.12] rounded-md px-3 py-2 text-white font-mono"
-              >
-                <option value="1920x1080">1920×1080 (Full HD)</option>
-                <option value="1280x720">1280×720 (HD Fallback)</option>
-              </select>
+        <div className="space-y-6 max-w-4xl">
+          <form
+            onSubmit={(e) => void handleSaveCapture(e)}
+            className="border border-white/[0.08] bg-[#12151B] rounded-lg p-6 space-y-5"
+          >
+            <h2 className="text-[16px] font-semibold text-white">Local Recording Configuration</h2>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-[13px]">
+              <div>
+                <label className="block text-[12px] text-[#9AA4B4] mb-1.5">Primary Resolution</label>
+                <select
+                  value={effectiveCapture.resolution}
+                  onChange={(e) =>
+                    setCaptureDraft({
+                      ...effectiveCapture,
+                      resolution: e.target.value as '1920x1080' | '1280x720',
+                    })
+                  }
+                  className="w-full bg-[#0C0F14] border border-white/[0.12] rounded-md px-3 py-2 text-white font-mono"
+                >
+                  <option value="1920x1080">1920×1080 (Full HD)</option>
+                  <option value="1280x720">1280×720 (HD Fallback)</option>
+                </select>
+              </div>
+
+              <div>
+                <label className="block text-[12px] text-[#9AA4B4] mb-1.5">
+                  Capture Frame Rate (FPS)
+                </label>
+                <input
+                  type="number"
+                  min={5}
+                  max={60}
+                  value={effectiveCapture.fps}
+                  onChange={(e) =>
+                    setCaptureDraft({ ...effectiveCapture, fps: Number(e.target.value) })
+                  }
+                  className="w-full bg-[#0C0F14] border border-white/[0.12] rounded-md px-3 py-2 text-white font-mono tabular-nums"
+                />
+              </div>
+
+              <div>
+                <label className="block text-[12px] text-[#9AA4B4] mb-1.5">
+                  Video Bitrate (kbps)
+                </label>
+                <input
+                  type="number"
+                  min={1000}
+                  max={20000}
+                  step={250}
+                  value={effectiveCapture.bitrateKbps}
+                  onChange={(e) =>
+                    setCaptureDraft({ ...effectiveCapture, bitrateKbps: Number(e.target.value) })
+                  }
+                  className="w-full bg-[#0C0F14] border border-white/[0.12] rounded-md px-3 py-2 text-white font-mono tabular-nums"
+                />
+              </div>
+
+              <div>
+                <label className="block text-[12px] text-[#9AA4B4] mb-1.5">
+                  Automatic Segment Duration (2–5 Minutes)
+                </label>
+                <select
+                  value={effectiveCapture.segmentDurationMinutes}
+                  onChange={(e) =>
+                    setCaptureDraft({
+                      ...effectiveCapture,
+                      segmentDurationMinutes: Number(e.target.value),
+                    })
+                  }
+                  className="w-full bg-[#0C0F14] border border-white/[0.12] rounded-md px-3 py-2 text-white font-mono tabular-nums"
+                >
+                  <option value={2}>2 minutes</option>
+                  <option value={3}>3 minutes (Recommended)</option>
+                  <option value={4}>4 minutes</option>
+                  <option value={5}>5 minutes</option>
+                </select>
+              </div>
+
+              <div>
+                <label className="block text-[12px] text-[#9AA4B4] mb-1.5">
+                  Maximum Session Duration (Minutes)
+                </label>
+                <input
+                  type="number"
+                  min={5}
+                  max={120}
+                  value={effectiveCapture.maxRecordingMinutes}
+                  onChange={(e) =>
+                    setCaptureDraft({
+                      ...effectiveCapture,
+                      maxRecordingMinutes: Number(e.target.value),
+                    })
+                  }
+                  className="w-full bg-[#0C0F14] border border-white/[0.12] rounded-md px-3 py-2 text-white font-mono tabular-nums"
+                />
+              </div>
+
+              <div>
+                <label className="block text-[12px] text-[#9AA4B4] mb-1.5">
+                  Local Windows Storage Path
+                </label>
+                <input
+                  type="text"
+                  value={effectiveCapture.storageDirectory}
+                  onChange={(e) =>
+                    setCaptureDraft({ ...effectiveCapture, storageDirectory: e.target.value })
+                  }
+                  className="w-full bg-[#0C0F14] border border-white/[0.12] rounded-md px-3 py-2 text-white font-mono text-[12px]"
+                />
+              </div>
             </div>
 
-            <div>
-              <label className="block text-[12px] text-[#9AA4B4] mb-1.5">
-                Capture Frame Rate (FPS)
-              </label>
-              <input
-                type="number"
-                min={5}
-                max={60}
-                value={effectiveCapture.fps}
-                onChange={(e) =>
-                  setCaptureDraft({ ...effectiveCapture, fps: Number(e.target.value) })
-                }
-                className="w-full bg-[#0C0F14] border border-white/[0.12] rounded-md px-3 py-2 text-white font-mono tabular-nums"
-              />
-            </div>
-
-            <div>
-              <label className="block text-[12px] text-[#9AA4B4] mb-1.5">
-                Video Bitrate (kbps)
-              </label>
-              <input
-                type="number"
-                min={1000}
-                max={20000}
-                step={250}
-                value={effectiveCapture.bitrateKbps}
-                onChange={(e) =>
-                  setCaptureDraft({ ...effectiveCapture, bitrateKbps: Number(e.target.value) })
-                }
-                className="w-full bg-[#0C0F14] border border-white/[0.12] rounded-md px-3 py-2 text-white font-mono tabular-nums"
-              />
-            </div>
-
-            <div>
-              <label className="block text-[12px] text-[#9AA4B4] mb-1.5">
-                Automatic Segment Duration (2–5 Minutes)
-              </label>
-              <select
-                value={effectiveCapture.segmentDurationMinutes}
-                onChange={(e) =>
-                  setCaptureDraft({
-                    ...effectiveCapture,
-                    segmentDurationMinutes: Number(e.target.value),
-                  })
-                }
-                className="w-full bg-[#0C0F14] border border-white/[0.12] rounded-md px-3 py-2 text-white font-mono tabular-nums"
-              >
-                <option value={2}>2 minutes</option>
-                <option value={3}>3 minutes (Recommended)</option>
-                <option value={4}>4 minutes</option>
-                <option value={5}>5 minutes</option>
-              </select>
-            </div>
-
-            <div>
-              <label className="block text-[12px] text-[#9AA4B4] mb-1.5">
-                Maximum Session Duration (Minutes)
-              </label>
-              <input
-                type="number"
-                min={5}
-                max={120}
-                value={effectiveCapture.maxRecordingMinutes}
-                onChange={(e) =>
-                  setCaptureDraft({
-                    ...effectiveCapture,
-                    maxRecordingMinutes: Number(e.target.value),
-                  })
-                }
-                className="w-full bg-[#0C0F14] border border-white/[0.12] rounded-md px-3 py-2 text-white font-mono tabular-nums"
-              />
-            </div>
-
-            <div>
-              <label className="block text-[12px] text-[#9AA4B4] mb-1.5">
-                Local Windows Storage Path
-              </label>
-              <input
-                type="text"
-                value={effectiveCapture.storageDirectory}
-                onChange={(e) =>
-                  setCaptureDraft({ ...effectiveCapture, storageDirectory: e.target.value })
-                }
-                className="w-full bg-[#0C0F14] border border-white/[0.12] rounded-md px-3 py-2 text-white font-mono text-[12px]"
-              />
-            </div>
-          </div>
-
-          <div className="pt-3 border-t border-white/[0.08] space-y-2.5 text-[13px]">
-            <label className="flex items-start gap-2.5 cursor-pointer text-[#D7DDE7]">
-              <input
-                type="checkbox"
-                checked={effectiveCapture.audioEnabled}
-                onChange={(e) =>
-                  setCaptureDraft({ ...effectiveCapture, audioEnabled: e.target.checked })
-                }
-                className="accent-emerald-500 mt-1"
-              />
-              <span>
-                Record Game Audio via Windows System Loopback (Disabled by default to minimize file
-                size).{' '}
-                <span className="text-[#8A94A6]">
-                  Note: Windows loopback captures system output audio, which may include sound from
-                  other active desktop applications. If unavailable, recording falls back cleanly to
-                  video-only.
+            <div className="pt-3 border-t border-white/[0.08] space-y-2.5 text-[13px]">
+              <label className="flex items-start gap-2.5 cursor-pointer text-[#D7DDE7]">
+                <input
+                  type="checkbox"
+                  checked={effectiveCapture.audioEnabled}
+                  onChange={(e) =>
+                    setCaptureDraft({ ...effectiveCapture, audioEnabled: e.target.checked })
+                  }
+                  className="accent-emerald-500 mt-1"
+                />
+                <span>
+                  Record Game Audio via Windows System Loopback (Disabled by default to minimize
+                  file size).{' '}
+                  <span className="text-[#8A94A6]">
+                    Note: Windows loopback captures system output audio, which may include sound
+                    from other active desktop applications. If unavailable, recording falls back
+                    cleanly to video-only.
+                  </span>
                 </span>
-              </span>
-            </label>
+              </label>
 
-            <label className="flex items-center gap-2.5 cursor-pointer text-[#D7DDE7]">
-              <input
-                type="checkbox"
-                checked={effectiveCapture.autoRecoveryEnabled}
-                onChange={(e) =>
-                  setCaptureDraft({ ...effectiveCapture, autoRecoveryEnabled: e.target.checked })
-                }
-                className="accent-emerald-500"
-              />
-              Persist segment manifests automatically for crash recovery
-            </label>
+              <label className="flex items-center gap-2.5 cursor-pointer text-[#D7DDE7]">
+                <input
+                  type="checkbox"
+                  checked={effectiveCapture.autoRecoveryEnabled}
+                  onChange={(e) =>
+                    setCaptureDraft({ ...effectiveCapture, autoRecoveryEnabled: e.target.checked })
+                  }
+                  className="accent-emerald-500"
+                />
+                Persist segment manifests automatically for crash recovery
+              </label>
 
-            <div className="text-[12px] text-[#8A94A6]">
-              Privacy lock: Microphone recording is permanently disabled across all versions.
+              <div className="text-[12px] text-[#8A94A6]">
+                Privacy lock: Microphone recording is permanently disabled across all versions.
+              </div>
             </div>
-          </div>
 
-          <div className="flex justify-end">
-            <button
-              type="submit"
-              disabled={saving}
-              className="px-4 py-2 rounded-md bg-emerald-600 hover:bg-emerald-500 text-white text-[13px] font-medium"
-            >
-              Save Capture Settings
-            </button>
-          </div>
-        </form>
+            <div className="flex justify-end">
+              <button
+                type="submit"
+                disabled={saving}
+                className="px-4 py-2 rounded-md bg-emerald-600 hover:bg-emerald-500 text-white text-[13px] font-medium"
+              >
+                Save Capture Settings
+              </button>
+            </div>
+          </form>
+
+          {/* Phase 3.0.1 Recording Storage Architecture Overview */}
+          {storageOverview && (
+            <section className="border border-white/[0.08] bg-[#12151B] rounded-lg p-6 space-y-4">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <h2 className="text-[16px] font-semibold text-white">
+                    Recording Storage Architecture (v2 Structured &amp; Legacy v1)
+                  </h2>
+                  <p className="text-[12px] text-[#8A94A6] mt-0.5">
+                    New recordings save directly into human-readable Career Mode folders while
+                    preserving existing legacy recordings and SQLite database paths untouched.
+                  </p>
+                </div>
+                {isNativeElectron ? (
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      try {
+                        await desktopBridge.openTrustedFolder({ kind: 'storage_root' });
+                      } catch (err) {
+                        notify(
+                          'error',
+                          err instanceof Error ? err.message : 'Failed to open storage folder'
+                        );
+                      }
+                    }}
+                    className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-md border border-emerald-500/45 bg-emerald-600/15 hover:bg-emerald-600/25 text-[12px] text-emerald-200 font-medium"
+                  >
+                    <FolderOpen className="w-3.5 h-3.5" />
+                    Open Storage Folder
+                  </button>
+                ) : (
+                  <span className="text-[11px] font-mono text-[#7D8798]">
+                    Explorer open requires Electron Desktop
+                  </span>
+                )}
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-3 text-[12px]">
+                <div className="rounded border border-white/[0.07] bg-[#0C0F14] p-3">
+                  <div className="text-[#7D8798]">Authoritative Storage Root</div>
+                  <div className="mt-1 font-mono text-[11px] text-white break-all">
+                    {storageOverview.appStorageRoot}
+                  </div>
+                </div>
+                <div className="rounded border border-white/[0.07] bg-[#0C0F14] p-3">
+                  <div className="text-[#7D8798]">SQLite Database Directory</div>
+                  <div className="mt-1 font-mono text-[11px] text-[#C5CCD7] break-all">
+                    {storageOverview.databaseDirectory}
+                  </div>
+                </div>
+                <div className="rounded border border-white/[0.07] bg-[#0C0F14] p-3">
+                  <div className="text-[#7D8798]">Recorded Sessions by Layout</div>
+                  <div className="mt-1 font-mono text-white">
+                    {storageOverview.stats.structuredSessionsCount} Structured v2 ·{' '}
+                    {storageOverview.stats.legacySessionsCount} Legacy v1
+                  </div>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 text-[12px]">
+                <div className="rounded border border-white/[0.07] bg-[#0C0F14] p-3.5 space-y-2">
+                  <div className="font-semibold text-white">Naming Convention Templates</div>
+                  <div className="font-mono text-[11px] space-y-1.5 text-[#9AA4B4]">
+                    <div>
+                      <span className="text-[#7D8798]">Career Folder: </span>
+                      <span className="text-[#D7DDE7]">
+                        {storageOverview.namingConventions.careerFolderTemplate}
+                      </span>
+                    </div>
+                    <div>
+                      <span className="text-[#7D8798]">Match Folder: </span>
+                      <span className="text-[#D7DDE7]">
+                        {storageOverview.namingConventions.matchFolderTemplate}
+                      </span>
+                    </div>
+                    <div>
+                      <span className="text-[#7D8798]">Video File: </span>
+                      <span className="text-emerald-300">
+                        {storageOverview.namingConventions.videoFileTemplate}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="rounded border border-white/[0.07] bg-[#0C0F14] p-3.5 space-y-1.5">
+                  <div className="font-semibold text-white">Example Career Mode Folder Tree</div>
+                  <pre className="font-mono text-[10px] leading-relaxed text-[#B8C0CE] overflow-x-auto whitespace-pre">
+                    {storageOverview.exampleTree.join('\n')}
+                  </pre>
+                </div>
+              </div>
+            </section>
+          )}
+        </div>
       )}
 
       {/* TAB 2: AI & Evidence Policy */}

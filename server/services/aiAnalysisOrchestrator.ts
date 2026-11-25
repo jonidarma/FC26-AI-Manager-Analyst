@@ -57,6 +57,15 @@ import {
   normalizeTacticalVisionKey,
 } from './tacticalVisionService.ts';
 import {
+  isMediaPathError,
+  MediaPathError,
+} from '../../shared/recordingStorage.ts';
+import {
+  exportAnalysisArtifactJson,
+  resolveRecordingSegmentMediaPath,
+  writeMatchMetadataManifest,
+} from './recordingMediaResolver.ts';
+import {
   cleanupTempAnalysisDir,
   extractEvidenceFrame,
   getTestClipsDir,
@@ -636,6 +645,20 @@ export async function startAnalysisJob(
     );
   }
 
+  if (targetSession.matchId !== input.matchId) {
+    throw new MediaPathError(
+      'RECORDING_SESSION_MISMATCH',
+      `Recording session "${targetSession.id}" belongs to a different match and cannot be analyzed for match "${input.matchId}".`
+    );
+  }
+
+  if (targetSession.half !== input.half) {
+    throw new MediaPathError(
+      'RECORDING_SESSION_MISMATCH',
+      `Recording session "${targetSession.id}" is recorded for ${targetSession.half.replace('_', ' ')}, not ${input.half.replace('_', ' ')}.`
+    );
+  }
+
   if (!targetSession.aiEligible || targetSession.segments.length === 0) {
     throw new Error(
       `Recording session is not AI-eligible (${targetSession.failureReason ?? 'no verified MP4 segments found'}).`
@@ -898,12 +921,22 @@ async function executeAnalysisJobPipeline(params: {
       checkCancelledOrThrow();
       const seg = validSegments[i];
       const vStart = Date.now();
-      const probe = await validateVideoFile(seg.filePath, params.allowedMediaDirs);
+      const resolvedMedia = resolveRecordingSegmentMediaPath({
+        matchId,
+        expectedHalf: half,
+        session,
+        segment: seg,
+        extraAllowedDirs: params.allowedMediaDirs,
+      });
+
+      const probe = await validateVideoFile(resolvedMedia.resolvedPath, params.allowedMediaDirs);
       timing.validationMs += Date.now() - vStart;
 
       if (!probe.valid) {
-        throw new Error(
-          `Segment #${seg.segmentIndex} failed FFprobe integrity validation: ${probe.error ?? 'corrupted file'}`
+        throw new MediaPathError(
+          'MEDIA_INTEGRITY_FAILED',
+          `Segment #${seg.segmentIndex} failed FFprobe integrity validation: ${probe.error ?? 'corrupted file'}`,
+          { matchId, sessionId, segmentId: seg.id, segmentIndex: seg.segmentIndex }
         );
       }
 
@@ -920,7 +953,7 @@ async function executeAnalysisJobPipeline(params: {
       const pStart = Date.now();
       const prepared = await prepareAnalysisVideoAsset({
         jobId,
-        filePath: seg.filePath,
+        filePath: resolvedMedia.resolvedPath,
         downscale: Boolean(settings.ai.downscaleForAnalysis),
         allowedBaseDirs: params.allowedMediaDirs,
       });
@@ -1216,6 +1249,7 @@ async function executeAnalysisJobPipeline(params: {
           if (!overlapsReplay && framesExtracted < maxFrames) {
             frameFileName = await extractEvidenceFrame({
               matchId,
+              half,
               videoFilePath: asset.localFilePath,
               timestampSeconds: clampedStart,
               labelSlug: `${jobId.slice(0, 6)}_s${asset.segmentIndex}_${framesExtracted}`,
@@ -1700,7 +1734,36 @@ async function executeAnalysisJobPipeline(params: {
           JSON.stringify(compPayload),
           compPayload.createdAt
         );
+
+        try {
+          exportAnalysisArtifactJson(matchId, 'match-comparison.json', compPayload);
+        } catch {
+          // supplementary file mirror is non-fatal
+        }
       }
+    }
+
+    // Export supplementary secret-safe AI Analysis JSON mirror for structured v2 matches
+    try {
+      const bundleSnapshot = listMatchAnalysisBundle(matchId, jobId, db);
+      exportAnalysisArtifactJson(
+        matchId,
+        half === 'first_half' ? 'first-half-analysis.json' : 'second-half-analysis.json',
+        {
+          jobId,
+          half,
+          modelVideoId: params.modelVideoId,
+          modelSynthesisId: params.modelSynthesisId,
+          briefing: bundleSnapshot.briefing,
+          visionAssessment: bundleSnapshot.visionAssessment,
+          classifications: bundleSnapshot.classifications,
+          observations: bundleSnapshot.observations,
+          recommendations: bundleSnapshot.recommendations,
+        }
+      );
+      writeMatchMetadataManifest(matchId);
+    } catch {
+      // supplementary file mirror is non-fatal; SQLite remains authoritative
     }
 
     // Mark session analysis_state completed & finalize job status truthfully
@@ -1744,6 +1807,29 @@ async function executeAnalysisJobPipeline(params: {
         timingBreakdown: timing,
         errorCode: 'USER_CANCELLED',
         errorMessage: 'Analysis job was cancelled by the user.',
+      });
+    } else if (isMediaPathError(err)) {
+      // Local recording media path / security / integrity error — NEVER misclassify as GEMINI_ANALYSIS_ERROR!
+      insertApiUsageLog({
+        matchId,
+        analysisJobId: jobId,
+        modelId: params.modelVideoId,
+        stage: 'local_media_validation_error',
+        inputTokens: 0,
+        outputTokens: 0,
+        requestDurationMs: timing.totalElapsedMs,
+        status: 'error',
+        errorMessage: `${err.code}: ${err.message}`,
+      });
+      updateJobProgress(db, jobId, {
+        status: 'failed',
+        currentStage: 'failed',
+        actualCostUsd: Number(cumulativeCostUsd.toFixed(6)),
+        completedAt: finishedAt,
+        elapsedMs: timing.totalElapsedMs,
+        timingBreakdown: timing,
+        errorCode: err.code,
+        errorMessage: err.message,
       });
     } else {
       const classified = classifyGeminiError(err);

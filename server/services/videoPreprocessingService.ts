@@ -4,7 +4,16 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
+import {
+  canonicalizeAndContainPath,
+  getHalfFolderName,
+} from '../../shared/recordingStorage.ts';
 import { resolveDatabaseLocation } from '../db/database.ts';
+import {
+  getAuthoritativeStorageRoots,
+  getStructuredEvidenceFramesDir,
+  getStructuredMatchRootDir,
+} from './recordingMediaResolver.ts';
 
 const execFileAsync = promisify(execFile);
 
@@ -57,25 +66,41 @@ export function resolveServerFfmpegBinaries(): ServerFfmpegBinaries {
 
   const resourcesDir = process.env.FC26_RESOURCES_DIR?.trim();
   if (resourcesDir) {
-    const resFfmpeg = path.join(resourcesDir, 'bin', ffmpegBin);
-    const resFfprobe = path.join(resourcesDir, 'bin', ffprobeBin);
-    if (fs.existsSync(resFfmpeg)) {
-      return {
-        ffmpegPath: resFfmpeg,
-        ffprobePath: fs.existsSync(resFfprobe) ? resFfprobe : null,
-        source: 'packaged-resource',
-      };
+    // Packaged Electron places FFmpeg in resources/ffmpeg/ (electron-builder extraResources),
+    // while older layouts may use resources/bin/. Check both.
+    const resourceSubdirs = [
+      path.join(resourcesDir, 'ffmpeg'),
+      path.join(resourcesDir, 'ffmpeg', `${process.platform}-${process.arch}`),
+      path.join(resourcesDir, 'bin'),
+    ];
+    for (const dir of resourceSubdirs) {
+      const resFfmpeg = path.join(dir, ffmpegBin);
+      const resFfprobe = path.join(dir, ffprobeBin);
+      if (fs.existsSync(resFfmpeg)) {
+        return {
+          ffmpegPath: resFfmpeg,
+          ffprobePath: fs.existsSync(resFfprobe) ? resFfprobe : null,
+          source: 'packaged-resource',
+        };
+      }
     }
   }
 
-  const devFfmpeg = path.resolve(process.cwd(), 'resources', 'bin', ffmpegBin);
-  const devFfprobe = path.resolve(process.cwd(), 'resources', 'bin', ffprobeBin);
-  if (fs.existsSync(devFfmpeg)) {
-    return {
-      ffmpegPath: devFfmpeg,
-      ffprobePath: fs.existsSync(devFfprobe) ? devFfprobe : null,
-      source: 'dev-resource',
-    };
+  const devSubdirs = [
+    path.resolve(process.cwd(), 'resources', 'ffmpeg', `${process.platform}-${process.arch}`),
+    path.resolve(process.cwd(), 'resources', 'ffmpeg'),
+    path.resolve(process.cwd(), 'resources', 'bin'),
+  ];
+  for (const dir of devSubdirs) {
+    const devFfmpeg = path.join(dir, ffmpegBin);
+    const devFfprobe = path.join(dir, ffprobeBin);
+    if (fs.existsSync(devFfmpeg)) {
+      return {
+        ffmpegPath: devFfmpeg,
+        ffprobePath: fs.existsSync(devFfprobe) ? devFfprobe : null,
+        source: 'dev-resource',
+      };
+    }
   }
 
   // Fallback to system PATH
@@ -102,59 +127,91 @@ export function resolveServerFfmpegBinaries(): ServerFfmpegBinaries {
 }
 
 export function getAllowedMediaRoots(extraAllowedDirs: string[] = []): string[] {
-  const { dataDir } = resolveDatabaseLocation();
-  const roots = [
-    dataDir,
-    path.join(dataDir, 'recordings'),
-    path.join(dataDir, 'evidence_frames'),
-    path.join(dataDir, 'analysis_temp'),
-    path.join(dataDir, 'test_clips'),
+  return getAuthoritativeStorageRoots([
     path.join(os.homedir(), 'Documents', 'FC26_AI_Manager'),
     ...extraAllowedDirs,
-  ];
-  return Array.from(new Set(roots.map((r) => path.resolve(r))));
+  ]);
 }
 
 /**
  * Strictly confines media file paths to approved application directories, rejecting
- * path traversal (`..`), null bytes, and arbitrary filesystem reads.
+ * path traversal (`..`), null bytes, symlink/Windows junction escapes, and arbitrary reads.
  */
 export function assertConfinedMediaPath(
   candidatePath: string,
   allowedBaseDirs?: string[]
 ): string {
-  if (!candidatePath || candidatePath.includes('\0')) {
-    throw new Error('Invalid media path: empty or contains null byte.');
-  }
-  const resolved = path.resolve(candidatePath);
-  const roots = allowedBaseDirs && allowedBaseDirs.length > 0
-    ? allowedBaseDirs.map((d) => path.resolve(d))
-    : getAllowedMediaRoots();
+  const roots =
+    allowedBaseDirs && allowedBaseDirs.length > 0
+      ? allowedBaseDirs.map((d) => path.resolve(d))
+      : getAllowedMediaRoots();
 
-  const allowed = roots.some((root) => {
-    const normalizedRoot = root.endsWith(path.sep) ? root : root + path.sep;
-    return resolved === root || resolved.startsWith(normalizedRoot);
+  return canonicalizeAndContainPath(candidatePath, roots, {
+    allowEqualRoot: true,
   });
-
-  if (!allowed) {
-    throw new Error(
-      `Security block: media path "${path.basename(resolved)}" lies outside approved application recording/data directories.`
-    );
-  }
-  return resolved;
 }
 
-export function getEvidenceFramesDir(matchId: string): string {
+export function getEvidenceFramesDir(
+  matchId: string,
+  half?: 'first_half' | 'second_half'
+): string {
   const safeMatchId = matchId.replace(/[^a-zA-Z0-9_-]/g, '');
   if (!safeMatchId) {
     throw new Error('Invalid matchId for evidence frames directory.');
   }
+
+  if (half) {
+    const structuredDir = getStructuredEvidenceFramesDir(matchId, half);
+    if (structuredDir) {
+      if (!fs.existsSync(structuredDir)) {
+        fs.mkdirSync(structuredDir, { recursive: true });
+      }
+      return structuredDir;
+    }
+  }
+
   const { dataDir } = resolveDatabaseLocation();
   const dir = path.join(dataDir, 'evidence_frames', safeMatchId);
   if (!fs.existsSync(dir)) {
     fs.mkdirSync(dir, { recursive: true });
   }
   return dir;
+}
+
+/**
+ * Resolves an evidence frame image path safely across both structured v2
+ * ({MatchDir}/Evidence Frames/First Half|Second Half/) and legacy v1
+ * ({dataDir}/evidence_frames/{matchId}/) directories.
+ */
+export function resolveEvidenceFrameFilePath(matchId: string, fileName: string): string | null {
+  const baseName = path.basename(fileName);
+  if (baseName !== fileName || !/^[a-zA-Z0-9._-]+\.(jpg|jpeg|png|webp)$/i.test(baseName)) {
+    throw new Error('Invalid evidence frame file name.');
+  }
+
+  const candidateDirs: string[] = [];
+  const structuredMatchRoot = getStructuredMatchRootDir(matchId);
+  if (structuredMatchRoot) {
+    candidateDirs.push(
+      path.join(structuredMatchRoot, 'Evidence Frames', getHalfFolderName('first_half')),
+      path.join(structuredMatchRoot, 'Evidence Frames', getHalfFolderName('second_half'))
+    );
+  }
+  const safeMatchId = matchId.replace(/[^a-zA-Z0-9_-]/g, '');
+  if (safeMatchId) {
+    const { dataDir } = resolveDatabaseLocation();
+    candidateDirs.push(path.join(dataDir, 'evidence_frames', safeMatchId));
+  }
+
+  for (const dir of candidateDirs) {
+    if (!fs.existsSync(dir)) continue;
+    const candidate = path.join(dir, baseName);
+    const confined = canonicalizeAndContainPath(candidate, [dir], { allowEqualRoot: false });
+    if (fs.existsSync(confined) && fs.statSync(confined).isFile()) {
+      return confined;
+    }
+  }
+  return null;
 }
 
 export function getAnalysisTempDir(jobId: string): string {
@@ -445,6 +502,7 @@ export async function prepareAnalysisVideoAsset(input: {
 
 export async function extractEvidenceFrame(input: {
   matchId: string;
+  half?: 'first_half' | 'second_half';
   videoFilePath: string;
   timestampSeconds: number;
   labelSlug: string;
@@ -462,7 +520,7 @@ export async function extractEvidenceFrame(input: {
 
   if (!fs.existsSync(confinedVideo)) return null;
 
-  const framesDir = getEvidenceFramesDir(input.matchId);
+  const framesDir = getEvidenceFramesDir(input.matchId, input.half);
   const safeSlug = input.labelSlug.replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 28) || 'ev';
   const fileName = `frame_${safeSlug}_${Math.max(0, Math.round(input.timestampSeconds * 10))}.jpg`;
   const outPath = path.join(framesDir, fileName);

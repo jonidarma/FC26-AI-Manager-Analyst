@@ -30,6 +30,15 @@ import {
   parseSegmentIndexFromFileName,
   probeMediaFile,
 } from './ffmpegRecordingService';
+import {
+  buildStructuredSegmentFileName,
+  canonicalizeAndContainPath,
+  isMediaPathError,
+  MediaPathError,
+  scrubSecretsFromMetadata,
+  toPortableRelativePath,
+  type MatchRecordingStoragePlan,
+} from '../shared/recordingStorage';
 
 const ALLOWED_TRANSITIONS: Record<CaptureManifest['status'], Array<CaptureManifest['status']>> = {
   recording: ['paused', 'finalizing', 'recovered', 'failed', 'discarded'],
@@ -55,12 +64,24 @@ function sanitizePathSegment(raw: string, label: string): string {
 
 export class CaptureSessionEngine {
   public readonly rootDir: string;
+  public readonly appStorageRoot: string;
   private readonly legacyManifestsDir: string;
+  private readonly sessionManifestPathCache = new Map<string, string>();
 
-  constructor(recordingsRootDir: string) {
+  constructor(recordingsRootDir: string, appStorageRoot?: string) {
     this.rootDir = path.resolve(recordingsRootDir);
+    this.appStorageRoot = appStorageRoot ? path.resolve(appStorageRoot) : this.rootDir;
     this.legacyManifestsDir = path.join(this.rootDir, 'manifests');
     fs.mkdirSync(this.rootDir, { recursive: true });
+    if (this.appStorageRoot !== this.rootDir) {
+      fs.mkdirSync(this.appStorageRoot, { recursive: true });
+    }
+  }
+
+  public getAllowedRoots(): string[] {
+    return this.appStorageRoot !== this.rootDir
+      ? [this.rootDir, this.appStorageRoot]
+      : [this.rootDir];
   }
 
   public canTransition(
@@ -81,23 +102,41 @@ export class CaptureSessionEngine {
     return resolved;
   }
 
+  private resolveTrackedSessionDir(matchId: string, sessionId: string): string {
+    const cached = this.sessionManifestPathCache.get(sessionId);
+    if (cached) {
+      return path.dirname(cached);
+    }
+    const found = this.findManifestPathBySessionId(sessionId);
+    if (found && path.basename(found) !== `${sessionId}.json`) {
+      return path.dirname(found);
+    }
+    return this.getSafeSessionDirectory(matchId, sessionId);
+  }
+
   public getManifestPath(matchId: string, sessionId: string): string {
+    const cached = this.sessionManifestPathCache.get(sessionId);
+    if (cached) return cached;
     const sessionDir = this.getSafeSessionDirectory(matchId, sessionId);
-    return path.join(sessionDir, 'manifest.json');
+    const v1Path = path.join(sessionDir, 'manifest.json');
+    if (fs.existsSync(v1Path)) return v1Path;
+    const discovered = this.findManifestPathBySessionId(sessionId);
+    if (discovered) return discovered;
+    return v1Path;
   }
 
   public getSegmentListPath(matchId: string, sessionId: string): string {
-    const sessionDir = this.getSafeSessionDirectory(matchId, sessionId);
+    const sessionDir = this.resolveTrackedSessionDir(matchId, sessionId);
     return path.join(sessionDir, '.segments.list');
   }
 
   public getSessionDiagnosticsLogPath(matchId: string, sessionId: string): string {
-    const sessionDir = this.getSafeSessionDirectory(matchId, sessionId);
+    const sessionDir = this.resolveTrackedSessionDir(matchId, sessionId);
     return path.join(sessionDir, 'diagnostics.jsonl');
   }
 
   public getSessionDiagnosticsSummaryPath(matchId: string, sessionId: string): string {
-    const sessionDir = this.getSafeSessionDirectory(matchId, sessionId);
+    const sessionDir = this.resolveTrackedSessionDir(matchId, sessionId);
     return path.join(sessionDir, 'diagnostics-summary.json');
   }
 
@@ -218,9 +257,19 @@ export class CaptureSessionEngine {
         events: recentEvents,
       };
 
-      const tmpPath = `${summaryPath}.${crypto.randomBytes(4).toString('hex')}.tmp`;
-      fs.writeFileSync(tmpPath, JSON.stringify(report, null, 2), 'utf8');
-      fs.renameSync(tmpPath, summaryPath);
+      const scrubbedReport = scrubSecretsFromMetadata(report);
+      const writeReportAtomic = (destPath: string) => {
+        fs.mkdirSync(path.dirname(destPath), { recursive: true });
+        const tmpPath = `${destPath}.${crypto.randomBytes(4).toString('hex')}.tmp`;
+        fs.writeFileSync(tmpPath, JSON.stringify(scrubbedReport, null, 2), 'utf8');
+        fs.renameSync(tmpPath, destPath);
+      };
+
+      const targetSummaryPath =
+        manifest.storageLayoutVersion === 2 && manifest.diagnosticsSummaryPath
+          ? canonicalizeAndContainPath(manifest.diagnosticsSummaryPath, this.getAllowedRoots())
+          : summaryPath;
+      writeReportAtomic(targetSummaryPath);
 
       // Append one-line entry to bounded global capture-diagnostics.log
       const globalLogPath = path.join(this.getGlobalDiagnosticsDir(), 'capture-diagnostics.log');
@@ -229,46 +278,106 @@ export class CaptureSessionEngine {
         if (fs.existsSync(rotated)) fs.unlinkSync(rotated);
         fs.renameSync(globalLogPath, rotated);
       }
-      const line = `${new Date().toISOString()} session=${manifest.sessionId} match=${manifest.matchId} status=${manifest.status} integrity=${manifest.integrityStatus} segments=${manifest.segments.length} bytes=${manifest.totalBytes} chunksMain=${diagnostics.chunksReceivedMain} stdinBytes=${diagnostics.ffmpegStdinBytesWritten} reason=${JSON.stringify(manifest.failureReason ?? '')}\n`;
+      const line = `${new Date().toISOString()} session=${manifest.sessionId} match=${manifest.matchId} layout=v${manifest.storageLayoutVersion ?? 1} status=${manifest.status} integrity=${manifest.integrityStatus} segments=${manifest.segments.length} bytes=${manifest.totalBytes} chunksMain=${diagnostics.chunksReceivedMain} stdinBytes=${diagnostics.ffmpegStdinBytesWritten} reason=${JSON.stringify(manifest.failureReason ?? '')}\n`;
       fs.appendFileSync(globalLogPath, line, 'utf8');
 
-      return summaryPath;
+      return targetSummaryPath;
     } catch {
       return null;
     }
   }
 
   public resolveSafeMediaPath(filePath: string, requireMp4 = true): string {
-    const resolved = path.resolve(filePath);
-    if (!resolved.startsWith(this.rootDir + path.sep)) {
-      throw new Error('Requested media path is outside the recordings directory.');
-    }
-    if (requireMp4 && !resolved.toLowerCase().endsWith('.mp4')) {
+    const canonical = canonicalizeAndContainPath(filePath, this.getAllowedRoots(), {
+      requireExists: true,
+      requireFile: true,
+    });
+    if (requireMp4 && !canonical.toLowerCase().endsWith('.mp4')) {
       throw new Error('Only local .mp4 recording segments may be opened.');
     }
-    if (!fs.existsSync(resolved)) {
-      throw new Error('Requested recording file does not exist on disk.');
-    }
-    return resolved;
+    return canonical;
   }
 
   public resolveSafeSessionFolder(folderPath: string): string {
-    const resolved = path.resolve(folderPath);
-    if (!resolved.startsWith(this.rootDir + path.sep) && resolved !== this.rootDir) {
-      throw new Error('Requested folder path is outside the recordings directory.');
-    }
-    if (!fs.existsSync(resolved) || !fs.statSync(resolved).isDirectory()) {
-      throw new Error('Requested session folder does not exist.');
-    }
-    return resolved;
+    return canonicalizeAndContainPath(folderPath, this.getAllowedRoots(), {
+      requireExists: true,
+      requireDirectory: true,
+      allowEqualRoot: true,
+    });
   }
 
   private writeManifestAtomic(manifestPath: string, manifest: CaptureManifest): void {
     const dir = path.dirname(manifestPath);
     fs.mkdirSync(dir, { recursive: true });
+    const scrubbed = scrubSecretsFromMetadata(manifest);
     const tmpPath = `${manifestPath}.${crypto.randomBytes(4).toString('hex')}.tmp`;
-    fs.writeFileSync(tmpPath, JSON.stringify(manifest, null, 2), 'utf8');
+    fs.writeFileSync(tmpPath, JSON.stringify(scrubbed, null, 2), 'utf8');
     fs.renameSync(tmpPath, manifestPath);
+  }
+
+  /**
+   * Atomically renames a closed FFmpeg temporary segment file (.fc26_seg_001.mp4) into
+   * the structured human-readable video filename AFTER FFmpeg has finalized the file.
+   * Refuses to overwrite existing files (throws MediaPathError RECORDING_FILENAME_COLLISION).
+   */
+  public finalizeStructuredSegmentFile(
+    manifest: CaptureManifest,
+    tempFilePath: string,
+    partNumber: number
+  ): {
+    fileName: string;
+    filePath: string;
+    originalFileName: string;
+    displayFileName: string;
+    relativeMediaPath: string | null;
+  } {
+    const safeTemp = canonicalizeAndContainPath(tempFilePath, [manifest.outputDirectory], {
+      requireExists: true,
+      requireFile: true,
+    });
+    const originalFileName = path.basename(safeTemp);
+
+    if (manifest.storageLayoutVersion !== 2 || !manifest.namingMetadata) {
+      return {
+        fileName: originalFileName,
+        filePath: safeTemp,
+        originalFileName,
+        displayFileName: originalFileName,
+        relativeMediaPath: toPortableRelativePath(safeTemp, this.appStorageRoot),
+      };
+    }
+
+    const targetFileName = buildStructuredSegmentFileName({
+      userClubName: manifest.namingMetadata.userClubName,
+      opponentClubName: manifest.namingMetadata.opponentClubName,
+      competitionName: manifest.namingMetadata.competitionName,
+      formationName: manifest.namingMetadata.formationName,
+      matchDate: manifest.namingMetadata.matchDate,
+      partNumber,
+      parentDirectoryPath: manifest.outputDirectory,
+    });
+
+    const destCandidate = path.join(manifest.outputDirectory, targetFileName);
+    const safeDest = canonicalizeAndContainPath(destCandidate, [manifest.outputDirectory]);
+
+    if (safeDest !== safeTemp) {
+      if (fs.existsSync(safeDest)) {
+        throw new MediaPathError(
+          'RECORDING_FILENAME_COLLISION',
+          `Refusing to overwrite existing recording file "${targetFileName}".`,
+          { targetFileName, partNumber }
+        );
+      }
+      fs.renameSync(safeTemp, safeDest);
+    }
+
+    return {
+      fileName: targetFileName,
+      filePath: safeDest,
+      originalFileName,
+      displayFileName: targetFileName,
+      relativeMediaPath: toPortableRelativePath(safeDest, this.appStorageRoot),
+    };
   }
 
   public createSessionManifest(input: {
@@ -286,18 +395,46 @@ export class CaptureSessionEngine {
     audioActive?: boolean;
     segmentDurationMinutes: number;
     maxRecordingMinutes?: number;
+    storagePlan?: MatchRecordingStoragePlan | null;
   }): CaptureManifest {
     const sessionId = input.sessionId
       ? sanitizePathSegment(input.sessionId, 'sessionId')
       : crypto.randomUUID();
     const safeMatchId = sanitizePathSegment(input.matchId, 'matchId');
-    const sessionDir = this.getSafeSessionDirectory(safeMatchId, sessionId);
-    fs.mkdirSync(sessionDir, { recursive: true });
+
+    const isStructured = Boolean(input.storagePlan && input.storagePlan.storageLayoutVersion === 2);
+    let sessionDir: string;
+    let manifestPath: string;
+
+    if (isStructured && input.storagePlan) {
+      sessionDir = canonicalizeAndContainPath(
+        input.storagePlan.sessionDirectoryAbs,
+        this.getAllowedRoots()
+      );
+      fs.mkdirSync(sessionDir, { recursive: true });
+      manifestPath = path.join(sessionDir, 'recording-manifest.json');
+      this.sessionManifestPathCache.set(sessionId, manifestPath);
+    } else {
+      sessionDir = this.getSafeSessionDirectory(safeMatchId, sessionId);
+      fs.mkdirSync(sessionDir, { recursive: true });
+      manifestPath = path.join(sessionDir, 'manifest.json');
+      this.sessionManifestPathCache.set(sessionId, manifestPath);
+    }
 
     const now = new Date().toISOString();
-    const diagLogPath = this.getSessionDiagnosticsLogPath(safeMatchId, sessionId);
+    const diagLogPath = path.join(sessionDir, 'diagnostics.jsonl');
     const manifest: CaptureManifest = {
-      manifestVersion: 3,
+      manifestVersion: isStructured ? 4 : 3,
+      storageLayoutVersion: isStructured ? 2 : 1,
+      careerDirectory: isStructured ? input.storagePlan?.careerDirectoryRel ?? null : null,
+      matchDirectory: isStructured ? input.storagePlan?.matchDirectoryRel ?? null : null,
+      sessionDirectory: isStructured
+        ? input.storagePlan?.sessionDirectoryRel ?? null
+        : toPortableRelativePath(sessionDir, this.appStorageRoot),
+      recordedFormationName: isStructured ? input.storagePlan?.namingMetadata.formationName ?? null : null,
+      tacticalSnapshotId: isStructured ? input.storagePlan?.namingMetadata.tacticalSnapshotId ?? null : null,
+      namingMetadata: isStructured ? input.storagePlan?.namingMetadata ?? null : null,
+      diagnosticsSummaryPath: isStructured ? input.storagePlan?.diagnosticsSummaryPathAbs ?? null : null,
       sessionId,
       matchId: safeMatchId,
       half: input.half,
@@ -328,26 +465,47 @@ export class CaptureSessionEngine {
       updatedAt: now,
     };
 
-    this.writeManifestAtomic(this.getManifestPath(safeMatchId, sessionId), manifest);
+    this.writeManifestAtomic(manifestPath, manifest);
     return manifest;
   }
 
   public findManifestPathBySessionId(sessionId: string): string | null {
     const safeSession = sanitizePathSegment(sessionId, 'sessionId');
 
-    // Search canonical <rootDir>/<matchId>/<sessionId>/manifest.json
+    const cached = this.sessionManifestPathCache.get(safeSession);
+    if (cached && fs.existsSync(cached)) {
+      return cached;
+    }
+
+    // 1. Search legacy v1 <rootDir>/<matchId>/<sessionId>/manifest.json
     if (fs.existsSync(this.rootDir)) {
       const matchEntries = fs.readdirSync(this.rootDir, { withFileTypes: true });
       for (const entry of matchEntries) {
-        if (!entry.isDirectory() || entry.name === 'manifests') continue;
+        if (!entry.isDirectory() || entry.name === 'manifests' || entry.name === '_diagnostics') continue;
         const candidate = path.join(this.rootDir, entry.name, safeSession, 'manifest.json');
         if (fs.existsSync(candidate)) {
+          this.sessionManifestPathCache.set(safeSession, candidate);
           return candidate;
         }
       }
     }
 
-    // Fallback read-only search in legacy <rootDir>/manifests/<sessionId>.json
+    // 2. Search structured v2 <appStorageRoot>/*-Career-Mode/<Match>/<First|Second Half>[/Session XX]/recording-manifest.json
+    for (const v2Path of this.collectStructuredManifestPaths()) {
+      try {
+        const raw = JSON.parse(fs.readFileSync(v2Path, 'utf8')) as { sessionId?: string };
+        if (raw.sessionId) {
+          this.sessionManifestPathCache.set(raw.sessionId, v2Path);
+        }
+        if (raw.sessionId === safeSession) {
+          return v2Path;
+        }
+      } catch {
+        // skip unreadable manifest
+      }
+    }
+
+    // 3. Fallback read-only search in legacy <rootDir>/manifests/<sessionId>.json
     const legacy = path.join(this.legacyManifestsDir, `${safeSession}.json`);
     if (fs.existsSync(legacy)) {
       return legacy;
@@ -379,7 +537,8 @@ export class CaptureSessionEngine {
     const sessionId = raw.sessionId ?? path.basename(manifestPath, '.json');
     const outputDirectory =
       raw.outputDirectory ??
-      (path.basename(manifestPath) === 'manifest.json'
+      (path.basename(manifestPath) === 'manifest.json' ||
+      path.basename(manifestPath) === 'recording-manifest.json'
         ? path.dirname(manifestPath)
         : path.join(this.rootDir, matchId, sessionId));
 
@@ -388,6 +547,9 @@ export class CaptureSessionEngine {
           index: seg.index,
           fileName: seg.fileName ?? path.basename(seg.filePath ?? `segment_${String(seg.index).padStart(3, '0')}.mp4`),
           filePath: seg.filePath,
+          relativeMediaPath: seg.relativeMediaPath ?? null,
+          originalFileName: seg.originalFileName ?? null,
+          displayFileName: seg.displayFileName ?? seg.fileName ?? null,
           startedAt: seg.startedAt ?? raw.startedAt ?? now,
           endedAt: seg.endedAt ?? null,
           durationSeconds: Number(seg.durationSeconds ?? 0),
@@ -409,8 +571,21 @@ export class CaptureSessionEngine {
       (s) => (s.status === 'finalized' || s.status === 'recovered') && s.sizeBytes > 0 && s.durationSeconds > 0
     ).length;
 
+    const layoutVersion: 1 | 2 =
+      raw.storageLayoutVersion === 2 || path.basename(manifestPath) === 'recording-manifest.json'
+        ? 2
+        : 1;
+
     return {
-      manifestVersion: raw.manifestVersion ?? 3,
+      manifestVersion: raw.manifestVersion ?? (layoutVersion === 2 ? 4 : 3),
+      storageLayoutVersion: layoutVersion,
+      careerDirectory: raw.careerDirectory ?? null,
+      matchDirectory: raw.matchDirectory ?? null,
+      sessionDirectory: raw.sessionDirectory ?? null,
+      recordedFormationName: raw.recordedFormationName ?? null,
+      tacticalSnapshotId: raw.tacticalSnapshotId ?? null,
+      namingMetadata: raw.namingMetadata ?? null,
+      diagnosticsSummaryPath: raw.diagnosticsSummaryPath ?? null,
       sessionId,
       matchId,
       half: raw.half ?? 'first_half',
@@ -683,24 +858,35 @@ export class CaptureSessionEngine {
       return { discarded: false, removedFiles: 0, manifest: null };
     }
 
-    const sessionDir = path.resolve(current.outputDirectory);
     let removedFiles = 0;
-
-    if (sessionDir.startsWith(this.rootDir + path.sep) && fs.existsSync(sessionDir)) {
-      const entries = fs.readdirSync(sessionDir);
+    try {
+      const safeSessionDir = canonicalizeAndContainPath(
+        current.outputDirectory,
+        this.getAllowedRoots(),
+        { requireExists: true, requireDirectory: true }
+      );
+      const entries = fs.readdirSync(safeSessionDir);
       for (const entry of entries) {
-        const entryPath = path.resolve(sessionDir, entry);
-        if (!entryPath.startsWith(sessionDir + path.sep)) continue;
-        // Remove media segments and ffmpeg temp/list artifacts, keep discarded manifest record or clean folder
-        if (
-          entry.endsWith('.mp4') ||
-          entry.endsWith('.tmp') ||
-          entry === '.segments.list'
-        ) {
-          fs.unlinkSync(entryPath);
-          removedFiles += 1;
+        const entryPath = path.resolve(safeSessionDir, entry);
+        try {
+          const confinedEntry = canonicalizeAndContainPath(entryPath, [safeSessionDir], {
+            requireExists: true,
+            requireFile: true,
+          });
+          if (
+            entry.endsWith('.mp4') ||
+            entry.endsWith('.tmp') ||
+            entry === '.segments.list'
+          ) {
+            fs.unlinkSync(confinedEntry);
+            removedFiles += 1;
+          }
+        } catch {
+          // Skip entries that are directories or outside session confinement
         }
       }
+    } catch {
+      // Directory already absent or invalid
     }
 
     const discardedManifest: CaptureManifest = {
@@ -721,23 +907,80 @@ export class CaptureSessionEngine {
     return { discarded: true, removedFiles, manifest: discardedManifest };
   }
 
+  private collectStructuredManifestPaths(): string[] {
+    const found: string[] = [];
+    if (!fs.existsSync(this.appStorageRoot)) return found;
+
+    const topEntries = fs.readdirSync(this.appStorageRoot, { withFileTypes: true });
+    for (const careerEntry of topEntries) {
+      if (!careerEntry.isDirectory()) continue;
+      if (!/-Career-Mode(?:\s+\([^)]+\))?$/i.test(careerEntry.name)) continue;
+
+      const careerPath = path.join(this.appStorageRoot, careerEntry.name);
+      let matchEntries: fs.Dirent[];
+      try {
+        matchEntries = fs.readdirSync(careerPath, { withFileTypes: true });
+      } catch {
+        continue;
+      }
+
+      for (const matchEntry of matchEntries) {
+        if (!matchEntry.isDirectory()) continue;
+        const matchPath = path.join(careerPath, matchEntry.name);
+        for (const halfFolder of ['First Half', 'Second Half']) {
+          const halfPath = path.join(matchPath, halfFolder);
+          if (!fs.existsSync(halfPath)) continue;
+
+          const directManifest = path.join(halfPath, 'recording-manifest.json');
+          if (fs.existsSync(directManifest)) {
+            found.push(directManifest);
+          }
+
+          let subEntries: fs.Dirent[];
+          try {
+            subEntries = fs.readdirSync(halfPath, { withFileTypes: true });
+          } catch {
+            continue;
+          }
+          for (const sub of subEntries) {
+            if (!sub.isDirectory() || !/^Session\s+\d+$/i.test(sub.name)) continue;
+            const nestedManifest = path.join(halfPath, sub.name, 'recording-manifest.json');
+            if (fs.existsSync(nestedManifest)) {
+              found.push(nestedManifest);
+            }
+          }
+        }
+      }
+    }
+    return found;
+  }
+
   private collectAllManifestPaths(): string[] {
-    const paths: string[] = [];
+    const paths = new Set<string>();
 
     if (fs.existsSync(this.rootDir)) {
       const matchDirs = fs.readdirSync(this.rootDir, { withFileTypes: true });
       for (const matchEntry of matchDirs) {
-        if (!matchEntry.isDirectory() || matchEntry.name === 'manifests') continue;
+        if (!matchEntry.isDirectory() || matchEntry.name === 'manifests' || matchEntry.name === '_diagnostics') continue;
         const matchPath = path.join(this.rootDir, matchEntry.name);
-        const sessionDirs = fs.readdirSync(matchPath, { withFileTypes: true });
+        let sessionDirs: fs.Dirent[];
+        try {
+          sessionDirs = fs.readdirSync(matchPath, { withFileTypes: true });
+        } catch {
+          continue;
+        }
         for (const sessEntry of sessionDirs) {
           if (!sessEntry.isDirectory()) continue;
           const mPath = path.join(matchPath, sessEntry.name, 'manifest.json');
           if (fs.existsSync(mPath)) {
-            paths.push(mPath);
+            paths.add(mPath);
           }
         }
       }
+    }
+
+    for (const v2Path of this.collectStructuredManifestPaths()) {
+      paths.add(v2Path);
     }
 
     if (fs.existsSync(this.legacyManifestsDir)) {
@@ -745,11 +988,11 @@ export class CaptureSessionEngine {
         .readdirSync(this.legacyManifestsDir)
         .filter((f) => f.endsWith('.json'));
       for (const file of legacyFiles) {
-        paths.push(path.join(this.legacyManifestsDir, file));
+        paths.add(path.join(this.legacyManifestsDir, file));
       }
     }
 
-    return paths;
+    return Array.from(paths);
   }
 
   public scanRecoverableManifests(activeSessionId?: string | null): RecoverableSessionSummary[] {
@@ -902,12 +1145,49 @@ export class CaptureSessionEngine {
       const existing = existingMap.get(diskSeg.index);
       const probe = await probeMediaFile(ffprobePath, diskSeg.filePath);
 
+      const finalizeRecoveredFile = (
+        fileName: string,
+        filePath: string,
+        idx: number
+      ): {
+        fileName: string;
+        filePath: string;
+        originalFileName: string;
+        displayFileName: string;
+        relativeMediaPath: string | null;
+      } => {
+        if (
+          manifest.storageLayoutVersion === 2 &&
+          manifest.namingMetadata &&
+          fileName.startsWith('.fc26_seg_')
+        ) {
+          try {
+            return this.finalizeStructuredSegmentFile(manifest, filePath, idx);
+          } catch (err) {
+            if (isMediaPathError(err)) {
+              recoveryLog.push(`${now}: Preserved original filename ${fileName}: ${err.message}`);
+            }
+          }
+        }
+        return {
+          fileName,
+          filePath,
+          originalFileName: existing?.originalFileName ?? fileName,
+          displayFileName: existing?.displayFileName ?? fileName,
+          relativeMediaPath: toPortableRelativePath(filePath, this.appStorageRoot),
+        };
+      };
+
       if (probe.valid) {
-        const checksum = await computeFileSha256(diskSeg.filePath);
+        const finalizedFile = finalizeRecoveredFile(diskSeg.fileName, diskSeg.filePath, diskSeg.index);
+        const checksum = await computeFileSha256(finalizedFile.filePath);
         const segRecord: CaptureManifestSegment = {
           index: diskSeg.index,
-          fileName: diskSeg.fileName,
-          filePath: diskSeg.filePath,
+          fileName: finalizedFile.fileName,
+          filePath: finalizedFile.filePath,
+          relativeMediaPath: finalizedFile.relativeMediaPath,
+          originalFileName: finalizedFile.originalFileName,
+          displayFileName: finalizedFile.displayFileName,
           startedAt: existing?.startedAt ?? manifest.startedAt,
           endedAt: existing?.endedAt ?? diskSeg.mtimeIso,
           durationSeconds: probe.durationSeconds,
@@ -923,7 +1203,7 @@ export class CaptureSessionEngine {
         };
         recoveredSegments.push(segRecord);
         recoveryLog.push(
-          `${now}: Verified ${diskSeg.fileName} (${probe.durationSeconds.toFixed(1)}s, ${probe.resolution ?? 'unknown'}).`
+          `${now}: Verified ${finalizedFile.fileName} (${probe.durationSeconds.toFixed(1)}s, ${probe.resolution ?? 'unknown'}).`
         );
         continue;
       }
@@ -931,11 +1211,15 @@ export class CaptureSessionEngine {
       // Attempt non-destructive remux repair on partial/corrupted segment
       const repair = await attemptPartialSegmentRepair(ffmpegPath, ffprobePath, diskSeg.filePath);
       if (repair.repaired && repair.probe.valid) {
-        const checksum = await computeFileSha256(diskSeg.filePath);
+        const finalizedFile = finalizeRecoveredFile(diskSeg.fileName, diskSeg.filePath, diskSeg.index);
+        const checksum = await computeFileSha256(finalizedFile.filePath);
         const segRecord: CaptureManifestSegment = {
           index: diskSeg.index,
-          fileName: diskSeg.fileName,
-          filePath: diskSeg.filePath,
+          fileName: finalizedFile.fileName,
+          filePath: finalizedFile.filePath,
+          relativeMediaPath: finalizedFile.relativeMediaPath,
+          originalFileName: finalizedFile.originalFileName,
+          displayFileName: finalizedFile.displayFileName,
           startedAt: existing?.startedAt ?? manifest.startedAt,
           endedAt: diskSeg.mtimeIso,
           durationSeconds: repair.probe.durationSeconds,
@@ -950,12 +1234,15 @@ export class CaptureSessionEngine {
           integrityStatus: 'verified',
         };
         recoveredSegments.push(segRecord);
-        recoveryLog.push(`${now}: Repaired ${diskSeg.fileName}: ${repair.note}`);
+        recoveryLog.push(`${now}: Repaired ${finalizedFile.fileName}: ${repair.note}`);
       } else {
         const segRecord: CaptureManifestSegment = {
           index: diskSeg.index,
           fileName: diskSeg.fileName,
           filePath: diskSeg.filePath,
+          relativeMediaPath: toPortableRelativePath(diskSeg.filePath, this.appStorageRoot),
+          originalFileName: existing?.originalFileName ?? diskSeg.fileName,
+          displayFileName: existing?.displayFileName ?? diskSeg.fileName,
           startedAt: existing?.startedAt ?? manifest.startedAt,
           endedAt: diskSeg.mtimeIso,
           durationSeconds: 0,

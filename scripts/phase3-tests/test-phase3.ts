@@ -1598,7 +1598,7 @@ test('D2: Non-destructive v5->v6 migration preserves existing rows & marks legac
   const migVersion = (
     v5Db.prepare('SELECT MAX(version) as v FROM schema_migrations').get() as { v: number }
   ).v;
-  assert.equal(migVersion, 6, 'Legacy v5 DB must migrate cleanly to v6');
+  assert.ok(migVersion >= 6, 'Legacy v5 DB must migrate cleanly to v6+');
 
   const legacyPreset = v5Db
     .prepare('SELECT tactical_vision_key FROM tactical_presets WHERE id = ?')
@@ -1614,18 +1614,22 @@ test('D2: Non-destructive v5->v6 migration preserves existing rows & marks legac
     .get('s1') as { tactical_vision_key: string };
   assert.equal(legacySnap.tactical_vision_key, 'unspecified');
   const v5FkViolations = v5Db.pragma('foreign_key_check') as unknown[];
-  assert.equal(v5FkViolations.length, 0, 'Migrated v5->v6 database must have zero FK violations');
+  assert.equal(v5FkViolations.length, 0, 'Migrated v5->v6+ database must have zero FK violations');
   v5Db.close();
 
-  // Test Backup v6 Export -> Restore -> PRAGMA foreign_key_check
+  // Test Backup v6/v7 Export -> Restore -> PRAGMA foreign_key_check
   const backupV6 = exportDatabaseBackup();
-  assert.equal(backupV6.format, 'fc26-ai-manager-backup-v6');
+  assert.ok(
+    backupV6.format === 'fc26-ai-manager-backup-v6' ||
+      backupV6.format === 'fc26-ai-manager-backup-v7',
+    `Expected backup format v6 or v7, got ${backupV6.format}`
+  );
   const clubCountBefore = listClubs().length;
   restoreDatabaseBackup(backupV6);
   const clubCountAfter = listClubs().length;
   assert.equal(clubCountAfter, clubCountBefore);
   const fkViolations = getDb().pragma('foreign_key_check') as unknown[];
-  assert.equal(fkViolations.length, 0, 'Restored v6 database must have zero foreign key violations');
+  assert.equal(fkViolations.length, 0, 'Restored database must have zero foreign key violations');
 });
 
 async function runAll() {

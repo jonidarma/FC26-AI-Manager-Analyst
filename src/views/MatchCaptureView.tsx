@@ -27,8 +27,10 @@ import type {
   CaptureSourceInfo,
   DiskSpaceInfo,
   MatchSessionWithSegments,
+  MatchStorageFoldersInfo,
   RecoverableSessionSummary,
   RecoveryExecutionResult,
+  TrustedFolderKind,
   VideoAnalysisMode,
 } from '../types/domain';
 
@@ -86,6 +88,9 @@ export function MatchCaptureView() {
   const [privacyAck, setPrivacyAck] = useState(false);
   const [entireDisplayAck, setEntireDisplayAck] = useState(false);
   const [startingAnalysis, setStartingAnalysis] = useState(false);
+  const [matchStorageFolders, setMatchStorageFolders] = useState<MatchStorageFoldersInfo | null>(
+    null
+  );
 
   // Explicit discard confirmation state (double-step if discarding an already finalized session)
   const [discardTarget, setDiscardTarget] = useState<{
@@ -204,6 +209,25 @@ export function MatchCaptureView() {
   useEffect(() => {
     void refreshSources();
   }, [capabilities?.environment]);
+
+  useEffect(() => {
+    if (!selectedMatch?.id) {
+      setMatchStorageFolders(null);
+      return;
+    }
+    let active = true;
+    desktopBridge
+      .getMatchStorageFolders(selectedMatch.id)
+      .then((info) => {
+        if (active) setMatchStorageFolders(info);
+      })
+      .catch(() => {
+        if (active) setMatchStorageFolders(null);
+      });
+    return () => {
+      active = false;
+    };
+  }, [selectedMatch?.id, matchSessions.length, recordingTelemetry.uiStatus]);
 
   async function handleQuickCaptureSetting(
     patch: Partial<NonNullable<typeof settings>['capture']>
@@ -410,11 +434,18 @@ export function MatchCaptureView() {
     }
   }
 
-  async function handleOpenFolder(folderPath: string) {
+  async function handleOpenTrustedFolder(
+    kind: TrustedFolderKind,
+    opts?: { matchId?: string; sessionId?: string }
+  ) {
     try {
-      await desktopBridge.openSessionFolder(folderPath);
+      await desktopBridge.openTrustedFolder({
+        kind,
+        matchId: opts?.matchId,
+        sessionId: opts?.sessionId,
+      });
     } catch (err) {
-      notify('error', err instanceof Error ? err.message : 'Failed to open session folder');
+      notify('error', err instanceof Error ? err.message : 'Failed to open recording folder');
     }
   }
 
@@ -888,6 +919,77 @@ export function MatchCaptureView() {
               </div>
             </div>
 
+            {/* Phase 3.0.1 Active Storage Location & Human-Readable Video Filename */}
+            {(recordingTelemetry.sessionDirectory ||
+              recordingTelemetry.outputDirectory ||
+              matchStorageFolders?.matchDirectory) && (
+              <div className="rounded-md border border-white/[0.08] bg-[#0C0F14] p-3 text-[11px] space-y-1.5">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="flex items-center gap-2">
+                    <span className="font-semibold text-white">Recording Storage</span>
+                    <span className="font-mono text-emerald-400">
+                      {recordingTelemetry.storageLayoutVersion === 1
+                        ? 'Legacy v1'
+                        : matchStorageFolders?.storageLayoutVersion === 1 && !isSessionActive
+                          ? 'Legacy v1'
+                          : 'Structured v2'}
+                    </span>
+                    {(recordingTelemetry.recordedFormationName ||
+                      selectedMatch?.startingFormation) && (
+                      <span className="font-mono text-[#9AA4B4]">
+                        · Formation:{' '}
+                        {recordingTelemetry.recordedFormationName ??
+                          selectedMatch?.startingFormation}
+                      </span>
+                    )}
+                    {recordingTelemetry.half && (
+                      <span className="font-mono text-[#9AA4B4]">
+                        · {recordingTelemetry.half === 'first_half' ? 'First Half' : 'Second Half'}
+                      </span>
+                    )}
+                  </div>
+                  {isNativeElectron &&
+                    (recordingTelemetry.sessionId || matchStorageFolders?.matchFolderExists) && (
+                      <button
+                        type="button"
+                        onClick={() =>
+                          void handleOpenTrustedFolder(
+                            recordingTelemetry.sessionId
+                              ? recordingTelemetry.half === 'second_half'
+                                ? 'second_half'
+                                : 'first_half'
+                              : 'match',
+                            {
+                              matchId: recordingTelemetry.matchId ?? selectedMatch?.id,
+                              sessionId: recordingTelemetry.sessionId ?? undefined,
+                            }
+                          )
+                        }
+                        className="inline-flex items-center gap-1 px-2 py-0.5 rounded border border-white/[0.12] hover:border-emerald-500/50 text-[#D7DDE7]"
+                      >
+                        <FolderOpen className="w-3 h-3" />
+                        Open Recording Folder
+                      </button>
+                    )}
+                </div>
+                <div className="font-mono text-[#9AA4B4] break-all">
+                  Folder:{' '}
+                  <span className="text-[#D7DDE7]">
+                    {recordingTelemetry.sessionDirectory ??
+                      recordingTelemetry.outputDirectory ??
+                      matchStorageFolders?.primaryDisplayPath ??
+                      matchStorageFolders?.matchDirectory}
+                  </span>
+                </div>
+                {recordingTelemetry.currentFileName && (
+                  <div className="font-mono text-[#9AA4B4] break-all">
+                    Active File:{' '}
+                    <span className="text-emerald-300">{recordingTelemetry.currentFileName}</span>
+                  </div>
+                )}
+              </div>
+            )}
+
             {/* Warnings & Errors */}
             {(recordingTelemetry.lastError || recordingTelemetry.lastWarning || lowDiskWarning) && (
               <div className="space-y-2 text-[12px]">
@@ -1249,7 +1351,9 @@ export function MatchCaptureView() {
                           <div className="mt-0.5 font-mono tabular-nums text-[#8A94A6]">
                             {formatDuration(sess.durationSeconds)} · {finalizedSegs.length} valid
                             segment{finalizedSegs.length === 1 ? '' : 's'} ·{' '}
-                            {formatBytes(sess.totalBytes)} · {sess.resolution} @ {sess.fps} FPS ·
+                            {formatBytes(sess.totalBytes)} · {sess.resolution} @ {sess.fps} FPS ·{' '}
+                            {sess.storageLayoutVersion === 2 ? 'Structured v2' : 'Legacy v1'}
+                            {sess.recordedFormationName ? ` · ${sess.recordedFormationName}` : ''} ·
                             Integrity:{' '}
                             <span
                               className={
@@ -1265,6 +1369,11 @@ export function MatchCaptureView() {
                               {sess.integrityStatus ?? 'pending'}
                             </span>
                           </div>
+                          {(sess.sessionDirectory || sess.outputDirectory) && (
+                            <div className="mt-0.5 font-mono text-[11px] text-[#7D8798] break-all">
+                              {sess.sessionDirectory ?? sess.outputDirectory}
+                            </div>
+                          )}
                           {sess.failureReason && (
                             <div className="mt-1.5 text-[11px] text-red-300">
                               Failure Reason: {sess.failureReason}
@@ -1283,14 +1392,22 @@ export function MatchCaptureView() {
                               Diagnostics
                             </button>
                           )}
-                          {isNativeElectron && sess.outputDirectory && (
+                          {isNativeElectron && (sess.outputDirectory || sess.sessionDirectory) && (
                             <button
                               type="button"
-                              onClick={() => void handleOpenFolder(sess.outputDirectory!)}
+                              onClick={() =>
+                                void handleOpenTrustedFolder(
+                                  sess.half === 'second_half' ? 'second_half' : 'first_half',
+                                  {
+                                    sessionId: sess.id,
+                                    matchId: sess.matchId,
+                                  }
+                                )
+                              }
                               className="inline-flex items-center gap-1 px-2.5 py-1 rounded border border-white/[0.12] hover:border-white/[0.25] text-[#D7DDE7]"
                             >
                               <FolderOpen className="w-3.5 h-3.5" />
-                              Open Folder
+                              Open Recording Folder
                             </button>
                           )}
                           {isNativeElectron && (
@@ -1323,9 +1440,11 @@ export function MatchCaptureView() {
                               key={seg.id}
                               className="py-1.5 flex flex-wrap items-center justify-between gap-2"
                             >
-                              <div className="font-mono tabular-nums text-[#C5CCD7]">
-                                segment_{String(seg.segmentIndex).padStart(3, '0')}.mp4 ·{' '}
-                                {formatDuration(seg.durationSeconds)} · {formatBytes(seg.sizeBytes)}
+                              <div className="font-mono tabular-nums text-[#C5CCD7] break-all">
+                                {seg.displayFileName ||
+                                  `segment_${String(seg.segmentIndex).padStart(3, '0')}.mp4`}{' '}
+                                · {formatDuration(seg.durationSeconds)} ·{' '}
+                                {formatBytes(seg.sizeBytes)}
                                 {seg.codec ? ` · ${seg.codec}` : ''}
                                 {seg.hasAudio ? ' · AAC' : ' · Video-only'}
                               </div>
@@ -1665,9 +1784,11 @@ export function MatchCaptureView() {
               intercepted.
             </p>
             <p className="leading-relaxed">
-              Footage writes in crash-resilient fragmented {captureCfg?.segmentDurationMinutes ?? 3}
-              -minute local MP4 segments under your Electron <code className="font-mono">userData/recordings</code>{' '}
-              directory so unexpected crashes never lose previously completed segments.
+              New recordings write in crash-resilient fragmented{' '}
+              {captureCfg?.segmentDurationMinutes ?? 3}-minute local MP4 segments organized under
+              human-readable Career Mode folders in your Electron{' '}
+              <code className="font-mono">userData</code> directory, while preserving all existing
+              legacy recordings untouched.
             </p>
             <p className="leading-relaxed">
               If Windows system loopback audio is enabled, other desktop applications playing audio

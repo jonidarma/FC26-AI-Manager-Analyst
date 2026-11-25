@@ -35,10 +35,11 @@ import {
 } from './server/services/tacticalContextService.ts';
 import * as tacticalVisionService from './server/services/tacticalVisionService.ts';
 import * as aiOrchestrator from './server/services/aiAnalysisOrchestrator.ts';
+import * as recordingMediaResolver from './server/services/recordingMediaResolver.ts';
 import {
-  assertConfinedMediaPath,
-  getEvidenceFramesDir,
+  resolveEvidenceFrameFilePath,
 } from './server/services/videoPreprocessingService.ts';
+import { isMediaPathError } from './shared/recordingStorage.ts';
 import type { CatalogDatasetType } from './src/types/domain.ts';
 
 const IS_DESKTOP_MODE = process.env.FC26_DESKTOP_MODE === '1';
@@ -1228,12 +1229,18 @@ async function startServer() {
     totalBytes: z.number().min(0).default(0),
     encoder: z.string().max(64).nullable().optional(),
     audioEnabled: z.boolean().optional(),
-    outputDirectory: z.string().max(500).nullable().optional(),
+    outputDirectory: z.string().max(700).nullable().optional(),
+    storageLayoutVersion: z.number().int().min(1).max(10).optional(),
+    careerDirectory: z.string().max(260).nullable().optional(),
+    matchDirectory: z.string().max(400).nullable().optional(),
+    sessionDirectory: z.string().max(700).nullable().optional(),
+    recordedFormationName: z.string().max(120).nullable().optional(),
+    tacticalSnapshotId: z.string().max(120).nullable().optional(),
     integrityStatus: integrityStatusEnum.optional(),
     aiEligible: z.boolean().optional(),
     analysisState: analysisStateEnum.optional(),
     failureReason: z.string().max(1500).nullable().optional(),
-    diagnosticsPath: z.string().max(600).nullable().optional(),
+    diagnosticsPath: z.string().max(700).nullable().optional(),
     recoveryNotes: z.string().max(2000).nullable().optional(),
     startedAt: z.string().max(64).nullable().optional(),
     endedAt: z.string().max(64).nullable().optional(),
@@ -1247,19 +1254,28 @@ async function startServer() {
     totalBytes: z.number().min(0).optional(),
     encoder: z.string().max(64).nullable().optional(),
     audioEnabled: z.boolean().optional(),
-    outputDirectory: z.string().max(500).nullable().optional(),
+    outputDirectory: z.string().max(700).nullable().optional(),
+    storageLayoutVersion: z.number().int().min(1).max(10).optional(),
+    careerDirectory: z.string().max(260).nullable().optional(),
+    matchDirectory: z.string().max(400).nullable().optional(),
+    sessionDirectory: z.string().max(700).nullable().optional(),
+    recordedFormationName: z.string().max(120).nullable().optional(),
+    tacticalSnapshotId: z.string().max(120).nullable().optional(),
     integrityStatus: integrityStatusEnum.optional(),
     aiEligible: z.boolean().optional(),
     analysisState: analysisStateEnum.optional(),
     failureReason: z.string().max(1500).nullable().optional(),
-    diagnosticsPath: z.string().max(600).nullable().optional(),
+    diagnosticsPath: z.string().max(700).nullable().optional(),
     recoveryNotes: z.string().max(2000).nullable().optional(),
     endedAt: z.string().max(64).nullable().optional(),
   });
 
   const upsertRecordingSegmentSchema = z.object({
     matchId: z.string().uuid(),
-    filePath: z.string().trim().min(1).max(600),
+    filePath: z.string().trim().min(1).max(700),
+    relativeMediaPath: z.string().max(700).nullable().optional(),
+    originalFileName: z.string().max(260).nullable().optional(),
+    displayFileName: z.string().max(260).nullable().optional(),
     durationSeconds: z.number().min(0).default(0),
     sizeBytes: z.number().min(0).default(0),
     checksum: z.string().max(128).nullable().optional(),
@@ -1365,10 +1381,146 @@ async function startServer() {
         failureReason: parsed.data.failureReason ?? null,
         payload: parsed.data.payload as unknown as Parameters<typeof repo.saveRecordingDiagnostics>[0]['payload'],
       });
+
+      // Mirror secret-scrubbed diagnostics JSON into structured v2 Diagnostics folder if applicable
+      try {
+        const sessionRec = repo.getMatchSessionById(req.params.id);
+        if (sessionRec) {
+          recordingMediaResolver.exportDiagnosticsArtifactJson(
+            parsed.data.matchId,
+            sessionRec.half,
+            saved
+          );
+          recordingMediaResolver.writeMatchMetadataManifest(parsed.data.matchId);
+        }
+      } catch {
+        // non-fatal mirror error
+      }
+
       return res.json(saved);
     } catch (err) {
       return res.status(400).json({
         error: err instanceof Error ? err.message : 'Failed to save recording diagnostics',
+      });
+    }
+  });
+
+  // ============================================================
+  // Phase 3.0.1 — Structured Career Mode Recording Storage & Path API
+  // ============================================================
+
+  const previewStoragePlanSchema = z.object({
+    clubId: z.string().uuid().nullable().optional(),
+    clubName: z.string().max(120).optional(),
+    opponentId: z.string().uuid().nullable().optional(),
+    opponentName: z.string().max(120).optional(),
+    competition: z.string().max(120).optional(),
+    matchDate: z.string().max(32).optional(),
+    startingFormation: z.string().max(80).optional(),
+    secondHalfFormation: z.string().max(80).optional(),
+  });
+
+  const buildMatchStoragePlanSchema = z.object({
+    half: z.enum(['first_half', 'second_half']).default('first_half'),
+    allocateIfMissing: z.boolean().default(true),
+    createNewSessionSubdir: z.boolean().default(true),
+  });
+
+  const resolveTrustedFolderSchema = z.object({
+    kind: z.enum([
+      'storage_root',
+      'legacy_recordings_root',
+      'match',
+      'first_half',
+      'second_half',
+      'evidence',
+      'diagnostics',
+      'ai_analysis',
+    ]),
+    matchId: z.string().uuid().optional(),
+    sessionId: z.string().uuid().optional(),
+  });
+
+  app.get('/api/storage/info', (_req, res) => {
+    try {
+      return res.json(recordingMediaResolver.getStorageOverviewInfo());
+    } catch (err) {
+      return res.status(500).json({
+        error: err instanceof Error ? err.message : 'Failed to inspect recording storage overview',
+      });
+    }
+  });
+
+  app.post('/api/storage/preview-match-plan', (req, res) => {
+    const parsed = previewStoragePlanSchema.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      return res.status(400).json({
+        error: 'Invalid storage preview payload',
+        details: parsed.error.flatten(),
+      });
+    }
+    try {
+      return res.json(recordingMediaResolver.previewMatchStoragePlan(parsed.data));
+    } catch (err) {
+      return res.status(400).json({
+        error: err instanceof Error ? err.message : 'Failed to preview match storage plan',
+      });
+    }
+  });
+
+  app.post('/api/matches/:id/storage-plan', (req, res) => {
+    const parsed = buildMatchStoragePlanSchema.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      return res.status(400).json({
+        error: 'Invalid match storage plan request',
+        details: parsed.error.flatten(),
+      });
+    }
+    try {
+      const plan = recordingMediaResolver.buildMatchStoragePlan(req.params.id, parsed.data.half, {
+        allocateIfMissing: parsed.data.allocateIfMissing,
+        createNewSessionSubdir: parsed.data.createNewSessionSubdir,
+      });
+      return res.json(plan);
+    } catch (err) {
+      const status = isMediaPathError(err) && err.code === 'MEDIA_PATH_SECURITY_VIOLATION' ? 403 : 400;
+      return res.status(status).json({
+        error: err instanceof Error ? err.message : 'Failed to build match recording storage plan',
+        code: isMediaPathError(err) ? err.code : undefined,
+      });
+    }
+  });
+
+  app.get('/api/matches/:id/storage-folders', (req, res) => {
+    try {
+      return res.json(recordingMediaResolver.getMatchStorageFoldersInfo(req.params.id));
+    } catch (err) {
+      return res.status(404).json({
+        error: err instanceof Error ? err.message : 'Failed to load match storage folders',
+      });
+    }
+  });
+
+  app.post('/api/storage/resolve-trusted-folder', (req, res) => {
+    const parsed = resolveTrustedFolderSchema.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      return res.status(400).json({
+        error: 'Invalid trusted folder resolution payload',
+        details: parsed.error.flatten(),
+      });
+    }
+    try {
+      return res.json(recordingMediaResolver.resolveTrustedFolderPath(parsed.data));
+    } catch (err) {
+      const status =
+        isMediaPathError(err) && err.code === 'MEDIA_PATH_SECURITY_VIOLATION'
+          ? 403
+          : isMediaPathError(err) && err.code === 'MEDIA_FILE_NOT_FOUND'
+            ? 404
+            : 400;
+      return res.status(status).json({
+        error: err instanceof Error ? err.message : 'Failed to resolve trusted folder',
+        code: isMediaPathError(err) ? err.code : undefined,
       });
     }
   });
@@ -1777,7 +1929,7 @@ async function startServer() {
     }
   });
 
-  // Authenticated, strictly path-confined evidence frame image route
+  // Authenticated, strictly path-confined evidence frame image route (supports v2 structured & v1 legacy)
   app.get('/api/evidence-frames/:matchId/:fileName', (req, res) => {
     const { matchId, fileName } = req.params;
     if (!/^[a-zA-Z0-9_-]{4,80}$/.test(matchId)) {
@@ -1788,10 +1940,8 @@ async function startServer() {
       return res.status(400).json({ error: 'Invalid evidence frame file name.' });
     }
     try {
-      const matchFramesDir = getEvidenceFramesDir(matchId);
-      const targetPath = path.join(matchFramesDir, baseName);
-      const resolved = assertConfinedMediaPath(targetPath, [matchFramesDir]);
-      if (!fs.existsSync(resolved)) {
+      const resolved = resolveEvidenceFrameFilePath(matchId, baseName);
+      if (!resolved) {
         return res.status(404).json({ error: 'Evidence frame not found.' });
       }
       return res.sendFile(resolved);

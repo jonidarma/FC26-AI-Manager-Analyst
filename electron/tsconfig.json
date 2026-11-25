@@ -4,12 +4,12 @@
     "module": "ESNext",
     "moduleResolution": "bundler",
     "outDir": "../dist-electron",
-    "rootDir": ".",
+    "rootDir": "..",
     "strict": true,
     "esModuleInterop": true,
     "skipLibCheck": true,
     "resolveJsonModule": true,
     "noEmit": true
   },
-  "include": ["./**/*.ts"]
+  "include": ["./**/*.ts", "../shared/**/*.ts"]
 }

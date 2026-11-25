@@ -149,6 +149,21 @@ contextBridge.exposeInMainWorld('fc26Desktop', {
   openRecordingSegment: (filePath: string) => ipcRenderer.invoke('capture:open-segment', filePath),
   openSessionFolder: (folderPath: string) =>
     ipcRenderer.invoke('capture:open-session-folder', folderPath),
+  openTrustedFolder: (payload: {
+    kind:
+      | 'storage_root'
+      | 'legacy_recordings_root'
+      | 'career_root'
+      | 'match_root'
+      | 'first_half'
+      | 'second_half'
+      | 'session_dir'
+      | 'evidence_frames'
+      | 'ai_analysis'
+      | 'diagnostics';
+    matchId?: string;
+    sessionId?: string;
+  }) => ipcRenderer.invoke('capture:open-trusted-folder', payload),
   openDiagnosticsFolder: (sessionId?: string, matchId?: string) =>
     ipcRenderer.invoke('capture:open-diagnostics-folder', { sessionId, matchId }),
   exportSessionDiagnostics: (sessionId?: string, matchId?: string) =>

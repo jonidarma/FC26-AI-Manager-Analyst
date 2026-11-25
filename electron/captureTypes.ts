@@ -1,6 +1,7 @@
 /**
- * FC26 AI Manager — Phase 2 & 2.1 Shared Capture & Diagnostics Types (Electron Main / Preload / Tests)
+ * FC26 AI Manager — Phase 2, 2.1 & 3.0.1 Shared Capture & Diagnostics Types (Electron Main / Preload / Tests)
  */
+import type { MatchRecordingStoragePlan } from '../shared/recordingStorage';
 
 export type RecordingHalf = 'first_half' | 'second_half';
 
@@ -96,6 +97,9 @@ export interface CaptureManifestSegment {
   index: number;
   fileName: string;
   filePath: string;
+  relativeMediaPath?: string | null;
+  originalFileName?: string | null;
+  displayFileName?: string | null;
   startedAt: string;
   endedAt: string | null;
   durationSeconds: number;
@@ -112,6 +116,14 @@ export interface CaptureManifestSegment {
 
 export interface CaptureManifest {
   manifestVersion: number;
+  storageLayoutVersion?: 1 | 2;
+  careerDirectory?: string | null;
+  matchDirectory?: string | null;
+  sessionDirectory?: string | null;
+  recordedFormationName?: string | null;
+  tacticalSnapshotId?: string | null;
+  namingMetadata?: MatchRecordingStoragePlan['namingMetadata'] | null;
+  diagnosticsSummaryPath?: string | null;
   sessionId: string;
   matchId: string;
   half: RecordingHalf;
@@ -235,6 +247,12 @@ export interface RecordingTelemetry {
   queuedBytes: number;
   backpressureActive: boolean;
   outputDirectory: string | null;
+  storageLayoutVersion?: 1 | 2;
+  careerDirectory?: string | null;
+  matchDirectory?: string | null;
+  sessionDirectory?: string | null;
+  recordedFormationName?: string | null;
+  currentFileName?: string | null;
   integrityStatus: RecordingIntegrityStatus;
   aiEligible: boolean;
   failureReason: string | null;

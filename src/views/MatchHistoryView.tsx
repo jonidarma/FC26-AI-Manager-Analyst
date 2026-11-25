@@ -1,9 +1,15 @@
-import { Check, Film, FolderOpen, Search, Trash2 } from 'lucide-react';
-import { useMemo, useState } from 'react';
+import { Check, Copy, Film, FolderOpen, Search, Trash2 } from 'lucide-react';
+import { useEffect, useMemo, useState } from 'react';
 import { useApp } from '../context/AppContext';
 import { desktopBridge } from '../services/desktopBridge';
 import { recordingController } from '../services/recordingController';
-import type { FeedbackChoice, MatchRecord, MatchSessionWithSegments } from '../types/domain';
+import type {
+  FeedbackChoice,
+  MatchRecord,
+  MatchSessionWithSegments,
+  MatchStorageFoldersInfo,
+  TrustedFolderKind,
+} from '../types/domain';
 
 const FEEDBACK_LABELS: Record<FeedbackChoice, string> = {
   applied_all: 'Applied all recommendations',
@@ -57,8 +63,27 @@ export function MatchHistoryView() {
     matchId: string;
     step: 1 | 2;
   } | null>(null);
+  const [foldersByMatch, setFoldersByMatch] = useState<
+    Record<string, MatchStorageFoldersInfo | undefined>
+  >({});
 
   const isNativeElectron = capabilities?.environment === 'electron-native';
+
+  useEffect(() => {
+    if (!expandedRecordingsMatchId) return;
+    let active = true;
+    desktopBridge
+      .getMatchStorageFolders(expandedRecordingsMatchId)
+      .then((info) => {
+        if (active) {
+          setFoldersByMatch((prev) => ({ ...prev, [expandedRecordingsMatchId]: info }));
+        }
+      })
+      .catch(() => {});
+    return () => {
+      active = false;
+    };
+  }, [expandedRecordingsMatchId, recordingSessions.length]);
 
   const feedbackByMatch = useMemo(
     () => new Map(feedbackRecords.map((f) => [f.matchId, f])),
@@ -167,11 +192,27 @@ export function MatchHistoryView() {
     }
   }
 
-  async function handleOpenFolder(folderPath: string) {
+  async function handleOpenTrustedFolder(
+    kind: TrustedFolderKind,
+    opts?: { matchId?: string; sessionId?: string }
+  ) {
     try {
-      await desktopBridge.openSessionFolder(folderPath);
+      await desktopBridge.openTrustedFolder({
+        kind,
+        matchId: opts?.matchId,
+        sessionId: opts?.sessionId,
+      });
     } catch (err) {
       notify('error', err instanceof Error ? err.message : 'Failed to open recording folder');
+    }
+  }
+
+  async function handleCopyPath(targetPath: string) {
+    try {
+      await navigator.clipboard.writeText(targetPath);
+      notify('success', 'Recording folder path copied to clipboard.');
+    } catch {
+      notify('error', 'Could not access clipboard to copy recording path.');
     }
   }
 
@@ -344,12 +385,81 @@ export function MatchHistoryView() {
                   </div>
                 </div>
 
-                {/* Phase 2 Recording Session History Panel */}
+                {/* Phase 2 & 3.0.1 Recording Session History Panel */}
                 {isShowingRecordings && matchRecordings.length > 0 && (
                   <div className="pt-4 border-t border-white/[0.08] space-y-3">
-                    <div className="text-[12px] font-medium text-[#C5CCD7]">
-                      Local Gameplay Recording Sessions
-                    </div>
+                    {(() => {
+                      const folderInfo = foldersByMatch[m.id];
+                      const copyTargetPath =
+                        folderInfo?.primaryDisplayPath ??
+                        folderInfo?.matchDirectory ??
+                        folderInfo?.firstHalfDirectory ??
+                        folderInfo?.secondHalfDirectory ??
+                        matchRecordings[0]?.outputDirectory ??
+                        null;
+                      return (
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <div className="text-[12px] font-medium text-[#C5CCD7] flex items-center gap-2">
+                            <span>Local Gameplay Recording Sessions</span>
+                            {folderInfo && (
+                              <span className="font-mono text-[11px] text-emerald-400">
+                                {folderInfo.storageLayoutVersion === 2
+                                  ? 'Structured v2'
+                                  : 'Legacy v1'}
+                              </span>
+                            )}
+                          </div>
+                          <div className="flex flex-wrap items-center gap-1.5 text-[11px]">
+                            {isNativeElectron && folderInfo?.matchFolderExists && (
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  void handleOpenTrustedFolder('match', { matchId: m.id })
+                                }
+                                className="inline-flex items-center gap-1 px-2.5 py-1 rounded border border-white/[0.12] hover:border-emerald-500/50 text-[#D7DDE7]"
+                              >
+                                <FolderOpen className="w-3 h-3" />
+                                Open Match Folder
+                              </button>
+                            )}
+                            {isNativeElectron && folderInfo?.firstHalfExists && (
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  void handleOpenTrustedFolder('first_half', { matchId: m.id })
+                                }
+                                className="inline-flex items-center gap-1 px-2.5 py-1 rounded border border-white/[0.12] hover:border-white/[0.25] text-[#D7DDE7]"
+                              >
+                                <FolderOpen className="w-3 h-3" />
+                                Open First Half Folder
+                              </button>
+                            )}
+                            {isNativeElectron && folderInfo?.secondHalfExists && (
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  void handleOpenTrustedFolder('second_half', { matchId: m.id })
+                                }
+                                className="inline-flex items-center gap-1 px-2.5 py-1 rounded border border-white/[0.12] hover:border-white/[0.25] text-[#D7DDE7]"
+                              >
+                                <FolderOpen className="w-3 h-3" />
+                                Open Second Half Folder
+                              </button>
+                            )}
+                            {copyTargetPath && (
+                              <button
+                                type="button"
+                                onClick={() => void handleCopyPath(copyTargetPath)}
+                                className="inline-flex items-center gap-1 px-2.5 py-1 rounded border border-white/[0.12] hover:border-white/[0.25] text-[#C5CCD7]"
+                              >
+                                <Copy className="w-3 h-3" />
+                                Copy Recording Path
+                              </button>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })()}
                     {matchRecordings.map((sess) => (
                       <div
                         key={sess.id}
@@ -359,7 +469,17 @@ export function MatchHistoryView() {
                           <div>
                             <div className="text-white font-medium">
                               {sess.half === 'first_half' ? 'First Half' : 'Second Half'} ·{' '}
-                              <span className="capitalize">{sess.status}</span> · Integrity:{' '}
+                              <span className="capitalize">{sess.status}</span> ·{' '}
+                              <span className="font-mono text-[11px] text-emerald-400">
+                                {sess.storageLayoutVersion === 2 ? 'v2' : 'v1'}
+                              </span>
+                              {sess.recordedFormationName ? (
+                                <span className="font-mono text-[11px] text-[#C5CCD7]">
+                                  {' '}
+                                  · {sess.recordedFormationName}
+                                </span>
+                              ) : null}{' '}
+                              · Integrity:{' '}
                               <span
                                 className={
                                   sess.integrityStatus === 'verified'
@@ -379,13 +499,26 @@ export function MatchHistoryView() {
                               segment{sess.segments.length === 1 ? '' : 's'} ·{' '}
                               {formatBytes(sess.totalBytes)} · {sess.resolution} @ {sess.fps} FPS
                             </div>
+                            {(sess.sessionDirectory || sess.outputDirectory) && (
+                              <div className="text-[#7D8798] font-mono text-[11px] mt-0.5 break-all">
+                                {sess.sessionDirectory ?? sess.outputDirectory}
+                              </div>
+                            )}
                           </div>
 
                           <div className="flex items-center gap-2">
-                            {isNativeElectron && sess.outputDirectory && (
+                            {isNativeElectron && (sess.outputDirectory || sess.sessionDirectory) && (
                               <button
                                 type="button"
-                                onClick={() => void handleOpenFolder(sess.outputDirectory!)}
+                                onClick={() =>
+                                  void handleOpenTrustedFolder(
+                                    sess.half === 'second_half' ? 'second_half' : 'first_half',
+                                    {
+                                      sessionId: sess.id,
+                                      matchId: sess.matchId,
+                                    }
+                                  )
+                                }
                                 className="inline-flex items-center gap-1 px-2.5 py-1 rounded border border-white/[0.12] hover:border-white/[0.25] text-[#D7DDE7]"
                               >
                                 <FolderOpen className="w-3.5 h-3.5" />
@@ -445,9 +578,10 @@ export function MatchHistoryView() {
                                 key={seg.id}
                                 className="py-1.5 flex flex-wrap items-center justify-between gap-2"
                               >
-                                <span className="font-mono tabular-nums text-[#C5CCD7]">
-                                  segment_{String(seg.segmentIndex).padStart(3, '0')}.mp4 ·{' '}
-                                  {formatDuration(seg.durationSeconds)} ·{' '}
+                                <span className="font-mono tabular-nums text-[#C5CCD7] break-all">
+                                  {seg.displayFileName ||
+                                    `segment_${String(seg.segmentIndex).padStart(3, '0')}.mp4`}{' '}
+                                  · {formatDuration(seg.durationSeconds)} ·{' '}
                                   {formatBytes(seg.sizeBytes)} ·{' '}
                                   <span className="uppercase">{seg.status}</span>
                                 </span>

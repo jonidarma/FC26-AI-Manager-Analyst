@@ -318,6 +318,9 @@ export interface MatchRecord {
   finalScoreFor: number | null;
   finalScoreAgainst: number | null;
   hasSecondHalfRecording: boolean;
+  storageLayoutVersion?: number;
+  storageCareerDirectory?: string | null;
+  storageMatchDirectory?: string | null;
   createdAt: string;
   updatedAt: string;
   tacticalConfiguration?: TacticalConfiguration | null;
@@ -377,6 +380,12 @@ export interface MatchSession {
   encoder?: string | null;
   audioEnabled?: boolean;
   outputDirectory?: string | null;
+  storageLayoutVersion?: number;
+  careerDirectory?: string | null;
+  matchDirectory?: string | null;
+  sessionDirectory?: string | null;
+  recordedFormationName?: string | null;
+  tacticalSnapshotId?: string | null;
   integrityStatus?: RecordingIntegrityStatus;
   /** True ONLY when media files passed FFprobe/size integrity checks; does NOT mean AI analysis completed. */
   aiEligible?: boolean;
@@ -396,6 +405,9 @@ export interface RecordingSegment {
   matchId: string;
   segmentIndex: number;
   filePath: string;
+  relativeMediaPath?: string | null;
+  originalFileName?: string | null;
+  displayFileName?: string | null;
   durationSeconds: number;
   sizeBytes: number;
   checksum: string | null;
@@ -802,6 +814,9 @@ export interface CaptureManifestSegment {
   index: number;
   fileName: string;
   filePath: string;
+  relativeMediaPath?: string | null;
+  originalFileName?: string | null;
+  displayFileName?: string | null;
   startedAt: string;
   endedAt: string | null;
   durationSeconds: number;
@@ -818,6 +833,7 @@ export interface CaptureManifestSegment {
 
 export interface CaptureManifest {
   manifestVersion: number;
+  storageLayoutVersion?: number;
   sessionId: string;
   matchId: string;
   half: 'first_half' | 'second_half';
@@ -833,6 +849,11 @@ export interface CaptureManifest {
   segmentDurationMinutes: number;
   maxRecordingMinutes: number;
   outputDirectory: string;
+  careerDirectory?: string | null;
+  matchDirectory?: string | null;
+  sessionDirectory?: string | null;
+  recordedFormationName?: string | null;
+  tacticalSnapshotId?: string | null;
   status:
     | 'recording'
     | 'paused'
@@ -884,6 +905,12 @@ export interface RecordingTelemetry {
   queuedBytes: number;
   backpressureActive: boolean;
   outputDirectory: string | null;
+  storageLayoutVersion?: number | null;
+  careerDirectory?: string | null;
+  matchDirectory?: string | null;
+  sessionDirectory?: string | null;
+  recordedFormationName?: string | null;
+  currentFileName?: string | null;
   integrityStatus: RecordingIntegrityStatus;
   aiEligible: boolean;
   failureReason: string | null;
@@ -2074,4 +2101,67 @@ export interface MatchAnalysisBundle {
   secondHalfComparison: AiSecondHalfComparisonPayload | null;
 }
 
+// ============================================================
+// Phase 3.0.1 — Structured Career Mode Recording Storage & Path Resolution
+// ============================================================
 
+export type TrustedFolderKind =
+  | 'storage_root'
+  | 'legacy_recordings_root'
+  | 'match'
+  | 'first_half'
+  | 'second_half'
+  | 'evidence'
+  | 'diagnostics'
+  | 'ai_analysis';
+
+export interface MatchRecordingStoragePreview {
+  appStorageRoot: string;
+  careerFolderName: string;
+  matchFolderName: string;
+  firstHalfFolderRel: string;
+  secondHalfFolderRel: string;
+  exampleFirstHalfFileName: string;
+  exampleSecondHalfFileName: string;
+  matchDateValid: boolean;
+  warnings: string[];
+}
+
+export interface MatchStorageFoldersInfo {
+  matchId: string;
+  storageLayoutVersion: number;
+  appStorageRoot: string;
+  careerDirectory: string | null;
+  matchDirectory: string | null;
+  matchFolderExists: boolean;
+  firstHalfDirectory: string | null;
+  firstHalfExists: boolean;
+  secondHalfDirectory: string | null;
+  secondHalfExists: boolean;
+  evidenceFramesDirectory: string | null;
+  evidenceFramesExists: boolean;
+  aiAnalysisDirectory: string | null;
+  aiAnalysisExists: boolean;
+  diagnosticsDirectory: string | null;
+  diagnosticsExists: boolean;
+  primaryDisplayPath: string | null;
+}
+
+export interface StorageOverviewInfo {
+  appStorageRoot: string;
+  legacyRecordingsRoot: string;
+  databaseDirectory: string;
+  storageMode: 'electron-user-data' | 'workspace-preview';
+  structuredLayoutVersion: number;
+  namingConventions: {
+    careerFolderTemplate: string;
+    matchFolderTemplate: string;
+    videoFileTemplate: string;
+  };
+  exampleTree: string[];
+  stats: {
+    structuredSessionsCount: number;
+    legacySessionsCount: number;
+    totalSegmentsCount: number;
+  };
+}

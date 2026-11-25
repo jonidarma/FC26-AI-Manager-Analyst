@@ -33,6 +33,45 @@ export function resolveDatabaseLocation(): {
   };
 }
 
+/**
+ * Resolves the authoritative application userData storage root directory.
+ *
+ * - In packaged/native Electron on Windows:
+ *     C:\Users\<User>\AppData\Roaming\fc26-ai-manager
+ *   (where database lives at <appStorageRoot>\database\fc26_manager.db,
+ *    legacy v1 recordings live at <appStorageRoot>\recordings\...,
+ *    and structured v2 Career Mode folders live directly at <appStorageRoot>\<Club>-Career-Mode\...)
+ * - In browser preview / CLI tests without FC26_APP_USER_DATA_ROOT:
+ *     if FC26_USER_DATA_DIR ends with "database", uses its parent directory;
+ *     otherwise uses resolveDatabaseLocation().dataDir.
+ *
+ * CRITICAL: Never alters resolveDatabaseLocation().dbPath.
+ */
+export function resolveAppStorageRoot(): string {
+  const explicitRoot = process.env.FC26_APP_USER_DATA_ROOT?.trim();
+  if (explicitRoot) {
+    return path.resolve(explicitRoot);
+  }
+
+  const { dataDir } = resolveDatabaseLocation();
+  if (path.basename(dataDir).toLowerCase() === 'database') {
+    return path.dirname(dataDir);
+  }
+  return dataDir;
+}
+
+/**
+ * Resolves the legacy Phase 2/2.1/2.2/3 recordings directory (e.g. <userData>/recordings).
+ * Used strictly for backward-compatible resolution of existing v1 recordings.
+ */
+export function resolveLegacyRecordingsRoot(): string {
+  const explicitRecDir = process.env.FC26_RECORDINGS_DIR?.trim();
+  if (explicitRecDir) {
+    return path.resolve(explicitRecDir);
+  }
+  return path.join(resolveAppStorageRoot(), 'recordings');
+}
+
 export const DEFAULT_APP_SETTINGS: ApplicationSettings = {
   capture: {
     resolution: '1920x1080',
@@ -258,7 +297,7 @@ export function getDatabaseMetadata(): {
     storageMode,
     dbDirectory: dataDir,
     sizeBytes,
-    schemaVersion: versionRow?.version ?? 6,
+    schemaVersion: versionRow?.version ?? 7,
     tableCounts,
   };
 }
@@ -276,9 +315,9 @@ export function exportDatabaseBackup(): Record<string, unknown> {
     .get() as { version: number | null };
 
   return {
-    format: 'fc26-ai-manager-backup-v6',
+    format: 'fc26-ai-manager-backup-v7',
     exportedAt: new Date().toISOString(),
-    schemaVersion: versionRow?.version ?? 6,
+    schemaVersion: versionRow?.version ?? 7,
     tables: data,
   };
 }
@@ -293,11 +332,12 @@ export function restoreDatabaseBackup(payload: {
     payload.format === 'fc26-ai-manager-backup-v3' ||
     payload.format === 'fc26-ai-manager-backup-v4' ||
     payload.format === 'fc26-ai-manager-backup-v5' ||
-    payload.format === 'fc26-ai-manager-backup-v6';
+    payload.format === 'fc26-ai-manager-backup-v6' ||
+    payload.format === 'fc26-ai-manager-backup-v7';
 
   if ((!isV1 && !isFullBackup) || !payload.tables) {
     throw new Error(
-      'Invalid backup format. Expected fc26-ai-manager-backup-v6 (or legacy v1/v2/v3/v4/v5).'
+      'Invalid backup format. Expected fc26-ai-manager-backup-v7 (or legacy v1–v6).'
     );
   }
 

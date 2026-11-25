@@ -1532,6 +1532,32 @@ export const MIGRATIONS: Migration[] = [
       }
     },
   },
+  {
+    version: 7,
+    name: 'phase_3_0_1_structured_recording_storage_v7',
+    sql: `SELECT 1;`,
+    afterSql: (db: Database.Database) => {
+      // Non-destructively extend Career Mode, match, session, and segment tables for
+      // Phase 3.0.1 structured Career Mode recording storage & canonical media path resolution.
+      // All existing legacy rows default cleanly to storage_layout_version = 1 without moving files.
+      addColumnIfMissing(db, 'career_profiles', 'storage_career_directory', 'TEXT');
+
+      addColumnIfMissing(db, 'matches', 'storage_layout_version', 'INTEGER NOT NULL DEFAULT 1');
+      addColumnIfMissing(db, 'matches', 'storage_career_directory', 'TEXT');
+      addColumnIfMissing(db, 'matches', 'storage_match_directory', 'TEXT');
+
+      addColumnIfMissing(db, 'match_sessions', 'storage_layout_version', 'INTEGER NOT NULL DEFAULT 1');
+      addColumnIfMissing(db, 'match_sessions', 'career_directory', 'TEXT');
+      addColumnIfMissing(db, 'match_sessions', 'match_directory', 'TEXT');
+      addColumnIfMissing(db, 'match_sessions', 'session_directory', 'TEXT');
+      addColumnIfMissing(db, 'match_sessions', 'recorded_formation_name', 'TEXT');
+      addColumnIfMissing(db, 'match_sessions', 'tactical_snapshot_id', 'TEXT');
+
+      addColumnIfMissing(db, 'recording_segments', 'relative_media_path', 'TEXT');
+      addColumnIfMissing(db, 'recording_segments', 'original_file_name', 'TEXT');
+      addColumnIfMissing(db, 'recording_segments', 'display_file_name', 'TEXT');
+    },
+  },
 ];
 
 export function runMigrations(db: Database.Database): void {

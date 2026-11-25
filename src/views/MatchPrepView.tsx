@@ -3,6 +3,7 @@ import {
   ArrowRight,
   Eye,
   EyeOff,
+  FolderOpen,
   Lock,
   ShieldAlert,
   SlidersHorizontal,
@@ -18,6 +19,7 @@ import type {
   CatalogClub,
   CatalogFormation,
   CatalogRole,
+  MatchRecordingStoragePreview,
   MatchVenue,
   PlayerRoleAssignment,
   TacticalPreset,
@@ -107,6 +109,7 @@ export function MatchPrepView() {
   const [assignments, setAssignments] = useState<PlayerRoleAssignment[]>([]);
   const [benchIds, setBenchIds] = useState<string[]>([]);
   const [saving, setSaving] = useState(false);
+  const [storagePreview, setStoragePreview] = useState<MatchRecordingStoragePreview | null>(null);
 
   const playerById = useMemo(() => new Map(players.map((p) => [p.id, p])), [players]);
 
@@ -247,6 +250,44 @@ export function MatchPrepView() {
       window.clearTimeout(timer);
     };
   }, [opponentMode, newOpponentName]);
+
+  // Phase 3.0.1 Live Structured Recording Folder & Filename Preview
+  const effectiveOpponentName = useMemo(() => {
+    if (opponentMode === 'existing') {
+      return opponents.find((o) => o.id === selectedOpponentId)?.name ?? 'Opponent';
+    }
+    return newOpponentName.trim() || 'Opponent';
+  }, [opponentMode, opponents, selectedOpponentId, newOpponentName]);
+
+  useEffect(() => {
+    if (!activeClub) {
+      setStoragePreview(null);
+      return;
+    }
+    let active = true;
+    const timer = window.setTimeout(() => {
+      desktopBridge
+        .previewMatchStoragePlan({
+          clubId: activeClub.id,
+          clubName: activeClub.name,
+          opponentName: effectiveOpponentName,
+          competition: competition.trim() || activeClub.league || 'Competition',
+          matchDate,
+          formationName: formation,
+          half: 'first_half',
+        })
+        .then((res) => {
+          if (active) setStoragePreview(res);
+        })
+        .catch(() => {
+          if (active) setStoragePreview(null);
+        });
+    }, 180);
+    return () => {
+      active = false;
+      window.clearTimeout(timer);
+    };
+  }, [activeClub, effectiveOpponentName, competition, matchDate, formation]);
 
   const selectedPreset = useMemo(
     () => tacticalPresets.find((p) => p.id === selectedPresetId) ?? null,
@@ -1117,6 +1158,44 @@ export function MatchPrepView() {
               </div>
             </div>
           </div>
+
+          {storagePreview && (
+            <div className="mt-4 pt-4 border-t border-white/[0.08] space-y-2 text-[11px]">
+              <div className="flex items-center justify-between gap-2">
+                <span className="inline-flex items-center gap-1.5 text-[12px] font-semibold text-white">
+                  <FolderOpen className="w-3.5 h-3.5 text-emerald-400" />
+                  Recording Storage Preview (v2)
+                </span>
+                <span className="font-mono text-[#7D8798]">Career Mode Layout</span>
+              </div>
+              <div className="rounded border border-white/[0.07] bg-[#0C0F14] p-2.5 space-y-1.5 font-mono">
+                <div>
+                  <span className="text-[#7D8798]">Career Folder: </span>
+                  <span className="text-[#D7DDE7] break-all">
+                    {storagePreview.careerFolderName}
+                  </span>
+                </div>
+                <div>
+                  <span className="text-[#7D8798]">Match Folder: </span>
+                  <span className="text-emerald-300 break-all">
+                    {storagePreview.matchFolderName}
+                  </span>
+                </div>
+                <div>
+                  <span className="text-[#7D8798]">First Half File: </span>
+                  <span className="text-white break-all">
+                    {storagePreview.exampleFirstHalfFileName}
+                  </span>
+                </div>
+              </div>
+              {storagePreview.warnings.length > 0 && (
+                <div className="rounded border border-amber-500/35 bg-amber-500/[0.07] px-2.5 py-2 text-amber-200 flex items-start gap-2">
+                  <AlertTriangle className="w-3.5 h-3.5 text-amber-400 shrink-0 mt-0.5" />
+                  <span>{storagePreview.warnings.join(' ')}</span>
+                </div>
+              )}
+            </div>
+          )}
         </div>
       </div>
     </form>

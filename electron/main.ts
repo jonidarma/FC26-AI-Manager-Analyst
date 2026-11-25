@@ -53,8 +53,15 @@ import {
   FfmpegSegmentProcess,
   probeFfmpegCapabilities,
   probeMediaFile,
+  resolveFfmpegBinaries,
   type FfmpegBinaryResolution,
 } from './ffmpegRecordingService';
+import {
+  buildStructuredSegmentFileName,
+  canonicalizeAndContainPath,
+  toPortableRelativePath,
+  type MatchRecordingStoragePlan,
+} from '../shared/recordingStorage';
 
 const FC26_WINDOW_PATTERN = /ea\s*sports\s*fc\s*26|\bfc\s*26\b|\bfc26\b/i;
 const APP_OWN_WINDOW_PATTERN = /fc26\s*ai\s*manager/i;
@@ -71,6 +78,7 @@ let quitShutdownCompleted = false;
 let ipcHandlersRegistered = false;
 let transportReady = true;
 
+let userDataRootGlobal = '';
 let recordingsRootDirGlobal = '';
 let logsDirGlobal = '';
 let backendLogPathGlobal = '';
@@ -203,6 +211,12 @@ function buildIdleTelemetry(): RecordingTelemetry {
     queuedBytes: 0,
     backpressureActive: false,
     outputDirectory: null,
+    storageLayoutVersion: 2,
+    careerDirectory: null,
+    matchDirectory: null,
+    sessionDirectory: null,
+    recordedFormationName: null,
+    currentFileName: null,
     integrityStatus: 'pending',
     aiEligible: false,
     failureReason: null,
@@ -360,6 +374,23 @@ function buildActiveTelemetry(state: ActiveRecordingState): RecordingTelemetry {
     queuedBytes: diagnostics.queueSizeBytes,
     backpressureActive: state.ffmpeg?.getMetrics().backpressureActive ?? false,
     outputDirectory: state.manifest.outputDirectory,
+    storageLayoutVersion: state.manifest.storageLayoutVersion ?? 1,
+    careerDirectory: state.manifest.careerDirectory ?? null,
+    matchDirectory: state.manifest.matchDirectory ?? null,
+    sessionDirectory: state.manifest.sessionDirectory ?? null,
+    recordedFormationName: state.manifest.recordedFormationName ?? null,
+    currentFileName:
+      state.manifest.storageLayoutVersion === 2 && state.manifest.namingMetadata
+        ? buildStructuredSegmentFileName({
+            userClubName: state.manifest.namingMetadata.userClubName,
+            opponentClubName: state.manifest.namingMetadata.opponentClubName,
+            competitionName: state.manifest.namingMetadata.competitionName,
+            formationName: state.manifest.namingMetadata.formationName,
+            matchDate: state.manifest.namingMetadata.matchDate,
+            partNumber: Math.max(1, state.currentSegmentIndex),
+            parentDirectoryPath: state.manifest.outputDirectory,
+          })
+        : `segment_${String(Math.max(1, state.currentSegmentIndex)).padStart(3, '0')}.mp4`,
     integrityStatus: state.manifest.integrityStatus,
     aiEligible: state.manifest.aiEligible,
     failureReason: state.manifest.failureReason,
@@ -416,6 +447,7 @@ function findFreeLoopbackPort(): Promise<number> {
 function resolvePackagedPaths(): {
   serverScriptPath: string;
   staticDistDir: string;
+  userDataRoot: string;
   userDataDbDir: string;
   recordingsRootDir: string;
   logsDir: string;
@@ -459,6 +491,7 @@ function resolvePackagedPaths(): {
   return {
     serverScriptPath,
     staticDistDir,
+    userDataRoot,
     userDataDbDir,
     recordingsRootDir,
     logsDir,
@@ -550,6 +583,12 @@ async function syncSessionToBackend(manifest: CaptureManifest): Promise<void> {
     encoder: manifest.encoder,
     audioEnabled: manifest.audioActive,
     outputDirectory: manifest.outputDirectory,
+    storageLayoutVersion: manifest.storageLayoutVersion ?? 1,
+    careerDirectory: manifest.careerDirectory ?? null,
+    matchDirectory: manifest.matchDirectory ?? null,
+    sessionDirectory: manifest.sessionDirectory ?? null,
+    recordedFormationName: manifest.recordedFormationName ?? null,
+    tacticalSnapshotId: manifest.tacticalSnapshotId ?? null,
     integrityStatus: manifest.integrityStatus,
     aiEligible: manifest.aiEligible,
     failureReason: manifest.failureReason,
@@ -568,6 +607,12 @@ async function syncSessionPatchToBackend(manifest: CaptureManifest): Promise<voi
     encoder: manifest.encoder,
     audioEnabled: manifest.audioActive,
     outputDirectory: manifest.outputDirectory,
+    storageLayoutVersion: manifest.storageLayoutVersion ?? 1,
+    careerDirectory: manifest.careerDirectory ?? null,
+    matchDirectory: manifest.matchDirectory ?? null,
+    sessionDirectory: manifest.sessionDirectory ?? null,
+    recordedFormationName: manifest.recordedFormationName ?? null,
+    tacticalSnapshotId: manifest.tacticalSnapshotId ?? null,
     integrityStatus: manifest.integrityStatus,
     aiEligible: manifest.aiEligible,
     failureReason: manifest.failureReason,
@@ -602,6 +647,9 @@ async function syncSegmentToBackend(
     {
       matchId: manifest.matchId,
       filePath: seg.filePath,
+      relativeMediaPath: seg.relativeMediaPath ?? null,
+      originalFileName: seg.originalFileName ?? null,
+      displayFileName: seg.displayFileName ?? seg.fileName,
       durationSeconds: seg.durationSeconds,
       sizeBytes: seg.sizeBytes,
       checksum: seg.checksum,
@@ -948,16 +996,58 @@ async function verifyAndRecordSegment(
     }
   }
 
+  let finalFileName = segmentFileName;
+  let finalFilePath = segmentFilePath;
+  let originalFileName = segmentFileName;
+  let displayFileName = segmentFileName;
+  let relativeMediaPath = toPortableRelativePath(
+    segmentFilePath,
+    captureEngine.appStorageRoot
+  );
+
+  // Atomically rename temp FFmpeg staging file (.fc26_seg_NNN.mp4) to structured human-readable
+  // Part N filename ONLY AFTER FFmpeg has finalized/closed the segment and FFprobe passed.
+  if (
+    finalProbe.valid &&
+    state.manifest.storageLayoutVersion === 2 &&
+    state.manifest.namingMetadata &&
+    segmentFileName.startsWith('.fc26_seg_')
+  ) {
+    try {
+      const renamed = captureEngine.finalizeStructuredSegmentFile(
+        state.manifest,
+        segmentFilePath,
+        segmentIndex
+      );
+      finalFileName = renamed.fileName;
+      finalFilePath = renamed.filePath;
+      originalFileName = renamed.originalFileName;
+      displayFileName = renamed.displayFileName;
+      relativeMediaPath = renamed.relativeMediaPath;
+    } catch (renameErr) {
+      const msg = renameErr instanceof Error ? renameErr.message : String(renameErr);
+      state.lastWarning = `Preserved staged segment filename (${segmentFileName}): ${msg}`;
+      captureEngine.appendDiagnosticEvent(state.matchId, state.sessionId, {
+        level: 'warn',
+        stage: 'finalization',
+        message: state.lastWarning,
+      });
+    }
+  }
+
   const checksum =
-    finalProbe.valid && fs.existsSync(segmentFilePath)
-      ? await computeFileSha256(segmentFilePath)
+    finalProbe.valid && fs.existsSync(finalFilePath)
+      ? await computeFileSha256(finalFilePath)
       : null;
 
   const now = new Date().toISOString();
   const segmentRecord: CaptureManifestSegment = {
     index: segmentIndex,
-    fileName: segmentFileName,
-    filePath: segmentFilePath,
+    fileName: finalFileName,
+    filePath: finalFilePath,
+    relativeMediaPath,
+    originalFileName,
+    displayFileName,
     startedAt: state.manifest.startedAt,
     endedAt: now,
     durationSeconds: finalProbe.durationSeconds,
@@ -1013,6 +1103,7 @@ function spawnFfmpegForActiveSession(
       startSegmentIndex: startIdx,
       outputDirectory: state.manifest.outputDirectory,
       segmentListPath,
+      segmentFilePrefix: state.manifest.storageLayoutVersion === 2 ? '.fc26_seg_' : 'segment_',
     },
     {
       onSegmentFinalized: (fileName, filePath, segIndex) => {
@@ -1484,6 +1575,7 @@ async function startLocalBackend(): Promise<void> {
   const {
     serverScriptPath,
     staticDistDir,
+    userDataRoot,
     userDataDbDir,
     recordingsRootDir,
     logsDir,
@@ -1492,14 +1584,21 @@ async function startLocalBackend(): Promise<void> {
     asarNodeModulesDir,
   } = resolvePackagedPaths();
 
+  userDataRootGlobal = userDataRoot;
   recordingsRootDirGlobal = recordingsRootDir;
   logsDirGlobal = logsDir;
   backendLogPathGlobal = path.join(logsDir, 'backend-startup.log');
   backendStderrTail = [];
-  captureEngine = new CaptureSessionEngine(recordingsRootDir);
+  captureEngine = new CaptureSessionEngine(recordingsRootDir, userDataRoot);
+
+  const resolvedBinaries = resolveFfmpegBinaries({
+    isPackaged: app.isPackaged,
+    appPath: app.getAppPath(),
+    resourcesPath: process.resourcesPath,
+  });
 
   appendBackendStartupLog(
-    `Starting local backend (isPackaged=${app.isPackaged}, platform=${process.platform}, serverScript=${serverScriptPath}, userDataDbDir=${userDataDbDir})`
+    `Starting local backend (isPackaged=${app.isPackaged}, platform=${process.platform}, serverScript=${serverScriptPath}, userDataRoot=${userDataRoot}, userDataDbDir=${userDataDbDir}, recordingsRootDir=${recordingsRootDir})`
   );
 
   if (!fs.existsSync(serverScriptPath)) {
@@ -1537,7 +1636,12 @@ async function startLocalBackend(): Promise<void> {
       FC26_DESKTOP_MODE: '1',
       FC26_HOST: '127.0.0.1',
       FC26_PORT: String(backendPort),
+      FC26_APP_USER_DATA_ROOT: userDataRoot,
+      FC26_RECORDINGS_DIR: recordingsRootDir,
       FC26_USER_DATA_DIR: userDataDbDir,
+      FC26_RESOURCES_DIR: process.resourcesPath,
+      ...(resolvedBinaries.ffmpegPath ? { FC26_FFMPEG_PATH: resolvedBinaries.ffmpegPath } : {}),
+      ...(resolvedBinaries.ffprobePath ? { FC26_FFPROBE_PATH: resolvedBinaries.ffprobePath } : {}),
       FC26_STATIC_DIR: staticDistDir,
       FC26_REFERENCE_DATA_DIR: referenceDataDir,
       FC26_API_TOKEN: sessionApiToken,
@@ -1767,12 +1871,23 @@ function registerIpcHandlers(): void {
         throw new Error('Capture source must be explicitly selected and verified before recording.');
       }
 
-      const availBytes = getAvailableDiskBytes(recordingsRootDirGlobal);
+      const availBytes = getAvailableDiskBytes(userDataRootGlobal || recordingsRootDirGlobal);
       if (availBytes !== null && availBytes < CRITICAL_DISK_STOP_BYTES) {
         throw new Error(
           'Insufficient disk space (< 150 MB free) to start recording. Free local disk space first.'
         );
       }
+
+      // Request authoritative Phase 3.0.1 structured Career Mode storage plan from local backend
+      const storagePlan = await localBackendRequest<MatchRecordingStoragePlan>(
+        'POST',
+        `/api/matches/${encodeURIComponent(matchId)}/storage-plan`,
+        {
+          half,
+          allocateIfMissing: true,
+          createNewSessionSubdir: true,
+        }
+      );
 
       const manifest = captureEngine.createSessionManifest({
         matchId,
@@ -1788,6 +1903,7 @@ function registerIpcHandlers(): void {
         audioActive: Boolean(req.audioActive && probe.capabilities.aacAudioAvailable),
         segmentDurationMinutes,
         maxRecordingMinutes,
+        storagePlan,
       });
 
       const startupTimeoutSeconds = Math.max(
@@ -2181,6 +2297,71 @@ function registerIpcHandlers(): void {
     }
     return { opened: true, path: safeFolder };
   });
+
+  ipcMain.handle(
+    'capture:open-trusted-folder',
+    async (
+      event,
+      payload: {
+        kind:
+          | 'storage_root'
+          | 'legacy_recordings_root'
+          | 'career_root'
+          | 'match_root'
+          | 'first_half'
+          | 'second_half'
+          | 'session_dir'
+          | 'evidence_frames'
+          | 'ai_analysis'
+          | 'diagnostics';
+        matchId?: string;
+        sessionId?: string;
+      }
+    ) => {
+      assertAuthorizedSender(event.sender);
+      if (!captureEngine || !payload || typeof payload.kind !== 'string') {
+        throw new Error('Invalid trusted folder request.');
+      }
+
+      const allowedRoots = captureEngine.getAllowedRoots();
+      let resolvedTarget: string | null = null;
+
+      if (payload.kind === 'storage_root') {
+        resolvedTarget = userDataRootGlobal || captureEngine.appStorageRoot;
+      } else if (payload.kind === 'legacy_recordings_root') {
+        resolvedTarget = recordingsRootDirGlobal || captureEngine.rootDir;
+      } else {
+        const res = await localBackendRequest<{ folderPath?: string }>(
+          'POST',
+          '/api/storage/resolve-trusted-folder',
+          {
+            kind: payload.kind,
+            ...(payload.matchId ? { matchId: validateSafeId(payload.matchId, 'matchId') } : {}),
+            ...(payload.sessionId
+              ? { sessionId: validateSafeId(payload.sessionId, 'sessionId') }
+              : {}),
+          }
+        );
+        resolvedTarget = res?.folderPath ?? null;
+      }
+
+      if (!resolvedTarget) {
+        throw new Error('Requested recording folder does not exist yet for this match or session.');
+      }
+
+      const safeFolder = canonicalizeAndContainPath(resolvedTarget, allowedRoots, {
+        requireExists: true,
+        requireDirectory: true,
+        allowEqualRoot: true,
+      });
+
+      const errMsg = await shell.openPath(safeFolder);
+      if (errMsg) {
+        throw new Error(`Failed to open folder in Explorer: ${errMsg}`);
+      }
+      return { opened: true, path: safeFolder };
+    }
+  );
 
   ipcMain.handle('capture:open-diagnostics-folder', async (event) => {
     assertAuthorizedSender(event.sender);
