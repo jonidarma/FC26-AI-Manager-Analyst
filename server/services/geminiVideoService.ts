@@ -1,3 +1,4 @@
+import fs from 'node:fs';
 import { createPartFromUri, Type } from '@google/genai';
 import type {
   AiGameplayObservationRecord,
@@ -15,6 +16,20 @@ import type {
   VideoAnalysisMode,
   VideoContentType,
 } from '../../src/types/domain.ts';
+import {
+  CANONICAL_ACTION_TYPES,
+  CANONICAL_CATEGORY_GROUPS,
+  CANONICAL_CONFIDENCE_LEVELS,
+  CANONICAL_CRITERIA_ASSESSMENTS,
+  CANONICAL_EVIDENCE_QUALITIES,
+  CANONICAL_EVIDENCE_TYPES,
+  CANONICAL_OUTCOME_ASSESSMENTS,
+  CANONICAL_PRIORITY_GROUPS,
+  CANONICAL_RECOMMENDATION_STANCES,
+  CANONICAL_SEVERITY_LEVELS,
+  CANONICAL_TEAM_ATTRIBUTIONS,
+  CANONICAL_VIDEO_CONTENT_TYPES,
+} from './aiResponseValidationService.ts';
 import type { RawAiRecommendationInput } from './analysisValidationService.ts';
 import {
   classifyGeminiError,
@@ -23,8 +38,312 @@ import {
   PERMANENT_NON_RETRYABLE_ERROR_CODES,
 } from './geminiService.ts';
 
-export const PROMPT_VERSION = 'fc26-halftime-analyst-v3.0.2';
-export const SCHEMA_VERSION = 'fc26-analysis-schema-v3.0.0';
+export const PROMPT_VERSION = 'fc26-halftime-analyst-v3.0.3';
+export const SCHEMA_VERSION = 'fc26-analysis-schema-v3.0.3';
+
+// ============================================================
+// Canonical Gemini Structured Output Schemas (Strict Enum Constrained)
+// Every enum value strictly matches SQLite CHECK constraints.
+// ============================================================
+
+export function buildStage1ClassificationSchema() {
+  return {
+    type: Type.OBJECT,
+    properties: {
+      segments: {
+        type: Type.ARRAY,
+        items: {
+          type: Type.OBJECT,
+          properties: {
+            startSeconds: { type: Type.NUMBER },
+            endSeconds: { type: Type.NUMBER },
+            contentType: { type: Type.STRING, enum: [...CANONICAL_VIDEO_CONTENT_TYPES] },
+            confidence: { type: Type.STRING, enum: [...CANONICAL_CONFIDENCE_LEVELS] },
+            evidenceDescription: { type: Type.STRING },
+            inGameClock: { type: Type.STRING, nullable: true },
+          },
+          required: [
+            'startSeconds',
+            'endSeconds',
+            'contentType',
+            'confidence',
+            'evidenceDescription',
+          ],
+        },
+      },
+      readableHudStats: {
+        type: Type.OBJECT,
+        properties: {
+          scoreline: { type: Type.STRING, nullable: true },
+          matchClock: { type: Type.STRING, nullable: true },
+          possessionLabel: { type: Type.STRING, nullable: true },
+          shotsLabel: { type: Type.STRING, nullable: true },
+          otherVerifiedStats: {
+            type: Type.ARRAY,
+            items: {
+              type: Type.OBJECT,
+              properties: {
+                label: { type: Type.STRING },
+                value: { type: Type.STRING },
+              },
+              required: ['label', 'value'],
+            },
+          },
+        },
+        required: ['otherVerifiedStats'],
+      },
+    },
+    required: ['segments', 'readableHudStats'],
+  };
+}
+
+export function buildStage2ObservationSchema() {
+  return {
+    type: Type.OBJECT,
+    properties: {
+      observations: {
+        type: Type.ARRAY,
+        items: {
+          type: Type.OBJECT,
+          properties: {
+            startSeconds: { type: Type.NUMBER },
+            endSeconds: { type: Type.NUMBER },
+            inGameClock: { type: Type.STRING, nullable: true },
+            categoryGroup: { type: Type.STRING, enum: [...CANONICAL_CATEGORY_GROUPS] },
+            category: { type: Type.STRING },
+            teamAttribution: { type: Type.STRING, enum: [...CANONICAL_TEAM_ATTRIBUTIONS] },
+            playerAttribution: { type: Type.STRING },
+            description: { type: Type.STRING },
+            supportingVisualEvidence: { type: Type.STRING },
+            evidenceType: { type: Type.STRING, enum: [...CANONICAL_EVIDENCE_TYPES] },
+            confidence: { type: Type.STRING, enum: [...CANONICAL_CONFIDENCE_LEVELS] },
+            severity: { type: Type.STRING, enum: [...CANONICAL_SEVERITY_LEVELS] },
+            limitations: { type: Type.STRING },
+            isFromReplay: { type: Type.BOOLEAN },
+          },
+          required: [
+            'startSeconds',
+            'endSeconds',
+            'categoryGroup',
+            'category',
+            'teamAttribution',
+            'playerAttribution',
+            'description',
+            'supportingVisualEvidence',
+            'evidenceType',
+            'confidence',
+            'severity',
+            'isFromReplay',
+          ],
+        },
+      },
+    },
+    required: ['observations'],
+  };
+}
+
+export function buildStage3SynthesisSchema() {
+  return {
+    type: Type.OBJECT,
+    properties: {
+      evidenceQuality: { type: Type.STRING, enum: [...CANONICAL_EVIDENCE_QUALITIES] },
+      managerVerdict: {
+        type: Type.OBJECT,
+        properties: {
+          whatIsWorking: { type: Type.ARRAY, items: { type: Type.STRING } },
+          whatIsNotWorking: { type: Type.ARRAY, items: { type: Type.STRING } },
+          whyTacticStruggling: { type: Type.STRING },
+          firstPriorityChange: { type: Type.STRING },
+          conciseSummary: { type: Type.STRING },
+        },
+        required: [
+          'whatIsWorking',
+          'whatIsNotWorking',
+          'whyTacticStruggling',
+          'firstPriorityChange',
+          'conciseSummary',
+        ],
+      },
+      gameplayCoaching: {
+        type: Type.ARRAY,
+        items: {
+          type: Type.OBJECT,
+          properties: {
+            instruction: { type: Type.STRING },
+            triggerSituation: { type: Type.STRING },
+            evidenceNote: { type: Type.STRING },
+          },
+          required: ['instruction', 'triggerSituation', 'evidenceNote'],
+        },
+      },
+      contingencyPlan: {
+        type: Type.ARRAY,
+        items: {
+          type: Type.OBJECT,
+          properties: {
+            scenario: { type: Type.STRING },
+            trigger: { type: Type.STRING },
+            tacticalAction: { type: Type.STRING },
+          },
+          required: ['scenario', 'trigger', 'tacticalAction'],
+        },
+      },
+      limitations: { type: Type.ARRAY, items: { type: Type.STRING } },
+      visionAssessment: {
+        type: Type.OBJECT,
+        properties: {
+          observedPlayingStyle: {
+            type: Type.OBJECT,
+            properties: {
+              primaryTendency: { type: Type.STRING },
+              mixedTendencies: { type: Type.ARRAY, items: { type: Type.STRING } },
+              evidenceSummary: { type: Type.STRING },
+              isInsufficientEvidence: { type: Type.BOOLEAN },
+            },
+            required: [
+              'primaryTendency',
+              'mixedTendencies',
+              'evidenceSummary',
+              'isInsufficientEvidence',
+            ],
+          },
+          recommendedVisionKey: { type: Type.STRING },
+          recommendationStance: { type: Type.STRING, enum: [...CANONICAL_RECOMMENDATION_STANCES] },
+          recommendationRationale: { type: Type.STRING },
+          executionAssessmentLabel: { type: Type.STRING },
+          internalAssessmentScore: { type: Type.INTEGER, nullable: true },
+          scoreMethodologyNote: { type: Type.STRING },
+          criteriaBreakdown: {
+            type: Type.ARRAY,
+            items: {
+              type: Type.OBJECT,
+              properties: {
+                criterion: { type: Type.STRING },
+                assessment: { type: Type.STRING, enum: [...CANONICAL_CRITERIA_ASSESSMENTS] },
+                evidenceNote: { type: Type.STRING },
+              },
+              required: ['criterion', 'assessment', 'evidenceNote'],
+            },
+          },
+          confidence: { type: Type.STRING, enum: [...CANONICAL_CONFIDENCE_LEVELS] },
+          limitations: { type: Type.STRING },
+        },
+        required: [
+          'observedPlayingStyle',
+          'recommendedVisionKey',
+          'recommendationStance',
+          'recommendationRationale',
+          'executionAssessmentLabel',
+          'scoreMethodologyNote',
+          'criteriaBreakdown',
+          'confidence',
+        ],
+      },
+      recommendations: {
+        type: Type.ARRAY,
+        items: {
+          type: Type.OBJECT,
+          properties: {
+            priorityGroup: { type: Type.STRING, enum: [...CANONICAL_PRIORITY_GROUPS] },
+            priorityRank: { type: Type.INTEGER },
+            title: { type: Type.STRING },
+            actionType: { type: Type.STRING, enum: [...CANONICAL_ACTION_TYPES] },
+            targetSlotId: { type: Type.STRING, nullable: true },
+            targetPositionCode: { type: Type.STRING, nullable: true },
+            currentValue: { type: Type.STRING },
+            proposedValue: { type: Type.STRING },
+            targetPlayerOutId: { type: Type.STRING, nullable: true },
+            targetPlayerInId: { type: Type.STRING, nullable: true },
+            reason: { type: Type.STRING },
+            expectedBenefit: { type: Type.STRING },
+            potentialRisk: { type: Type.STRING },
+            evidenceObservationIds: { type: Type.ARRAY, items: { type: Type.STRING } },
+            evidenceTimestamps: {
+              type: Type.ARRAY,
+              items: {
+                type: Type.OBJECT,
+                properties: {
+                  segmentId: { type: Type.STRING, nullable: true },
+                  startSeconds: { type: Type.NUMBER },
+                  endSeconds: { type: Type.NUMBER },
+                  inGameClock: { type: Type.STRING, nullable: true },
+                },
+                required: ['startSeconds', 'endSeconds'],
+              },
+            },
+            confidence: { type: Type.STRING, enum: [...CANONICAL_CONFIDENCE_LEVELS] },
+          },
+          required: [
+            'priorityGroup',
+            'priorityRank',
+            'title',
+            'actionType',
+            'currentValue',
+            'proposedValue',
+            'reason',
+            'expectedBenefit',
+            'potentialRisk',
+            'evidenceObservationIds',
+            'evidenceTimestamps',
+            'confidence',
+          ],
+        },
+      },
+    },
+    required: [
+      'evidenceQuality',
+      'managerVerdict',
+      'gameplayCoaching',
+      'contingencyPlan',
+      'limitations',
+      'visionAssessment',
+      'recommendations',
+    ],
+  };
+}
+
+export function buildStage4ComparisonSchema() {
+  return {
+    type: Type.OBJECT,
+    properties: {
+      summary: { type: Type.STRING },
+      appliedAdjustmentsReviewed: {
+        type: Type.ARRAY,
+        items: {
+          type: Type.OBJECT,
+          properties: {
+            recommendationTitle: { type: Type.STRING },
+            userConfirmedAppliedInGame: { type: Type.BOOLEAN },
+            observedSecondHalfPattern: { type: Type.STRING },
+            outcomeAssessment: { type: Type.STRING, enum: [...CANONICAL_OUTCOME_ASSESSMENTS] },
+            causationCaveat: { type: Type.STRING },
+          },
+          required: [
+            'recommendationTitle',
+            'userConfirmedAppliedInGame',
+            'observedSecondHalfPattern',
+            'outcomeAssessment',
+            'causationCaveat',
+          ],
+        },
+      },
+      attackingComparison: { type: Type.STRING },
+      defensiveComparison: { type: Type.STRING },
+      tacticalVisionComparison: { type: Type.STRING },
+      recurringWeaknesses: { type: Type.ARRAY, items: { type: Type.STRING } },
+      limitations: { type: Type.ARRAY, items: { type: Type.STRING } },
+    },
+    required: [
+      'summary',
+      'appliedAdjustmentsReviewed',
+      'attackingComparison',
+      'defensiveComparison',
+      'tacticalVisionComparison',
+      'recurringWeaknesses',
+      'limitations',
+    ],
+  };
+}
 
 export const FC26_TACTICAL_SYSTEM_INSTRUCTION = `You are a professional football tactical analyst and EA SPORTS FC 26 Career Mode coaching specialist acting as a half-time analyst.
 
@@ -253,6 +572,48 @@ export interface GeminiVideoProvider {
     abortSignal?: AbortSignal;
     onRetryAttempt?: (info: { attemptNumber: number; delayMs: number; errorCode: GeminiErrorCode }) => void;
   }): Promise<SecondHalfComparisonOutput>;
+
+  /** Phase 3.0.3: Bounded 1-pass structured JSON repair for invalid enum/schema outputs */
+  repairStageJsonResponse?(input: {
+    modelId: string;
+    stage: string;
+    rawPayload: unknown;
+    validationErrorMessage: string;
+    responseSchema: Record<string, unknown>;
+    inferenceTimeoutMs?: number;
+    abortSignal?: AbortSignal;
+  }): Promise<{ repairedPayload: unknown; usage: StageTokenUsage }>;
+
+  /** Phase 3.0.3: Opt-in sequential keyframe fallback for Stage 1 classification */
+  classifySequentialFrames?(input: {
+    modelId: string;
+    frames: Array<{ timestampSeconds: number; filePath: string; mimeType: string }>;
+    segmentDurationSeconds: number;
+    half: 'first_half' | 'second_half';
+    maxRetries: number;
+    segmentIndex?: number;
+    inferenceTimeoutMs?: number;
+    abortSignal?: AbortSignal;
+    onRetryAttempt?: (info: { attemptNumber: number; delayMs: number; errorCode: GeminiErrorCode }) => void;
+  }): Promise<VideoClassificationOutput>;
+
+  /** Phase 3.0.3: Opt-in sequential keyframe fallback for Stage 2 observations */
+  extractObservationsFromFrames?(input: {
+    modelId: string;
+    frames: Array<{ timestampSeconds: number; filePath: string; mimeType: string }>;
+    segmentDurationSeconds: number;
+    analysisMode: VideoAnalysisMode;
+    half: 'first_half' | 'second_half';
+    clubName: string;
+    opponentName: string;
+    language: AnalysisLanguage;
+    liveWindows: Array<{ startSeconds: number; endSeconds: number }>;
+    maxRetries: number;
+    segmentIndex?: number;
+    inferenceTimeoutMs?: number;
+    abortSignal?: AbortSignal;
+    onRetryAttempt?: (info: { attemptNumber: number; delayMs: number; errorCode: GeminiErrorCode }) => void;
+  }): Promise<VideoObservationOutput>;
 }
 
 async function sleepWithAbort(ms: number, signal?: AbortSignal): Promise<void> {
@@ -735,54 +1096,7 @@ export class LiveGeminiVideoProvider implements GeminiVideoProvider {
             abortSignal: sig,
             systemInstruction: FC26_TACTICAL_SYSTEM_INSTRUCTION,
             responseMimeType: 'application/json',
-            responseSchema: {
-              type: Type.OBJECT,
-              properties: {
-                segments: {
-                  type: Type.ARRAY,
-                  items: {
-                    type: Type.OBJECT,
-                    properties: {
-                      startSeconds: { type: Type.NUMBER },
-                      endSeconds: { type: Type.NUMBER },
-                      contentType: { type: Type.STRING },
-                      confidence: { type: Type.STRING },
-                      evidenceDescription: { type: Type.STRING },
-                      inGameClock: { type: Type.STRING, nullable: true },
-                    },
-                    required: [
-                      'startSeconds',
-                      'endSeconds',
-                      'contentType',
-                      'confidence',
-                      'evidenceDescription',
-                    ],
-                  },
-                },
-                readableHudStats: {
-                  type: Type.OBJECT,
-                  properties: {
-                    scoreline: { type: Type.STRING, nullable: true },
-                    matchClock: { type: Type.STRING, nullable: true },
-                    possessionLabel: { type: Type.STRING, nullable: true },
-                    shotsLabel: { type: Type.STRING, nullable: true },
-                    otherVerifiedStats: {
-                      type: Type.ARRAY,
-                      items: {
-                        type: Type.OBJECT,
-                        properties: {
-                          label: { type: Type.STRING },
-                          value: { type: Type.STRING },
-                        },
-                        required: ['label', 'value'],
-                      },
-                    },
-                  },
-                  required: ['otherVerifiedStats'],
-                },
-              },
-              required: ['segments', 'readableHudStats'],
-            },
+            responseSchema: buildStage1ClassificationSchema(),
           },
         }),
     });
@@ -878,48 +1192,7 @@ export class LiveGeminiVideoProvider implements GeminiVideoProvider {
             abortSignal: sig,
             systemInstruction: FC26_TACTICAL_SYSTEM_INSTRUCTION,
             responseMimeType: 'application/json',
-            responseSchema: {
-              type: Type.OBJECT,
-              properties: {
-                observations: {
-                  type: Type.ARRAY,
-                  items: {
-                    type: Type.OBJECT,
-                    properties: {
-                      startSeconds: { type: Type.NUMBER },
-                      endSeconds: { type: Type.NUMBER },
-                      inGameClock: { type: Type.STRING, nullable: true },
-                      categoryGroup: { type: Type.STRING },
-                      category: { type: Type.STRING },
-                      teamAttribution: { type: Type.STRING },
-                      playerAttribution: { type: Type.STRING },
-                      description: { type: Type.STRING },
-                      supportingVisualEvidence: { type: Type.STRING },
-                      evidenceType: { type: Type.STRING },
-                      confidence: { type: Type.STRING },
-                      severity: { type: Type.STRING },
-                      limitations: { type: Type.STRING },
-                      isFromReplay: { type: Type.BOOLEAN },
-                    },
-                    required: [
-                      'startSeconds',
-                      'endSeconds',
-                      'categoryGroup',
-                      'category',
-                      'teamAttribution',
-                      'playerAttribution',
-                      'description',
-                      'supportingVisualEvidence',
-                      'evidenceType',
-                      'confidence',
-                      'severity',
-                      'isFromReplay',
-                    ],
-                  },
-                },
-              },
-              required: ['observations'],
-            },
+            responseSchema: buildStage2ObservationSchema(),
           },
         }),
     });
@@ -1047,163 +1320,7 @@ export class LiveGeminiVideoProvider implements GeminiVideoProvider {
             abortSignal: sig,
             systemInstruction: FC26_TACTICAL_SYSTEM_INSTRUCTION,
             responseMimeType: 'application/json',
-            responseSchema: {
-              type: Type.OBJECT,
-              properties: {
-                evidenceQuality: { type: Type.STRING },
-                managerVerdict: {
-                  type: Type.OBJECT,
-                  properties: {
-                    whatIsWorking: { type: Type.ARRAY, items: { type: Type.STRING } },
-                    whatIsNotWorking: { type: Type.ARRAY, items: { type: Type.STRING } },
-                    whyTacticStruggling: { type: Type.STRING },
-                    firstPriorityChange: { type: Type.STRING },
-                    conciseSummary: { type: Type.STRING },
-                  },
-                  required: [
-                    'whatIsWorking',
-                    'whatIsNotWorking',
-                    'whyTacticStruggling',
-                    'firstPriorityChange',
-                    'conciseSummary',
-                  ],
-                },
-                gameplayCoaching: {
-                  type: Type.ARRAY,
-                  items: {
-                    type: Type.OBJECT,
-                    properties: {
-                      instruction: { type: Type.STRING },
-                      triggerSituation: { type: Type.STRING },
-                      evidenceNote: { type: Type.STRING },
-                    },
-                    required: ['instruction', 'triggerSituation', 'evidenceNote'],
-                  },
-                },
-                contingencyPlan: {
-                  type: Type.ARRAY,
-                  items: {
-                    type: Type.OBJECT,
-                    properties: {
-                      scenario: { type: Type.STRING },
-                      trigger: { type: Type.STRING },
-                      tacticalAction: { type: Type.STRING },
-                    },
-                    required: ['scenario', 'trigger', 'tacticalAction'],
-                  },
-                },
-                limitations: { type: Type.ARRAY, items: { type: Type.STRING } },
-                visionAssessment: {
-                  type: Type.OBJECT,
-                  properties: {
-                    observedPlayingStyle: {
-                      type: Type.OBJECT,
-                      properties: {
-                        primaryTendency: { type: Type.STRING },
-                        mixedTendencies: { type: Type.ARRAY, items: { type: Type.STRING } },
-                        evidenceSummary: { type: Type.STRING },
-                        isInsufficientEvidence: { type: Type.BOOLEAN },
-                      },
-                      required: [
-                        'primaryTendency',
-                        'mixedTendencies',
-                        'evidenceSummary',
-                        'isInsufficientEvidence',
-                      ],
-                    },
-                    recommendedVisionKey: { type: Type.STRING },
-                    recommendationStance: { type: Type.STRING },
-                    recommendationRationale: { type: Type.STRING },
-                    executionAssessmentLabel: { type: Type.STRING },
-                    internalAssessmentScore: { type: Type.INTEGER, nullable: true },
-                    scoreMethodologyNote: { type: Type.STRING },
-                    criteriaBreakdown: {
-                      type: Type.ARRAY,
-                      items: {
-                        type: Type.OBJECT,
-                        properties: {
-                          criterion: { type: Type.STRING },
-                          assessment: { type: Type.STRING },
-                          evidenceNote: { type: Type.STRING },
-                        },
-                        required: ['criterion', 'assessment', 'evidenceNote'],
-                      },
-                    },
-                    confidence: { type: Type.STRING },
-                    limitations: { type: Type.STRING },
-                  },
-                  required: [
-                    'observedPlayingStyle',
-                    'recommendedVisionKey',
-                    'recommendationStance',
-                    'recommendationRationale',
-                    'executionAssessmentLabel',
-                    'scoreMethodologyNote',
-                    'criteriaBreakdown',
-                    'confidence',
-                  ],
-                },
-                recommendations: {
-                  type: Type.ARRAY,
-                  items: {
-                    type: Type.OBJECT,
-                    properties: {
-                      priorityGroup: { type: Type.STRING },
-                      priorityRank: { type: Type.INTEGER },
-                      title: { type: Type.STRING },
-                      actionType: { type: Type.STRING },
-                      targetSlotId: { type: Type.STRING, nullable: true },
-                      targetPositionCode: { type: Type.STRING, nullable: true },
-                      currentValue: { type: Type.STRING },
-                      proposedValue: { type: Type.STRING },
-                      targetPlayerOutId: { type: Type.STRING, nullable: true },
-                      targetPlayerInId: { type: Type.STRING, nullable: true },
-                      reason: { type: Type.STRING },
-                      expectedBenefit: { type: Type.STRING },
-                      potentialRisk: { type: Type.STRING },
-                      evidenceObservationIds: { type: Type.ARRAY, items: { type: Type.STRING } },
-                      evidenceTimestamps: {
-                        type: Type.ARRAY,
-                        items: {
-                          type: Type.OBJECT,
-                          properties: {
-                            segmentId: { type: Type.STRING, nullable: true },
-                            startSeconds: { type: Type.NUMBER },
-                            endSeconds: { type: Type.NUMBER },
-                            inGameClock: { type: Type.STRING, nullable: true },
-                          },
-                          required: ['startSeconds', 'endSeconds'],
-                        },
-                      },
-                      confidence: { type: Type.STRING },
-                    },
-                    required: [
-                      'priorityGroup',
-                      'priorityRank',
-                      'title',
-                      'actionType',
-                      'currentValue',
-                      'proposedValue',
-                      'reason',
-                      'expectedBenefit',
-                      'potentialRisk',
-                      'evidenceObservationIds',
-                      'evidenceTimestamps',
-                      'confidence',
-                    ],
-                  },
-                },
-              },
-              required: [
-                'evidenceQuality',
-                'managerVerdict',
-                'gameplayCoaching',
-                'contingencyPlan',
-                'limitations',
-                'visionAssessment',
-                'recommendations',
-              ],
-            },
+            responseSchema: buildStage3SynthesisSchema(),
           },
         }),
     });
@@ -1297,46 +1414,7 @@ export class LiveGeminiVideoProvider implements GeminiVideoProvider {
             abortSignal: sig,
             systemInstruction: FC26_TACTICAL_SYSTEM_INSTRUCTION,
             responseMimeType: 'application/json',
-            responseSchema: {
-              type: Type.OBJECT,
-              properties: {
-                summary: { type: Type.STRING },
-                appliedAdjustmentsReviewed: {
-                  type: Type.ARRAY,
-                  items: {
-                    type: Type.OBJECT,
-                    properties: {
-                      recommendationTitle: { type: Type.STRING },
-                      userConfirmedAppliedInGame: { type: Type.BOOLEAN },
-                      observedSecondHalfPattern: { type: Type.STRING },
-                      outcomeAssessment: { type: Type.STRING },
-                      causationCaveat: { type: Type.STRING },
-                    },
-                    required: [
-                      'recommendationTitle',
-                      'userConfirmedAppliedInGame',
-                      'observedSecondHalfPattern',
-                      'outcomeAssessment',
-                      'causationCaveat',
-                    ],
-                  },
-                },
-                attackingComparison: { type: Type.STRING },
-                defensiveComparison: { type: Type.STRING },
-                tacticalVisionComparison: { type: Type.STRING },
-                recurringWeaknesses: { type: Type.ARRAY, items: { type: Type.STRING } },
-                limitations: { type: Type.ARRAY, items: { type: Type.STRING } },
-              },
-              required: [
-                'summary',
-                'appliedAdjustmentsReviewed',
-                'attackingComparison',
-                'defensiveComparison',
-                'tacticalVisionComparison',
-                'recurringWeaknesses',
-                'limitations',
-              ],
-            },
+            responseSchema: buildStage4ComparisonSchema(),
           },
         }),
     });
@@ -1351,6 +1429,262 @@ export class LiveGeminiVideoProvider implements GeminiVideoProvider {
 
     return {
       ...parsed,
+      usage: {
+        modelId: input.modelId,
+        inputTokens,
+        outputTokens,
+        estimatedCostUsd: estimateActualStageCostUsd(input.modelId, inputTokens, outputTokens),
+        durationMs: Date.now() - started,
+      },
+    };
+  }
+
+  async repairStageJsonResponse(input: {
+    modelId: string;
+    stage: string;
+    rawPayload: unknown;
+    validationErrorMessage: string;
+    responseSchema: Record<string, unknown>;
+    inferenceTimeoutMs?: number;
+    abortSignal?: AbortSignal;
+  }): Promise<{ repairedPayload: unknown; usage: StageTokenUsage }> {
+    const client = createGeminiClient();
+    if (!client) {
+      throw new Error('GEMINI_API_KEY is not configured in the server environment.');
+    }
+
+    const started = Date.now();
+    const rawJsonPreview = JSON.stringify(input.rawPayload).slice(0, 24_000);
+    const prompt = [
+      `REPAIR PASS (1-pass strict schema conformance) for stage "${input.stage}".`,
+      `Validation error to fix: ${input.validationErrorMessage}`,
+      'CRITICAL RULES:',
+      '1. Preserve all factual observations, timestamps, and evidence verbatim — DO NOT invent new gameplay events.',
+      '2. Fix ONLY invalid enum casing/values or missing required schema fields so every field conforms strictly to the responseSchema.',
+      '3. Confidence MUST be strictly "High", "Medium", or "Low".',
+      '<UNTRUSTED_ANALYSIS_INPUT>',
+      rawJsonPreview,
+      '</UNTRUSTED_ANALYSIS_INPUT>',
+    ].join('\n');
+
+    const response = await withBoundedStageRetries({
+      maxRetries: 0,
+      stage: `${input.stage}_repair`,
+      modelId: input.modelId,
+      timeoutMs: Math.min(60_000, input.inferenceTimeoutMs ?? 60_000),
+      abortSignal: input.abortSignal,
+      fn: (sig) =>
+        client.models.generateContent({
+          model: input.modelId,
+          contents: prompt,
+          config: {
+            abortSignal: sig,
+            systemInstruction: FC26_TACTICAL_SYSTEM_INSTRUCTION,
+            responseMimeType: 'application/json',
+            responseSchema: input.responseSchema,
+          },
+        }),
+    });
+
+    const repairedPayload = parseJsonResponseStrict<unknown>(
+      response.text,
+      `${input.stage}_repair`,
+      input.modelId
+    );
+    const inputTokens = response.usageMetadata?.promptTokenCount ?? 0;
+    const outputTokens = response.usageMetadata?.candidatesTokenCount ?? 0;
+
+    return {
+      repairedPayload,
+      usage: {
+        modelId: input.modelId,
+        inputTokens,
+        outputTokens,
+        estimatedCostUsd: estimateActualStageCostUsd(input.modelId, inputTokens, outputTokens),
+        durationMs: Date.now() - started,
+      },
+    };
+  }
+
+  async classifySequentialFrames(input: {
+    modelId: string;
+    frames: Array<{ timestampSeconds: number; filePath: string; mimeType: string }>;
+    segmentDurationSeconds: number;
+    half: 'first_half' | 'second_half';
+    maxRetries: number;
+    segmentIndex?: number;
+    inferenceTimeoutMs?: number;
+    abortSignal?: AbortSignal;
+    onRetryAttempt?: (info: { attemptNumber: number; delayMs: number; errorCode: GeminiErrorCode }) => void;
+  }): Promise<VideoClassificationOutput> {
+    const client = createGeminiClient();
+    if (!client) {
+      throw new Error('GEMINI_API_KEY is not configured in the server environment.');
+    }
+
+    const started = Date.now();
+    const parts: Array<string | { inlineData: { mimeType: string; data: string } }> = [];
+    const manifest: string[] = [];
+    for (let i = 0; i < input.frames.length; i++) {
+      const f = input.frames[i];
+      const bytes = fs.readFileSync(f.filePath);
+      manifest.push(`Frame #${i + 1}: t=${f.timestampSeconds.toFixed(1)}s`);
+      parts.push(`Frame #${i + 1} at ${f.timestampSeconds.toFixed(1)}s:`);
+      parts.push({
+        inlineData: {
+          mimeType: f.mimeType,
+          data: bytes.toString('base64'),
+        },
+      });
+    }
+
+    const prompt = [
+      `Stage 1 (SEQUENTIAL KEYFRAME FALLBACK): Gameplay Content Classification for an EA SPORTS FC 26 ${input.half.replace('_', ' ')} segment (${input.segmentDurationSeconds.toFixed(1)}s total, ${input.frames.length} extracted keyframes: ${manifest.join(', ')}).`,
+      'IMPORTANT: You are inspecting extracted keyframes rather than continuous video. Be honest about frame-sampling gaps and DO NOT invent continuous motion between frames.',
+      'Partition the segment timeline (0s..segmentDurationSeconds) into chronological windows based on the observed keyframes.',
+      'confidence MUST be strictly one of: "High", "Medium", "Low".',
+    ].join('\n');
+    parts.push(prompt);
+
+    const response = await withBoundedStageRetries({
+      maxRetries: input.maxRetries,
+      stage: 'classifying_gameplay',
+      modelId: input.modelId,
+      segmentIndex: input.segmentIndex ?? null,
+      timeoutMs: input.inferenceTimeoutMs ?? 180_000,
+      abortSignal: input.abortSignal,
+      onRetryAttempt: input.onRetryAttempt,
+      fn: (sig) =>
+        client.models.generateContent({
+          model: input.modelId,
+          contents: parts,
+          config: {
+            abortSignal: sig,
+            systemInstruction: FC26_TACTICAL_SYSTEM_INSTRUCTION,
+            responseMimeType: 'application/json',
+            responseSchema: buildStage1ClassificationSchema(),
+          },
+        }),
+    });
+
+    const parsed = parseJsonResponseStrict<{
+      segments: VideoClassificationOutput['segments'];
+      readableHudStats: {
+        scoreline?: string | null;
+        matchClock?: string | null;
+        possessionLabel?: string | null;
+        shotsLabel?: string | null;
+        otherVerifiedStats?: Array<{ label: string; value: string }>;
+      };
+    }>(response.text, 'classifying_gameplay', input.modelId);
+
+    const inputTokens = response.usageMetadata?.promptTokenCount ?? 0;
+    const outputTokens = response.usageMetadata?.candidatesTokenCount ?? 0;
+
+    return {
+      segments: Array.isArray(parsed.segments) ? parsed.segments : [],
+      readableHudStats: {
+        scoreline: parsed.readableHudStats?.scoreline ?? null,
+        matchClock: parsed.readableHudStats?.matchClock ?? null,
+        possessionLabel: parsed.readableHudStats?.possessionLabel ?? null,
+        shotsLabel: parsed.readableHudStats?.shotsLabel ?? null,
+        otherVerifiedStats: (parsed.readableHudStats?.otherVerifiedStats ?? []).map((s) => ({
+          label: String(s.label),
+          value: String(s.value),
+          source: 'hud_or_statistics_screen' as const,
+        })),
+      },
+      usage: {
+        modelId: input.modelId,
+        inputTokens,
+        outputTokens,
+        estimatedCostUsd: estimateActualStageCostUsd(input.modelId, inputTokens, outputTokens),
+        durationMs: Date.now() - started,
+      },
+    };
+  }
+
+  async extractObservationsFromFrames(input: {
+    modelId: string;
+    frames: Array<{ timestampSeconds: number; filePath: string; mimeType: string }>;
+    segmentDurationSeconds: number;
+    analysisMode: VideoAnalysisMode;
+    half: 'first_half' | 'second_half';
+    clubName: string;
+    opponentName: string;
+    language: AnalysisLanguage;
+    liveWindows: Array<{ startSeconds: number; endSeconds: number }>;
+    maxRetries: number;
+    segmentIndex?: number;
+    inferenceTimeoutMs?: number;
+    abortSignal?: AbortSignal;
+    onRetryAttempt?: (info: { attemptNumber: number; delayMs: number; errorCode: GeminiErrorCode }) => void;
+  }): Promise<VideoObservationOutput> {
+    const client = createGeminiClient();
+    if (!client) {
+      throw new Error('GEMINI_API_KEY is not configured in the server environment.');
+    }
+
+    const started = Date.now();
+    const parts: Array<string | { inlineData: { mimeType: string; data: string } }> = [];
+    for (let i = 0; i < input.frames.length; i++) {
+      const f = input.frames[i];
+      const bytes = fs.readFileSync(f.filePath);
+      parts.push(`Keyframe #${i + 1} at t=${f.timestampSeconds.toFixed(1)}s:`);
+      parts.push({
+        inlineData: {
+          mimeType: f.mimeType,
+          data: bytes.toString('base64'),
+        },
+      });
+    }
+
+    const langInstruction =
+      input.language === 'id'
+        ? 'Write description, supportingVisualEvidence, and limitations in clear professional Indonesian football coaching language.'
+        : 'Write description, supportingVisualEvidence, and limitations in concise professional English football coaching language.';
+
+    const prompt = [
+      `Stage 2 (SEQUENTIAL KEYFRAME FALLBACK): Structured Gameplay Observation Extraction (${input.analysisMode.toUpperCase()} mode, ${input.half.replace('_', ' ')}).`,
+      `Match: <UNTRUSTED_ANALYSIS_INPUT>${input.clubName} vs ${input.opponentName}</UNTRUSTED_ANALYSIS_INPUT>.`,
+      `Segment duration: ${input.segmentDurationSeconds.toFixed(1)}s. Confirmed live/set-piece windows: ${JSON.stringify(input.liveWindows)}.`,
+      'IMPORTANT: These are discrete extracted keyframes, NOT continuous video. Focus on clearly visible spacing, defensive line height, shape, pressing positions, and readable HUD state. Note frame-sampling limitations honestly and NEVER fabricate unseen ball movement.',
+      'confidence MUST be strictly one of: "High", "Medium", "Low".',
+      langInstruction,
+    ].join('\n');
+    parts.push(prompt);
+
+    const response = await withBoundedStageRetries({
+      maxRetries: input.maxRetries,
+      stage: 'analyzing_gameplay',
+      modelId: input.modelId,
+      segmentIndex: input.segmentIndex ?? null,
+      timeoutMs: input.inferenceTimeoutMs ?? 180_000,
+      abortSignal: input.abortSignal,
+      onRetryAttempt: input.onRetryAttempt,
+      fn: (sig) =>
+        client.models.generateContent({
+          model: input.modelId,
+          contents: parts,
+          config: {
+            abortSignal: sig,
+            systemInstruction: FC26_TACTICAL_SYSTEM_INSTRUCTION,
+            responseMimeType: 'application/json',
+            responseSchema: buildStage2ObservationSchema(),
+          },
+        }),
+    });
+
+    const parsed = parseJsonResponseStrict<{ observations: VideoObservationOutput['observations'] }>(
+      response.text,
+      'analyzing_gameplay',
+      input.modelId
+    );
+    const inputTokens = response.usageMetadata?.promptTokenCount ?? 0;
+    const outputTokens = response.usageMetadata?.candidatesTokenCount ?? 0;
+
+    return {
+      observations: Array.isArray(parsed.observations) ? parsed.observations : [],
       usage: {
         modelId: input.modelId,
         inputTokens,

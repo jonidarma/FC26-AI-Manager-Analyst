@@ -3,10 +3,13 @@ import type {
   AiAnalysisJobRecord,
   AiMatchTacticalContext,
   AiRecommendationDecisionRecord,
+  AnalysisCheckpointResumeSummary,
   AnalysisLanguage,
   AnalysisPreflightResult,
+  AnalysisStrategy,
   ApiUsageLog,
   ApplicationSettings,
+  CapabilityProbeType,
   CaptureManifest,
   CaptureSourceInfo,
   CatalogClub,
@@ -50,6 +53,7 @@ import type {
   MatchStorageFoldersInfo,
   MatchTacticalSnapshot,
   MatchVenue,
+  ModelHealthRecord,
   Opponent,
   PaginatedResult,
   Player,
@@ -1615,6 +1619,32 @@ class DesktopBridgeService {
     });
   }
 
+  public testGeminiModelProbe(
+    probeType: CapabilityProbeType,
+    modelId?: string
+  ): Promise<GeminiConnectionTestResult> {
+    return this.apiFetch<GeminiConnectionTestResult>('/api/ai/models/test-probe', {
+      method: 'POST',
+      body: JSON.stringify({ probeType, modelId, forceRefresh: true }),
+    });
+  }
+
+  public getGeminiModelHealth(): Promise<{ health: ModelHealthRecord[] }> {
+    return this.apiFetch<{ health: ModelHealthRecord[] }>('/api/ai/model-health');
+  }
+
+  public resetGeminiModelHealth(
+    modelId?: string
+  ): Promise<{ resetCount: number; health: ModelHealthRecord[] }> {
+    return this.apiFetch<{ resetCount: number; health: ModelHealthRecord[] }>(
+      '/api/ai/model-health/reset',
+      {
+        method: 'POST',
+        body: JSON.stringify(modelId ? { modelId } : {}),
+      }
+    );
+  }
+
   public testGeminiConnection(
     modelId?: string,
     testVideo = false
@@ -1671,6 +1701,32 @@ class DesktopBridgeService {
     );
   }
 
+  public getMatchAnalysisCheckpoints(
+    matchId: string,
+    half: 'first_half' | 'second_half',
+    options?: { sessionId?: string | null; analysisMode?: VideoAnalysisMode }
+  ): Promise<AnalysisCheckpointResumeSummary> {
+    const params = new URLSearchParams({ half });
+    if (options?.sessionId) params.set('sessionId', options.sessionId);
+    if (options?.analysisMode) params.set('analysisMode', options.analysisMode);
+    return this.apiFetch<AnalysisCheckpointResumeSummary>(
+      `/api/matches/${encodeURIComponent(matchId)}/analysis/checkpoints?${params.toString()}`
+    );
+  }
+
+  public invalidateMatchAnalysisCheckpoints(
+    matchId: string,
+    half: 'first_half' | 'second_half'
+  ): Promise<{ invalidatedCount: number }> {
+    return this.apiFetch<{ invalidatedCount: number }>(
+      `/api/matches/${encodeURIComponent(matchId)}/analysis/checkpoints/invalidate`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ half }),
+      }
+    );
+  }
+
   public startMatchVideoAnalysis(
     matchId: string,
     payload: {
@@ -1681,6 +1737,8 @@ class DesktopBridgeService {
       privacyAuthorized: boolean;
       entireDisplayAcknowledged?: boolean;
       forceReanalyze?: boolean;
+      resumeFromCheckpoint?: boolean;
+      analysisStrategy?: AnalysisStrategy;
     }
   ): Promise<{ job: AiAnalysisJobRecord; reusedFromCache: boolean }> {
     return this.apiFetch(`/api/matches/${encodeURIComponent(matchId)}/analysis/start`, {

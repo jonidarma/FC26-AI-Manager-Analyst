@@ -20,9 +20,11 @@ import type {
   AiSettings,
   AnalysisLanguage,
   ApiUsageLog,
+  CapabilityProbeType,
   EffectiveModelRouting,
   GeminiConnectionTestResult,
   GeminiModelCapability,
+  ModelHealthRecord,
   SanitizedGeminiErrorDiagnostic,
   StorageOverviewInfo,
   TacticalCatalogItem,
@@ -73,11 +75,13 @@ export function SettingsView() {
   const [saving, setSaving] = useState(false);
   const [savedAiTimestamp, setSavedAiTimestamp] = useState<string | null>(null);
 
-  // Phase 3.0.2 Dynamic Gemini Discovery, Verification & Budget Summary
+  // Phase 3.0.3 Dynamic Gemini Discovery, Separate Probes, Model Health & Budget Summary
   const [modelRegistry, setModelRegistry] = useState<GeminiModelCapability[]>([]);
+  const [modelHealth, setModelHealth] = useState<ModelHealthRecord[]>([]);
   const [modelsDiscoveredAt, setModelsDiscoveredAt] = useState<string | null>(null);
   const [discoveryError, setDiscoveryError] = useState<SanitizedGeminiErrorDiagnostic | null>(null);
   const [refreshingModels, setRefreshingModels] = useState(false);
+  const [resettingHealth, setResettingHealth] = useState(false);
   const [budgetSummary, setBudgetSummary] = useState<{
     datePrefix: string;
     spentUsd: number;
@@ -86,8 +90,7 @@ export function SettingsView() {
     perMatchBudgetUsd: number;
     remainingDailyUsd: number;
   } | null>(null);
-  const [testingConn, setTestingConn] = useState(false);
-  const [testingVideo, setTestingVideo] = useState(false);
+  const [testingProbe, setTestingProbe] = useState<CapabilityProbeType | null>(null);
   const [connResult, setConnResult] = useState<GeminiConnectionTestResult | null>(null);
 
   useEffect(() => {
@@ -102,7 +105,8 @@ export function SettingsView() {
     Promise.all([
       desktopBridge.getAiModelRegistry().catch(() => null),
       desktopBridge.getAiBudgetSummary().catch(() => null),
-    ]).then(([reg, bud]) => {
+      desktopBridge.getGeminiModelHealth().catch(() => null),
+    ]).then(([reg, bud, healthRes]) => {
       if (!active) return;
       if (reg) {
         setModelRegistry(reg.models);
@@ -110,6 +114,7 @@ export function SettingsView() {
         setDiscoveryError(reg.discoveryError ?? null);
       }
       if (bud) setBudgetSummary(bud);
+      if (healthRes) setModelHealth(healthRes.health);
     });
     return () => {
       active = false;
@@ -270,37 +275,58 @@ export function SettingsView() {
     }
   }
 
-  async function handleTestGeminiConnection(testVideo = false) {
-    if (testVideo) setTestingVideo(true);
-    else setTestingConn(true);
+  async function handleRunCapabilityProbe(probeType: CapabilityProbeType) {
+    setTestingProbe(probeType);
     setConnResult(null);
+    const probeLabels: Record<CapabilityProbeType, string> = {
+      text_json: 'Text & Structured JSON',
+      image: 'Image Multimodal',
+      inline_video: 'Inline Video',
+      files_api_video: 'Files API Video + Cleanup',
+    };
     try {
       const targetModel = effectiveAi?.modelId;
-      const res = testVideo
-        ? await desktopBridge.testGeminiModelVideo(targetModel)
-        : await desktopBridge.testGeminiModel(targetModel);
+      const res = await desktopBridge.testGeminiModelProbe(probeType, targetModel);
       setConnResult(res);
-      // Refresh registry state so verified/inaccessible badges update immediately
-      const reg = await desktopBridge.getAiModelRegistry().catch(() => null);
+      const [reg, healthRes] = await Promise.all([
+        desktopBridge.getAiModelRegistry().catch(() => null),
+        desktopBridge.getGeminiModelHealth().catch(() => null),
+      ]);
       if (reg) {
         setModelRegistry(reg.models);
         setModelsDiscoveredAt(reg.discoveredAt ?? null);
       }
+      if (healthRes) setModelHealth(healthRes.health);
       if (res.ok) {
         notify(
           'success',
-          testVideo
-            ? `Video + JSON verified for ${res.modelId} (${res.latencyMs}ms).`
-            : `Connected & JSON verified for ${res.modelId} (${res.latencyMs}ms).`
+          `${probeLabels[probeType]} verified for ${res.modelId} (${res.latencyMs}ms).`
         );
       } else {
         notify('error', `${res.errorCode ? `[${res.errorCode}] ` : ''}${res.message}`);
       }
     } catch (err) {
-      notify('error', err instanceof Error ? err.message : 'Model verification failed');
+      notify('error', err instanceof Error ? err.message : 'Model capability probe failed');
     } finally {
-      setTestingConn(false);
-      setTestingVideo(false);
+      setTestingProbe(null);
+    }
+  }
+
+  async function handleResetModelHealth(modelId?: string) {
+    setResettingHealth(true);
+    try {
+      const res = await desktopBridge.resetGeminiModelHealth(modelId);
+      setModelHealth(res.health);
+      notify(
+        'success',
+        modelId
+          ? `Reset health & cooldown state for ${modelId}.`
+          : `Reset health & cooldown state for ${res.resetCount} model(s).`
+      );
+    } catch (err) {
+      notify('error', err instanceof Error ? err.message : 'Failed to reset model health');
+    } finally {
+      setResettingHealth(false);
     }
   }
 
@@ -740,25 +766,42 @@ export function SettingsView() {
                   className="inline-flex items-center gap-1.5 px-3 py-2 rounded-md border border-white/[0.14] hover:border-sky-400/60 bg-[#0C0F14] disabled:opacity-50 text-[12px] text-[#D7DDE7] font-medium"
                 >
                   <RefreshCw className={`w-3.5 h-3.5 text-sky-400 ${refreshingModels ? 'animate-spin' : ''}`} />
-                  {refreshingModels ? 'Refreshing...' : 'Refresh Available Models'}
+                  {refreshingModels ? 'Refreshing...' : 'Refresh Models'}
                 </button>
                 <button
                   type="button"
-                  disabled={testingConn || testingVideo}
-                  onClick={() => void handleTestGeminiConnection(false)}
-                  className="inline-flex items-center gap-1.5 px-3 py-2 rounded-md border border-emerald-500/45 bg-emerald-600/15 hover:bg-emerald-600/25 disabled:opacity-50 text-[12px] text-emerald-200 font-medium"
+                  disabled={testingProbe !== null}
+                  onClick={() => void handleRunCapabilityProbe('text_json')}
+                  className="inline-flex items-center gap-1.5 px-2.5 py-2 rounded-md border border-emerald-500/45 bg-emerald-600/15 hover:bg-emerald-600/25 disabled:opacity-50 text-[12px] text-emerald-200 font-medium"
                 >
                   <Wifi className="w-3.5 h-3.5" />
-                  {testingConn ? 'Testing Model...' : 'Test Selected Model'}
+                  {testingProbe === 'text_json' ? 'Testing Text...' : 'Test Text & JSON'}
                 </button>
                 <button
                   type="button"
-                  disabled={testingConn || testingVideo}
-                  onClick={() => void handleTestGeminiConnection(true)}
-                  className="inline-flex items-center gap-1.5 px-3 py-2 rounded-md border border-sky-500/45 bg-sky-600/15 hover:bg-sky-600/25 disabled:opacity-50 text-[12px] text-sky-200 font-medium"
+                  disabled={testingProbe !== null}
+                  onClick={() => void handleRunCapabilityProbe('image')}
+                  className="inline-flex items-center gap-1.5 px-2.5 py-2 rounded-md border border-indigo-500/45 bg-indigo-600/15 hover:bg-indigo-600/25 disabled:opacity-50 text-[12px] text-indigo-200 font-medium"
+                >
+                  {testingProbe === 'image' ? 'Testing Image...' : 'Test Image'}
+                </button>
+                <button
+                  type="button"
+                  disabled={testingProbe !== null}
+                  onClick={() => void handleRunCapabilityProbe('inline_video')}
+                  className="inline-flex items-center gap-1.5 px-2.5 py-2 rounded-md border border-sky-500/45 bg-sky-600/15 hover:bg-sky-600/25 disabled:opacity-50 text-[12px] text-sky-200 font-medium"
                 >
                   <Film className="w-3.5 h-3.5" />
-                  {testingVideo ? 'Testing Video...' : 'Test Video Compatibility'}
+                  {testingProbe === 'inline_video' ? 'Testing Inline...' : 'Test Inline Video'}
+                </button>
+                <button
+                  type="button"
+                  disabled={testingProbe !== null}
+                  onClick={() => void handleRunCapabilityProbe('files_api_video')}
+                  className="inline-flex items-center gap-1.5 px-2.5 py-2 rounded-md border border-teal-500/45 bg-teal-600/15 hover:bg-teal-600/25 disabled:opacity-50 text-[12px] text-teal-200 font-medium"
+                >
+                  <Upload className="w-3.5 h-3.5" />
+                  {testingProbe === 'files_api_video' ? 'Testing Files API...' : 'Test Files API Video'}
                 </button>
               </div>
             </div>
@@ -842,11 +885,14 @@ export function SettingsView() {
                 <div>
                   <div className="font-medium">
                     {connResult.ok
-                      ? connResult.videoTested
-                        ? 'Video + Structured JSON Verified'
-                        : 'Model Access & JSON Verified'
-                      : `Verification Failed${connResult.errorCode ? ` (${connResult.errorCode})` : ''}`}{' '}
+                      ? `Probe Verified (${connResult.probeType ?? (connResult.videoTested ? 'inline_video' : 'text_json')})`
+                      : `Probe Failed${connResult.errorCode ? ` (${connResult.errorCode})` : ''}`}{' '}
                     · {connResult.modelId} ({connResult.latencyMs}ms)
+                    {connResult.probeType === 'files_api_video' && (
+                      <span className="ml-2 font-mono text-[10px] px-1.5 py-0.5 rounded border border-white/20">
+                        Remote Cleanup: {connResult.remoteCleanupConfirmed ? 'Confirmed Deleted' : 'Pending/Failed'}
+                      </span>
+                    )}
                   </div>
                   <div className="text-[11px] opacity-90 mt-0.5">{connResult.message}</div>
                 </div>
@@ -1310,6 +1356,121 @@ export function SettingsView() {
                 />
                 Delete temporary Gemini Files API remote upload immediately after analysis (and on failure/cancel)
               </label>
+
+              {/* Phase 3.0.3 Adaptive Failover & Sequential Frame Fallback Policy */}
+              <div className="pt-3 mt-3 border-t border-white/[0.08] space-y-3">
+                <div className="text-[12px] font-semibold uppercase tracking-wider text-sky-300">
+                  Adaptive Model Failover &amp; Sequential Frame Fallback
+                </div>
+
+                <label className="flex items-start gap-2.5 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={effectiveAi.autoFailoverEnabled ?? true}
+                    onChange={(e) =>
+                      setAiDraft({ ...effectiveAi, autoFailoverEnabled: e.target.checked })
+                    }
+                    className="accent-emerald-500 mt-0.5"
+                  />
+                  <span>
+                    Enable adaptive model failover across healthy fallback models (reuses already-uploaded Gemini remote file URI without duplicate uploads; never triggers on local SQLite errors)
+                  </span>
+                </label>
+
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-3 pl-6">
+                  <div className="md:col-span-2">
+                    <label className="block text-[11px] text-[#9AA4B4] mb-1">
+                      Fallback Model Chain (comma-separated, tried in order)
+                    </label>
+                    <input
+                      type="text"
+                      value={(effectiveAi.fallbackModelChain ?? []).join(', ')}
+                      onChange={(e) =>
+                        setAiDraft({
+                          ...effectiveAi,
+                          fallbackModelChain: e.target.value
+                            .split(',')
+                            .map((s) => s.trim())
+                            .filter(Boolean),
+                        })
+                      }
+                      placeholder="gemini-2.5-flash, gemini-2.5-flash-lite, gemini-2.5-pro"
+                      className="w-full bg-[#0C0F14] border border-white/[0.12] rounded-md px-3 py-1.5 text-white font-mono text-[11px]"
+                    />
+                  </div>
+                  <div className="flex items-end pb-1">
+                    <label className="flex items-center gap-2 cursor-pointer text-[12px] text-[#C5CCD7]">
+                      <input
+                        type="checkbox"
+                        checked={Boolean(effectiveAi.allowHigherCostFailover)}
+                        onChange={(e) =>
+                          setAiDraft({ ...effectiveAi, allowHigherCostFailover: e.target.checked })
+                        }
+                        className="accent-amber-500"
+                      />
+                      Allow higher-cost fallback model (e.g., Pro)
+                    </label>
+                  </div>
+                </div>
+
+                <label className="flex items-start gap-2.5 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={Boolean(effectiveAi.allowSequentialFrameFallback)}
+                    onChange={(e) =>
+                      setAiDraft({
+                        ...effectiveAi,
+                        allowSequentialFrameFallback: e.target.checked,
+                      })
+                    }
+                    className="accent-sky-500 mt-0.5"
+                  />
+                  <span>
+                    Opt-in Sequential Keyframe Fallback: if native video analysis fails across available models, extract bounded local JPEG keyframes with FFmpeg and analyze with honest keyframe limitation disclosure (original MP4 untouched)
+                  </span>
+                </label>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pl-6 max-w-lg text-[12px]">
+                  <div>
+                    <label className="block text-[11px] text-[#9AA4B4] mb-1">
+                      Frame Interval (seconds, 2–60)
+                    </label>
+                    <input
+                      type="number"
+                      min={2}
+                      max={60}
+                      disabled={!effectiveAi.allowSequentialFrameFallback}
+                      value={effectiveAi.frameFallbackIntervalSeconds ?? 8}
+                      onChange={(e) =>
+                        setAiDraft({
+                          ...effectiveAi,
+                          frameFallbackIntervalSeconds: Number(e.target.value),
+                        })
+                      }
+                      className="w-full bg-[#0C0F14] border border-white/[0.12] rounded-md px-3 py-1.5 text-white font-mono tabular-nums disabled:opacity-50"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[11px] text-[#9AA4B4] mb-1">
+                      Max Keyframes / Segment (4–40)
+                    </label>
+                    <input
+                      type="number"
+                      min={4}
+                      max={40}
+                      disabled={!effectiveAi.allowSequentialFrameFallback}
+                      value={effectiveAi.maxFallbackFramesPerSegment ?? 18}
+                      onChange={(e) =>
+                        setAiDraft({
+                          ...effectiveAi,
+                          maxFallbackFramesPerSegment: Number(e.target.value),
+                        })
+                      }
+                      className="w-full bg-[#0C0F14] border border-white/[0.12] rounded-md px-3 py-1.5 text-white font-mono tabular-nums disabled:opacity-50"
+                    />
+                  </div>
+                </div>
+              </div>
             </div>
 
             <div className="flex items-center justify-between pt-2 border-t border-white/[0.06]">
@@ -1328,88 +1489,149 @@ export function SettingsView() {
             </div>
           </form>
 
-          {/* Discovered & Verified Model Capability Registry Table */}
+          {/* Discovered & Verified Model Capability Registry + Health Table */}
           {selectableModels.length > 0 && (
             <section className="border border-white/[0.08] bg-[#12151B] rounded-lg p-5 space-y-3">
               <div className="flex flex-wrap items-center justify-between gap-2">
-                <h3 className="text-[15px] font-semibold text-white">
-                  Discovered &amp; Verified Gemini Model Registry
-                </h3>
-                <span className="text-[11px] font-mono text-[#8A94A6]">
-                  {selectableModels.length} model(s)
-                </span>
+                <div>
+                  <h3 className="text-[15px] font-semibold text-white">
+                    Discovered &amp; Verified Gemini Model Registry (Independent Probe Status &amp; Health)
+                  </h3>
+                  <p className="text-[11px] text-[#8A94A6] mt-0.5">
+                    Each probe verifies only its specific capability without overwriting other verified probes.
+                  </p>
+                </div>
+                <div className="flex items-center gap-2">
+                  <span className="text-[11px] font-mono text-[#8A94A6]">
+                    {selectableModels.length} model(s)
+                  </span>
+                  {modelHealth.length > 0 && (
+                    <button
+                      type="button"
+                      disabled={resettingHealth}
+                      onClick={() => void handleResetModelHealth()}
+                      className="px-2.5 py-1 rounded border border-white/[0.14] hover:border-amber-400/50 bg-[#0C0F14] text-[11px] text-[#D7DDE7] disabled:opacity-50"
+                    >
+                      {resettingHealth ? 'Resetting...' : 'Reset Model Health'}
+                    </button>
+                  )}
+                </div>
               </div>
               <div className="overflow-x-auto">
                 <table className="w-full text-left text-[12px]">
                   <thead className="border-b border-white/[0.08] text-[#7D8798]">
                     <tr>
                       <th className="py-2 pr-3 font-medium">Model ID</th>
-                      <th className="py-2 pr-3 font-medium">Source</th>
-                      <th className="py-2 pr-3 font-medium">Access Status</th>
-                      <th className="py-2 pr-3 font-medium">Video / JSON</th>
+                      <th className="py-2 pr-3 font-medium">Access</th>
+                      <th className="py-2 pr-3 font-medium">Health</th>
+                      <th className="py-2 pr-3 font-medium">Verified Probes</th>
                       <th className="py-2 pr-3 font-medium">Last Verified</th>
                       <th className="py-2 font-medium">Notes / Error</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-white/[0.06]">
-                    {selectableModels.map((m) => (
-                      <tr key={m.modelId}>
-                        <td className="py-2 pr-3 font-mono text-white">{m.modelId}</td>
-                        <td className="py-2 pr-3 font-mono text-[11px] text-[#9AA4B4]">
-                          {m.source ?? 'registry'}
-                        </td>
-                        <td className="py-2 pr-3">
-                          <span
-                            className={`px-2 py-0.5 rounded border text-[10px] font-mono uppercase ${
-                              m.accessStatus === 'verified'
-                                ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/35'
-                                : m.accessStatus === 'inaccessible' ||
-                                    m.accessStatus === 'unsupported'
-                                  ? 'bg-rose-500/15 text-rose-300 border-rose-500/35'
-                                  : 'bg-white/[0.06] text-[#9AA4B4] border-white/[0.12]'
-                            }`}
-                          >
-                            {m.accessStatus ?? 'unverified'}
-                          </span>
-                        </td>
-                        <td className="py-2 pr-3 font-mono text-[11px]">
-                          <span className={m.videoVerified ? 'text-emerald-300' : 'text-[#C5CCD7]'}>
-                            {m.videoVerified
-                              ? 'Video ✓'
-                              : m.supportsVideoInput
-                                ? 'Video'
-                                : 'No Video'}
-                          </span>{' '}
-                          ·{' '}
-                          <span
-                            className={
-                              m.structuredJsonVerified ? 'text-emerald-300' : 'text-[#C5CCD7]'
-                            }
-                          >
-                            {m.structuredJsonVerified
-                              ? 'JSON ✓'
-                              : m.supportsStructuredOutput
-                                ? 'JSON'
-                                : 'No JSON'}
-                          </span>
-                        </td>
-                        <td className="py-2 pr-3 font-mono text-[11px] text-[#8A94A6]">
-                          {m.lastVerifiedAt
-                            ? new Date(m.lastVerifiedAt).toLocaleTimeString()
-                            : '—'}
-                        </td>
-                        <td className="py-2 text-[#9AA4B4]">
-                          {m.lastErrorMessage ? (
-                            <span className="text-rose-300">
-                              {m.lastErrorCode ? `[${m.lastErrorCode}] ` : ''}
-                              {m.lastErrorMessage}
+                    {selectableModels.map((m) => {
+                      const healthRow = modelHealth.find((h) => h.modelId === m.modelId);
+                      const healthStatus = healthRow?.status ?? 'healthy';
+                      return (
+                        <tr key={m.modelId}>
+                          <td className="py-2 pr-3 font-mono text-white">
+                            {m.modelId}
+                            <div className="text-[10px] text-[#7D8798]">{m.source ?? 'registry'}</div>
+                          </td>
+                          <td className="py-2 pr-3">
+                            <span
+                              className={`px-2 py-0.5 rounded border text-[10px] font-mono uppercase ${
+                                m.accessStatus === 'verified'
+                                  ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/35'
+                                  : m.accessStatus === 'inaccessible' ||
+                                      m.accessStatus === 'unsupported'
+                                    ? 'bg-rose-500/15 text-rose-300 border-rose-500/35'
+                                    : 'bg-white/[0.06] text-[#9AA4B4] border-white/[0.12]'
+                              }`}
+                            >
+                              {m.accessStatus ?? 'unverified'}
                             </span>
-                          ) : (
-                            m.description
-                          )}
-                        </td>
-                      </tr>
-                    ))}
+                          </td>
+                          <td className="py-2 pr-3">
+                            <span
+                              className={`px-2 py-0.5 rounded border text-[10px] font-mono uppercase ${
+                                healthStatus === 'healthy'
+                                  ? 'bg-emerald-500/10 text-emerald-300 border-emerald-500/30'
+                                  : healthStatus === 'degraded'
+                                    ? 'bg-amber-500/15 text-amber-300 border-amber-500/35'
+                                    : 'bg-rose-500/15 text-rose-300 border-rose-500/35'
+                              }`}
+                              title={
+                                healthRow?.cooldownUntil
+                                  ? `Cooldown until ${new Date(healthRow.cooldownUntil).toLocaleTimeString()}`
+                                  : healthRow?.lastErrorMessage ?? 'Healthy'
+                              }
+                            >
+                              {healthStatus}
+                              {healthRow && healthRow.consecutiveFailures > 0
+                                ? ` (${healthRow.consecutiveFailures})`
+                                : ''}
+                            </span>
+                          </td>
+                          <td className="py-2 pr-3 font-mono text-[10px]">
+                            <div className="flex flex-wrap gap-1">
+                              <span
+                                className={`px-1.5 py-0.5 rounded border ${
+                                  m.textVerified || m.structuredJsonVerified
+                                    ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/35'
+                                    : 'bg-white/[0.04] text-[#7D8798] border-white/[0.08]'
+                                }`}
+                              >
+                                Text/JSON {m.textVerified || m.structuredJsonVerified ? '✓' : '—'}
+                              </span>
+                              <span
+                                className={`px-1.5 py-0.5 rounded border ${
+                                  m.imageVerified
+                                    ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/35'
+                                    : 'bg-white/[0.04] text-[#7D8798] border-white/[0.08]'
+                                }`}
+                              >
+                                Image {m.imageVerified ? '✓' : '—'}
+                              </span>
+                              <span
+                                className={`px-1.5 py-0.5 rounded border ${
+                                  m.inlineVideoVerified
+                                    ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/35'
+                                    : 'bg-white/[0.04] text-[#7D8798] border-white/[0.08]'
+                                }`}
+                              >
+                                Inline Video {m.inlineVideoVerified ? '✓' : '—'}
+                              </span>
+                              <span
+                                className={`px-1.5 py-0.5 rounded border ${
+                                  m.filesApiVideoVerified
+                                    ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/35'
+                                    : 'bg-white/[0.04] text-[#7D8798] border-white/[0.08]'
+                                }`}
+                              >
+                                Files API {m.filesApiVideoVerified ? '✓' : '—'}
+                              </span>
+                            </div>
+                          </td>
+                          <td className="py-2 pr-3 font-mono text-[11px] text-[#8A94A6]">
+                            {m.lastVerifiedAt
+                              ? new Date(m.lastVerifiedAt).toLocaleTimeString()
+                              : '—'}
+                          </td>
+                          <td className="py-2 text-[#9AA4B4]">
+                            {m.lastErrorMessage ? (
+                              <span className="text-rose-300">
+                                {m.lastErrorCode ? `[${m.lastErrorCode}] ` : ''}
+                                {m.lastErrorMessage}
+                              </span>
+                            ) : (
+                              m.description
+                            )}
+                          </td>
+                        </tr>
+                      );
+                    })}
                   </tbody>
                 </table>
               </div>

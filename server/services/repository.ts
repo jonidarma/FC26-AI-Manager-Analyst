@@ -126,6 +126,40 @@ function normalizeAiSettings(
     merged.proxyEnabled = Boolean(stored.downscaleForAnalysis);
   }
 
+  // Phase 3.0.3: Normalize adaptive failover & sequential frame fallback settings
+  merged.autoFailoverEnabled =
+    stored?.autoFailoverEnabled !== undefined
+      ? Boolean(stored.autoFailoverEnabled)
+      : DEFAULT_APP_SETTINGS.ai.autoFailoverEnabled;
+  if (Array.isArray(stored?.fallbackModelChain)) {
+    const seen = new Set<string>();
+    merged.fallbackModelChain = stored.fallbackModelChain
+      .map((item) => (typeof item === 'string' ? item.trim() : ''))
+      .filter((item) => {
+        if (!item || seen.has(item)) return false;
+        seen.add(item);
+        return true;
+      });
+  } else {
+    merged.fallbackModelChain = [...(DEFAULT_APP_SETTINGS.ai.fallbackModelChain ?? [])];
+  }
+  merged.allowHigherCostFailover =
+    stored?.allowHigherCostFailover !== undefined
+      ? Boolean(stored.allowHigherCostFailover)
+      : DEFAULT_APP_SETTINGS.ai.allowHigherCostFailover;
+  merged.allowSequentialFrameFallback =
+    stored?.allowSequentialFrameFallback !== undefined
+      ? Boolean(stored.allowSequentialFrameFallback)
+      : DEFAULT_APP_SETTINGS.ai.allowSequentialFrameFallback;
+  const rawInterval = Number(stored?.frameFallbackIntervalSeconds ?? DEFAULT_APP_SETTINGS.ai.frameFallbackIntervalSeconds ?? 8);
+  merged.frameFallbackIntervalSeconds = Number.isFinite(rawInterval)
+    ? Math.max(2, Math.min(60, Math.round(rawInterval)))
+    : 8;
+  const rawMaxFrames = Number(stored?.maxFallbackFramesPerSegment ?? DEFAULT_APP_SETTINGS.ai.maxFallbackFramesPerSegment ?? 18);
+  merged.maxFallbackFramesPerSegment = Number.isFinite(rawMaxFrames)
+    ? Math.max(4, Math.min(40, Math.round(rawMaxFrames)))
+    : 18;
+
   return merged;
 }
 

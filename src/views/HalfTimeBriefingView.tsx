@@ -37,7 +37,9 @@ import type {
   AiGameplayObservationRecord,
   AiTacticalRecommendationRecord,
   AnalysisLanguage,
+  AnalysisStrategy,
   EffectiveModelRouting,
+  ErrorDomain,
   GeminiServiceStatus,
   HalftimeReportData,
   MatchAnalysisBundle,
@@ -46,6 +48,25 @@ import type {
   RecommendationDecisionStatus,
   VideoAnalysisMode,
 } from '../types/domain';
+
+function errorDomainLabel(domain?: ErrorDomain): string {
+  switch (domain) {
+    case 'database':
+      return 'Local Database Error';
+    case 'ai_validation':
+      return 'AI Validation Error';
+    case 'ffmpeg':
+      return 'Local Media / FFmpeg Error';
+    case 'gemini_api':
+      return 'Gemini API Error';
+    case 'network':
+      return 'Network / Upstream Error';
+    case 'internal':
+      return 'Internal / Job Lifecycle';
+    default:
+      return 'Pipeline Error';
+  }
+}
 
 const TERMINAL_JOB_STATUSES = new Set<AiAnalysisJobRecord['status']>([
   'completed',
@@ -159,6 +180,9 @@ export function HalfTimeBriefingView() {
   const [privacyAuthorized, setPrivacyAuthorized] = useState(false);
   const [entireDisplayAcknowledged, setEntireDisplayAcknowledged] = useState(false);
   const [forceReanalyze, setForceReanalyze] = useState(false);
+  const [resumeFromCheckpoint, setResumeFromCheckpoint] = useState(false);
+  const [analysisStrategy, setAnalysisStrategy] = useState<AnalysisStrategy>('native_video');
+  const [clearingCheckpoints, setClearingCheckpoints] = useState(false);
   const [startingAnalysis, setStartingAnalysis] = useState(false);
   const [importingClip, setImportingClip] = useState(false);
   const [showDiagnostics, setShowDiagnostics] = useState(false);
@@ -392,7 +416,7 @@ export function HalfTimeBriefingView() {
     });
   }, [bundle?.observations, obsCategoryFilter, hideReplayDuplicates, obsSearch]);
 
-  async function handleStartAnalysis() {
+  async function handleStartAnalysis(overrideOptions?: { resumeFromCheckpoint?: boolean }) {
     if (!selectedMatch) return;
     if (!privacyAuthorized) {
       setErrorBanner('Explicit privacy authorization is required before uploading match footage.');
@@ -404,6 +428,10 @@ export function HalfTimeBriefingView() {
       );
       return;
     }
+    const useCheckpointResume =
+      overrideOptions?.resumeFromCheckpoint !== undefined
+        ? overrideOptions.resumeFromCheckpoint
+        : resumeFromCheckpoint;
     setStartingAnalysis(true);
     setErrorBanner(null);
     setStatusMessage(null);
@@ -416,18 +444,41 @@ export function HalfTimeBriefingView() {
         privacyAuthorized,
         entireDisplayAcknowledged: requiresEntireDisplayAck ? entireDisplayAcknowledged : false,
         forceReanalyze,
+        resumeFromCheckpoint: useCheckpointResume,
+        analysisStrategy,
       });
       setSelectedJobId(result.job.id);
       setStatusMessage(
         result.reusedFromCache
           ? `Reused cached completed analysis (${result.job.id.slice(0, 8)}). Toggle "Force Re-analyze" to run a fresh analysis.`
-          : `Analysis job started (${result.job.status.replace(/_/g, ' ')}). Polling live progress...`
+          : useCheckpointResume
+            ? `Resumed analysis from saved stage checkpoints (${result.job.id.slice(0, 8)}). Polling live progress...`
+            : `Analysis job started (${result.job.status.replace(/_/g, ' ')}). Polling live progress...`
       );
       await loadData(false);
     } catch (err) {
       setErrorBanner(err instanceof Error ? err.message : 'Failed to start match video analysis.');
     } finally {
       setStartingAnalysis(false);
+    }
+  }
+
+  async function handleClearCheckpoints() {
+    if (!selectedMatch) return;
+    setClearingCheckpoints(true);
+    setErrorBanner(null);
+    try {
+      const res = await desktopBridge.invalidateMatchAnalysisCheckpoints(
+        selectedMatch.id,
+        selectedHalf
+      );
+      setResumeFromCheckpoint(false);
+      setStatusMessage(`Cleared ${res.invalidatedCount} saved checkpoint(s) for ${selectedHalf.replace('_', ' ')}.`);
+      await loadData(true);
+    } catch (err) {
+      setErrorBanner(err instanceof Error ? err.message : 'Failed to clear checkpoints.');
+    } finally {
+      setClearingCheckpoints(false);
     }
   }
 
@@ -889,21 +940,68 @@ export function HalfTimeBriefingView() {
               </div>
             )}
 
+            {/* Phase 3.0.3 Opt-In Checkpoint Recovery Banner (never auto-resumes) */}
+            {bundle?.resumableCheckpoint?.canResume && (
+              <div className="rounded-md border border-sky-500/35 bg-sky-500/10 px-3.5 py-3 text-[12px] text-sky-100 flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <div className="font-semibold flex items-center gap-1.5">
+                    <Clock3 className="w-3.5 h-3.5 text-sky-300" />
+                    Saved Stage Checkpoints Available (Opt-In Resume)
+                  </div>
+                  <div className="text-[11px] text-sky-200/90 mt-0.5">
+                    Prior run <span className="font-mono">{bundle.resumableCheckpoint.sourceJobId?.slice(0, 8)}</span>{' '}
+                    completed {bundle.resumableCheckpoint.completedStageCount} stage checkpoint(s) across segment(s){' '}
+                    <span className="font-mono">
+                      {bundle.resumableCheckpoint.completedSegmentIndices.join(', ') || '—'}
+                    </span>
+                    . Checkpoints never auto-resume — check &ldquo;Resume from checkpoints&rdquo; below or clear them for a fresh run.
+                  </div>
+                </div>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    disabled={clearingCheckpoints}
+                    onClick={() => void handleClearCheckpoints()}
+                    className="px-2.5 py-1 rounded border border-white/[0.16] hover:bg-white/[0.08] text-[11px] text-[#D7DDE7]"
+                  >
+                    {clearingCheckpoints ? 'Clearing...' : 'Clear Checkpoints'}
+                  </button>
+                </div>
+              </div>
+            )}
+
             {/* Launch Controls */}
             <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 pt-2 border-t border-white/[0.06] items-end">
-              <div className="lg:col-span-3">
-                <label className="block text-[11px] uppercase tracking-wider text-[#8A94A6] mb-1">
-                  Analysis Mode
-                </label>
-                <select
-                  value={analysisMode}
-                  onChange={(e) => setAnalysisMode(e.target.value as VideoAnalysisMode)}
-                  className="w-full bg-[#0E1116] border border-white/[0.12] rounded-md px-3 py-2 text-[13px] text-white"
-                >
-                  <option value="quick">Quick Half-Time (Fastest / Low Cost)</option>
-                  <option value="balanced">Balanced Analyst (Recommended)</option>
-                  <option value="deep">Deep Tactical Breakdown</option>
-                </select>
+              <div className="lg:col-span-3 space-y-2">
+                <div>
+                  <label className="block text-[11px] uppercase tracking-wider text-[#8A94A6] mb-1">
+                    Analysis Mode
+                  </label>
+                  <select
+                    value={analysisMode}
+                    onChange={(e) => setAnalysisMode(e.target.value as VideoAnalysisMode)}
+                    className="w-full bg-[#0E1116] border border-white/[0.12] rounded-md px-3 py-2 text-[13px] text-white"
+                  >
+                    <option value="quick">Quick Half-Time (Fastest / Low Cost)</option>
+                    <option value="balanced">Balanced Analyst (Recommended)</option>
+                    <option value="deep">Deep Tactical Breakdown</option>
+                  </select>
+                </div>
+                {settings?.ai.allowSequentialFrameFallback && (
+                  <div>
+                    <label className="block text-[11px] uppercase tracking-wider text-[#8A94A6] mb-1">
+                      Media Strategy
+                    </label>
+                    <select
+                      value={analysisStrategy}
+                      onChange={(e) => setAnalysisStrategy(e.target.value as AnalysisStrategy)}
+                      className="w-full bg-[#0E1116] border border-white/[0.12] rounded-md px-3 py-1.5 text-[12px] text-white"
+                    >
+                      <option value="native_video">Native Video (Primary)</option>
+                      <option value="sequential_frames">Sequential Keyframes (Opt-In)</option>
+                    </select>
+                  </div>
+                )}
               </div>
 
               <div className="lg:col-span-2">
@@ -949,6 +1047,21 @@ export function HalfTimeBriefingView() {
                   </label>
                 )}
 
+                {bundle?.resumableCheckpoint?.canResume && (
+                  <label className="flex items-center gap-2 cursor-pointer text-sky-300">
+                    <input
+                      type="checkbox"
+                      checked={resumeFromCheckpoint}
+                      onChange={(e) => setResumeFromCheckpoint(e.target.checked)}
+                      className="accent-sky-500"
+                    />
+                    <span>
+                      Resume from saved stage checkpoints (skip{' '}
+                      {bundle.resumableCheckpoint.completedSegmentIndices.length} completed segment(s))
+                    </span>
+                  </label>
+                )}
+
                 <label className="flex items-center gap-2 cursor-pointer text-[#8A94A6]">
                   <input
                     type="checkbox"
@@ -980,9 +1093,11 @@ export function HalfTimeBriefingView() {
                   )}
                   {isJobRunning
                     ? 'Analysis In Progress...'
-                    : selectedHalf === 'first_half'
-                      ? 'Analyze First Half'
-                      : 'Analyze Second Half'}
+                    : resumeFromCheckpoint
+                      ? 'Resume From Checkpoint'
+                      : selectedHalf === 'first_half'
+                        ? 'Analyze First Half'
+                        : 'Analyze Second Half'}
                 </button>
               </div>
             </div>
@@ -1003,6 +1118,22 @@ export function HalfTimeBriefingView() {
                   <span className="text-[13px] font-medium text-white">
                     {displayedJob.progressDetail?.stageLabel || displayedJob.currentStage}
                   </span>
+                  <span
+                    className={`px-2 py-0.5 rounded border text-[10px] font-mono uppercase ${
+                      displayedJob.analysisStrategy === 'sequential_frames'
+                        ? 'bg-amber-500/15 text-amber-200 border-amber-500/35'
+                        : 'bg-sky-500/10 text-sky-300 border-sky-500/30'
+                    }`}
+                  >
+                    {displayedJob.analysisStrategy === 'sequential_frames'
+                      ? 'Sequential Frames Fallback'
+                      : 'Native Video'}
+                  </span>
+                  {displayedJob.checkpointResumedFromJobId && (
+                    <span className="px-2 py-0.5 rounded border border-emerald-500/35 bg-emerald-500/10 text-emerald-300 text-[10px] font-mono">
+                      Resumed from {displayedJob.checkpointResumedFromJobId.slice(0, 8)}
+                    </span>
+                  )}
                   <span className="text-[12px] text-[#8A94A6] font-mono">
                     {displayedJob.half.replace('_', ' ')} · {displayedJob.analysisMode} ·{' '}
                     {displayedJob.language.toUpperCase()}
@@ -1169,6 +1300,58 @@ export function HalfTimeBriefingView() {
                         ({proxySavingsSummary.reductionPct}% smaller · original recording untouched)
                       </div>
                     )}
+
+                    {/* Phase 3.0.3 Failover History & Validation Audit Strip */}
+                    {((displayedJob.fallbackHistory && displayedJob.fallbackHistory.length > 0) ||
+                      (displayedJob.validationSummary &&
+                        (displayedJob.validationSummary.normalizedFields.length > 0 ||
+                          displayedJob.validationSummary.rejectedItemsCount > 0 ||
+                          displayedJob.validationSummary.repairedAttemptsCount > 0 ||
+                          displayedJob.validationSummary.databaseErrors.length > 0))) && (
+                      <div className="grid grid-cols-1 lg:grid-cols-2 gap-2.5 pt-1 text-[11px]">
+                        {displayedJob.fallbackHistory && displayedJob.fallbackHistory.length > 0 && (
+                          <div className="rounded border border-amber-500/30 bg-amber-500/[0.06] px-3 py-2 space-y-1">
+                            <div className="font-semibold text-amber-200 uppercase tracking-wider text-[10px]">
+                              Adaptive Failover History ({displayedJob.fallbackHistory.length})
+                            </div>
+                            {displayedJob.fallbackHistory.map((ev, idx) => (
+                              <div key={idx} className="font-mono text-[10px] text-amber-100/90">
+                                {ev.stage}: {ev.fromModelId} → {ev.toModelId} ({ev.reasonCode}
+                                {ev.reusedRemoteMedia ? ' · reused remote file' : ''})
+                              </div>
+                            ))}
+                          </div>
+                        )}
+
+                        {displayedJob.validationSummary &&
+                          (displayedJob.validationSummary.normalizedFields.length > 0 ||
+                            displayedJob.validationSummary.rejectedItemsCount > 0 ||
+                            displayedJob.validationSummary.repairedAttemptsCount > 0 ||
+                            displayedJob.validationSummary.databaseErrors.length > 0) && (
+                            <div className="rounded border border-sky-500/30 bg-sky-500/[0.06] px-3 py-2 space-y-1">
+                              <div className="font-semibold text-sky-200 uppercase tracking-wider text-[10px]">
+                                AI Response Validation Audit
+                              </div>
+                              <div className="font-mono text-[10px] text-sky-100/90 flex flex-wrap gap-3">
+                                <span>
+                                  Normalized: {displayedJob.validationSummary.normalizedFields.length}
+                                </span>
+                                <span>
+                                  Rejected: {displayedJob.validationSummary.rejectedItemsCount}
+                                </span>
+                                <span>
+                                  JSON Repairs: {displayedJob.validationSummary.repairedAttemptsCount}
+                                </span>
+                                {displayedJob.validationSummary.databaseErrors.length > 0 && (
+                                  <span className="text-rose-300">
+                                    Local DB Errors: {displayedJob.validationSummary.databaseErrors.length}
+                                  </span>
+                                )}
+                              </div>
+                            </div>
+                          )}
+                      </div>
+                    )}
                   </div>
                 );
               })()}
@@ -1194,12 +1377,19 @@ export function HalfTimeBriefingView() {
                 <div className="border border-rose-500/35 bg-rose-500/10 rounded-md p-3.5 text-[13px] text-rose-100 space-y-2.5">
                   <div className="flex flex-wrap items-start justify-between gap-2">
                     <div>
-                      <div className="font-semibold">
-                        {displayedJob.status === 'interrupted'
-                          ? `Analysis Interrupted (${displayedJob.errorCode ?? 'ANALYSIS_INTERRUPTED'})`
-                          : displayedJob.status === 'cancelled'
-                            ? `Analysis Cancelled by Manager (${displayedJob.errorCode ?? 'ANALYSIS_CANCELLED'})`
-                            : `Analysis Failed${displayedJob.errorCode ? ` (${displayedJob.errorCode})` : ''}`}
+                      <div className="font-semibold flex flex-wrap items-center gap-2">
+                        <span>
+                          {displayedJob.status === 'interrupted'
+                            ? `Analysis Interrupted (${displayedJob.errorCode ?? 'ANALYSIS_INTERRUPTED'})`
+                            : displayedJob.status === 'cancelled'
+                              ? `Analysis Cancelled by Manager (${displayedJob.errorCode ?? 'ANALYSIS_CANCELLED'})`
+                              : `Analysis Failed${displayedJob.errorCode ? ` (${displayedJob.errorCode})` : ''}`}
+                        </span>
+                        {displayedJob.diagnostics?.errorDomain && (
+                          <span className="px-2 py-0.5 rounded border border-rose-400/40 bg-[#0A0D12]/80 text-[10px] font-mono uppercase text-rose-200">
+                            {errorDomainLabel(displayedJob.diagnostics.errorDomain)}
+                          </span>
+                        )}
                       </div>
                       {displayedJob.errorMessage && (
                         <p className="mt-1 text-[12px] text-rose-200/90">
@@ -1306,6 +1496,28 @@ export function HalfTimeBriefingView() {
                               1}
                           </span>
                         </div>
+                        <div>
+                          <span className="text-[#7D8798]">Error Domain: </span>
+                          <span className="text-amber-300">
+                            {errorDomainLabel(displayedJob.diagnostics?.errorDomain)}
+                          </span>
+                        </div>
+                        {displayedJob.diagnostics?.sqliteCode && (
+                          <div>
+                            <span className="text-[#7D8798]">SQLite Code: </span>
+                            <span className="text-rose-300">
+                              {displayedJob.diagnostics.sqliteCode}
+                            </span>
+                          </div>
+                        )}
+                        {displayedJob.diagnostics?.fieldName && (
+                          <div>
+                            <span className="text-[#7D8798]">Invalid Field: </span>
+                            <span className="text-rose-300">
+                              {displayedJob.diagnostics.fieldName}
+                            </span>
+                          </div>
+                        )}
                         <div>
                           <span className="text-[#7D8798]">Retryable: </span>
                           <span>

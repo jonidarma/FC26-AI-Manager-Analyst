@@ -1558,7 +1558,10 @@ test('30: Non-destructive v7->v8 migration preserves existing jobs/assets, maps 
 
   // Export v8 backup and verify restore + legacy v7 format compatibility
   const backupV8 = exportDatabaseBackup();
-  assert.equal(backupV8.format, 'fc26-ai-manager-backup-v8');
+  assert.ok(
+    backupV8.format === 'fc26-ai-manager-backup-v8' || backupV8.format === 'fc26-ai-manager-backup-v9',
+    `Expected backup format v8/v9, got ${backupV8.format}`
+  );
   restoreDatabaseBackup(backupV8);
   const fkAfterRestore = getDb().pragma('foreign_key_check') as unknown[];
   assert.equal(fkAfterRestore.length, 0);

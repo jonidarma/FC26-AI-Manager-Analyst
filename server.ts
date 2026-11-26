@@ -32,6 +32,7 @@ import {
 } from './server/services/geminiService.ts';
 import { resolveEffectiveModelRouting } from './server/services/geminiModelRouter.ts';
 import { isGeminiStageError } from './server/services/geminiVideoService.ts';
+import { listAllModelHealth, resetModelHealth } from './server/services/modelHealthService.ts';
 import * as repo from './server/services/repository.ts';
 import {
   buildAiMatchTacticalContext,
@@ -44,7 +45,7 @@ import {
   resolveEvidenceFrameFilePath,
 } from './server/services/videoPreprocessingService.ts';
 import { isMediaPathError } from './shared/recordingStorage.ts';
-import type { CatalogDatasetType, VideoAnalysisMode } from './src/types/domain.ts';
+import type { CapabilityProbeType, CatalogDatasetType, VideoAnalysisMode } from './src/types/domain.ts';
 
 const IS_DESKTOP_MODE = process.env.FC26_DESKTOP_MODE === '1';
 const IS_PRODUCTION = process.env.NODE_ENV === 'production' || IS_DESKTOP_MODE;
@@ -409,6 +410,12 @@ const settingsPatchSchema = z.object({
       removeDuplicateFrames: z.boolean().optional(),
       requireUploadConfirmation: z.boolean().optional(),
       deleteRemoteAfterAnalysis: z.boolean().optional(),
+      autoFailoverEnabled: z.boolean().optional(),
+      fallbackModelChain: z.array(z.string().trim().min(1).max(100)).max(12).optional(),
+      allowHigherCostFailover: z.boolean().optional(),
+      allowSequentialFrameFallback: z.boolean().optional(),
+      frameFallbackIntervalSeconds: z.number().int().min(2).max(60).optional(),
+      maxFallbackFramesPerSegment: z.number().int().min(4).max(40).optional(),
     })
     .optional(),
   activeClubId: z.string().uuid().nullable().optional(),
@@ -1759,6 +1766,8 @@ async function startServer() {
     privacyAuthorized: z.boolean(),
     entireDisplayAcknowledged: z.boolean().optional(),
     forceReanalyze: z.boolean().optional(),
+    resumeFromCheckpoint: z.boolean().optional(),
+    analysisStrategy: z.enum(['native_video', 'sequential_frames']).optional(),
   });
 
   const recommendationDecisionSchema = z.object({
@@ -1874,16 +1883,53 @@ async function startServer() {
     return res.json(result);
   });
 
+  const probeTypeSchema = z.enum(['text_json', 'image', 'inline_video', 'files_api_video']);
+
+  app.post('/api/ai/models/test-probe', async (req, res) => {
+    const settings = repo.getSettings();
+    const parsedProbe = probeTypeSchema.safeParse(req.body?.probeType);
+    if (!parsedProbe.success) {
+      return res.status(400).json({
+        error: 'Invalid probeType. Expected one of: text_json, image, inline_video, files_api_video.',
+      });
+    }
+    const requestedModel =
+      typeof req.body?.modelId === 'string' && req.body.modelId.trim()
+        ? req.body.modelId.trim()
+        : settings.ai.modelId;
+    const result = await verifyModelCapabilities({
+      modelId: requestedModel,
+      probeType: parsedProbe.data as CapabilityProbeType,
+      forceRefresh: req.body?.forceRefresh !== false,
+    });
+    return res.json(result);
+  });
+
   app.post('/api/ai/test-connection', async (req, res) => {
     const requestedModel =
       typeof req.body?.modelId === 'string' && req.body.modelId.trim()
         ? req.body.modelId.trim()
         : repo.getSettings().ai.modelId;
+    const parsedProbe = probeTypeSchema.safeParse(req.body?.probeType);
     const result = await testGeminiConnection(requestedModel, {
       testVideo: Boolean(req.body?.testVideo),
+      probeType: parsedProbe.success ? (parsedProbe.data as CapabilityProbeType) : undefined,
       forceRefresh: true,
     });
     return res.json(result);
+  });
+
+  app.get('/api/ai/model-health', (_req, res) => {
+    res.json({ health: listAllModelHealth() });
+  });
+
+  app.post('/api/ai/model-health/reset', (req, res) => {
+    const modelId =
+      typeof req.body?.modelId === 'string' && req.body.modelId.trim()
+        ? req.body.modelId.trim()
+        : undefined;
+    const cleared = resetModelHealth(modelId);
+    res.json({ resetCount: cleared, health: listAllModelHealth() });
   });
 
   app.get('/api/ai/model-routing', (req, res) => {
@@ -1946,6 +1992,31 @@ async function startServer() {
     res.json(aiOrchestrator.listMatchAnalysisBundle(req.params.id, preferredJobId));
   });
 
+  app.get('/api/matches/:id/analysis/checkpoints', (req, res) => {
+    const half = req.query.half === 'second_half' ? 'second_half' : 'first_half';
+    const sessionId =
+      typeof req.query.sessionId === 'string' && req.query.sessionId.trim()
+        ? req.query.sessionId.trim()
+        : null;
+    const rawMode = typeof req.query.analysisMode === 'string' ? req.query.analysisMode.trim() : '';
+    const analysisMode: VideoAnalysisMode | undefined =
+      rawMode === 'quick' || rawMode === 'balanced' || rawMode === 'deep'
+        ? rawMode
+        : undefined;
+    return res.json(
+      aiOrchestrator.getResumableCheckpointsForMatchHalf(req.params.id, half, {
+        sessionId,
+        analysisMode,
+      })
+    );
+  });
+
+  app.post('/api/matches/:id/analysis/checkpoints/invalidate', (req, res) => {
+    const half = req.body?.half === 'second_half' ? 'second_half' : 'first_half';
+    const invalidatedCount = aiOrchestrator.invalidateCheckpointsForMatchHalf(req.params.id, half);
+    return res.json({ invalidatedCount });
+  });
+
   app.post('/api/matches/:id/analysis/start', async (req, res) => {
     const parsed = startAnalysisJobSchema.safeParse(req.body);
     if (!parsed.success) {
@@ -1963,6 +2034,8 @@ async function startServer() {
         privacyAuthorized: parsed.data.privacyAuthorized,
         entireDisplayAcknowledged: parsed.data.entireDisplayAcknowledged,
         forceReanalyze: parsed.data.forceReanalyze,
+        resumeFromCheckpoint: parsed.data.resumeFromCheckpoint,
+        analysisStrategy: parsed.data.analysisStrategy,
       });
       return res.status(202).json(result);
     } catch (err) {

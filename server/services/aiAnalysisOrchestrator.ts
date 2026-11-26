@@ -12,30 +12,52 @@ import type {
   AiTacticalRecommendationRecord,
   AiTacticalVisionAssessmentRecord,
   AiVideoClassificationRecord,
+  AnalysisCheckpointRecord,
+  AnalysisCheckpointResumeSummary,
   AnalysisJobStatus,
   AnalysisLanguage,
+  AnalysisStrategy,
   AnalysisTimingBreakdown,
+  GeminiErrorCode,
   MatchAnalysisBundle,
   MatchTacticalSnapshot,
+  ModelFailoverEvent,
   PlayerRoleAssignment,
   RecommendationDecisionStatus,
   RemoteCleanupStatus,
   SanitizedGeminiErrorDiagnostic,
   TacticalPreset,
+  ValidationAuditSummary,
   VideoAnalysisMode,
 } from '../../src/types/domain.ts';
 import { getDb } from '../db/database.ts';
+import {
+  AiResponseValidationError,
+  createEmptyValidationAuditSummary,
+  isAiResponseValidationError,
+  mergeValidationAuditSummary,
+  validateClassificationStageResponse,
+  validateComparisonStageResponse,
+  validateObservationStageResponse,
+  validateSynthesisStageResponse,
+  type StageValidationResult,
+} from './aiResponseValidationService.ts';
 import { validateAiRecommendations } from './analysisValidationService.ts';
 import { resolveEffectiveModelRouting } from './geminiModelRouter.ts';
 import {
   classifyGeminiError,
   estimateVideoAnalysisCostUsd,
+  getGeminiStatus,
   isGeminiApiConfigured,
   runAnalysisPreflight,
   sanitizeDiagnosticText,
   type GeminiDiscoveryClientLike,
 } from './geminiService.ts';
 import {
+  buildStage1ClassificationSchema,
+  buildStage2ObservationSchema,
+  buildStage3SynthesisSchema,
+  buildStage4ComparisonSchema,
   defaultLiveGeminiVideoProvider,
   GeminiStageError,
   isGeminiStageError,
@@ -44,6 +66,11 @@ import {
   type GeminiVideoProvider,
   type VideoClassificationOutput,
 } from './geminiVideoService.ts';
+import {
+  recordModelFailure,
+  recordModelSuccess,
+  selectFailoverCandidate,
+} from './modelHealthService.ts';
 import {
   createInMatchTacticalAdjustment,
   createOrUpsertMatchSession,
@@ -76,6 +103,7 @@ import {
 import {
   cleanupTempAnalysisDir,
   extractEvidenceFrame,
+  extractSequentialFallbackFrames,
   getTestClipsDir,
   prepareAnalysisVideoAsset,
   validateVideoFile,
@@ -134,6 +162,24 @@ function mapJobRow(r: Record<string, unknown>): AiAnalysisJobRecord {
     ),
     modelVideoId: String(r.model_video_id),
     modelSynthesisId: String(r.model_synthesis_id),
+    analysisStrategy: (r.analysis_strategy
+      ? String(r.analysis_strategy)
+      : 'native_video') as AnalysisStrategy,
+    stageModelsUsed: safeJsonParse<Record<string, string>>(
+      r.stage_models_json ? String(r.stage_models_json) : null,
+      {}
+    ),
+    fallbackHistory: safeJsonParse<ModelFailoverEvent[]>(
+      r.fallback_history_json ? String(r.fallback_history_json) : null,
+      []
+    ),
+    validationSummary: safeJsonParse<ValidationAuditSummary | null>(
+      r.validation_summary_json ? String(r.validation_summary_json) : null,
+      null
+    ),
+    checkpointResumedFromJobId: r.checkpoint_resumed_from_job_id
+      ? String(r.checkpoint_resumed_from_job_id)
+      : null,
     promptVersion: String(r.prompt_version),
     schemaVersion: String(r.schema_version),
     tacticalVisionDatasetVersion: String(r.tactical_vision_dataset_version ?? ''),
@@ -173,6 +219,263 @@ function mapJobRow(r: Record<string, unknown>): AiAnalysisJobRecord {
     cancelRequested: Boolean(r.cancel_requested),
     createdAt: String(r.created_at),
     updatedAt: String(r.updated_at),
+  };
+}
+
+function mapCheckpointRow(r: Record<string, unknown>): AnalysisCheckpointRecord {
+  return {
+    id: String(r.id),
+    jobId: String(r.job_id),
+    matchId: String(r.match_id),
+    sessionId: r.session_id ? String(r.session_id) : null,
+    half: String(r.half) as 'first_half' | 'second_half',
+    stageName: String(r.stage_name) as AnalysisCheckpointRecord['stageName'],
+    segmentId: r.segment_id ? String(r.segment_id) : null,
+    segmentIndex: Number(r.segment_index ?? 0),
+    segmentChecksum: String(r.segment_checksum ?? ''),
+    proxySignature: String(r.proxy_signature ?? ''),
+    modelUsed: String(r.model_used ?? ''),
+    promptVersion: String(r.prompt_version ?? ''),
+    schemaVersion: String(r.schema_version ?? ''),
+    analysisStrategy: (r.analysis_strategy
+      ? String(r.analysis_strategy)
+      : 'native_video') as AnalysisStrategy,
+    remoteFileName: r.remote_file_name ? String(r.remote_file_name) : null,
+    remoteFileUri: r.remote_file_uri ? String(r.remote_file_uri) : null,
+    status: String(r.status ?? 'valid') as 'valid' | 'invalidated',
+    createdAt: String(r.created_at),
+    updatedAt: String(r.updated_at),
+  };
+}
+
+function buildProxySignature(analysisMode: VideoAnalysisMode, proxyEnabled: boolean): string {
+  return `${analysisMode}:proxy=${proxyEnabled ? '1' : '0'}`;
+}
+
+function upsertStageCheckpoint(
+  db: Database.Database,
+  input: {
+    jobId: string;
+    matchId: string;
+    sessionId: string | null;
+    half: 'first_half' | 'second_half';
+    stageName: AnalysisCheckpointRecord['stageName'];
+    segmentId: string | null;
+    segmentIndex: number;
+    segmentChecksum: string;
+    proxySignature: string;
+    modelUsed: string;
+    analysisStrategy: AnalysisStrategy;
+    remoteFileName?: string | null;
+    remoteFileUri?: string | null;
+    payload: unknown;
+  }
+): void {
+  const now = new Date().toISOString();
+  db.prepare(`
+    INSERT INTO ai_analysis_checkpoints (
+      id, job_id, match_id, session_id, half, stage_name, segment_id, segment_index,
+      segment_checksum, proxy_signature, model_used, prompt_version, schema_version,
+      analysis_strategy, remote_file_name, remote_file_uri, payload_json, status,
+      created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'valid', ?, ?)
+    ON CONFLICT(job_id, stage_name, segment_index) DO UPDATE SET
+      segment_checksum = excluded.segment_checksum,
+      proxy_signature = excluded.proxy_signature,
+      model_used = excluded.model_used,
+      prompt_version = excluded.prompt_version,
+      schema_version = excluded.schema_version,
+      analysis_strategy = excluded.analysis_strategy,
+      remote_file_name = excluded.remote_file_name,
+      remote_file_uri = excluded.remote_file_uri,
+      payload_json = excluded.payload_json,
+      status = 'valid',
+      updated_at = excluded.updated_at
+  `).run(
+    crypto.randomUUID(),
+    input.jobId,
+    input.matchId,
+    input.sessionId,
+    input.half,
+    input.stageName,
+    input.segmentId,
+    input.segmentIndex,
+    input.segmentChecksum,
+    input.proxySignature,
+    input.modelUsed,
+    PROMPT_VERSION,
+    SCHEMA_VERSION,
+    input.analysisStrategy,
+    input.remoteFileName ?? null,
+    input.remoteFileUri ?? null,
+    JSON.stringify(input.payload ?? {}),
+    now,
+    now
+  );
+}
+
+export function invalidateCheckpointsForMatchHalf(
+  matchId: string,
+  half: 'first_half' | 'second_half',
+  dbArg?: Database.Database
+): number {
+  const db = dbArg ?? getDb();
+  const now = new Date().toISOString();
+  const info = db
+    .prepare(
+      `UPDATE ai_analysis_checkpoints
+       SET status = 'invalidated', updated_at = ?
+       WHERE match_id = ? AND half = ? AND status = 'valid'`
+    )
+    .run(now, matchId, half);
+  return info.changes;
+}
+
+export function getResumableCheckpointsForMatchHalf(
+  matchId: string,
+  half: 'first_half' | 'second_half',
+  options?: {
+    sessionId?: string | null;
+    analysisMode?: VideoAnalysisMode;
+    db?: Database.Database;
+  }
+): AnalysisCheckpointResumeSummary {
+  const db = options?.db ?? getDb();
+  const settings = getSettings();
+  const analysisMode: VideoAnalysisMode =
+    options?.analysisMode ?? settings.ai.defaultAnalysisMode ?? 'balanced';
+  const proxyEnabled =
+    settings.ai.proxyEnabled !== undefined
+      ? Boolean(settings.ai.proxyEnabled)
+      : Boolean(settings.ai.downscaleForAnalysis);
+  const expectedProxySig = buildProxySignature(analysisMode, proxyEnabled);
+
+  const sessions = listMatchSessions({ matchId });
+  const targetSession = options?.sessionId
+    ? getMatchSessionById(options.sessionId)
+    : sessions.find(
+        (s) =>
+          s.half === half &&
+          s.aiEligible &&
+          ['completed', 'recovered', 'partial'].includes(s.status)
+      ) ?? sessions.find((s) => s.half === half) ?? null;
+
+  // Look for latest failed/interrupted/cancelled job with valid checkpoints for this match + half
+  const candidateJobs = db
+    .prepare(
+      `SELECT id, status, session_id, analysis_strategy, created_at
+       FROM ai_analysis_jobs
+       WHERE match_id = ? AND half = ?
+       ORDER BY created_at DESC LIMIT 8`
+    )
+    .all(matchId, half) as Array<{
+    id: string;
+    status: string;
+    session_id: string | null;
+    analysis_strategy: string | null;
+    created_at: string;
+  }>;
+
+  const resumableJob = candidateJobs.find((j) =>
+    ['failed', 'interrupted', 'cancelled'].includes(j.status)
+  );
+  // If the most recent job already completed successfully for the same session, no checkpoint resume is needed
+  const latestJob = candidateJobs[0];
+  if (
+    !resumableJob ||
+    (latestJob &&
+      ['completed', 'completed_with_limitations'].includes(latestJob.status) &&
+      (!targetSession || latestJob.session_id === targetSession.id))
+  ) {
+    return {
+      canResume: false,
+      sourceJobId: null,
+      completedStageCount: 0,
+      completedSegmentIndices: [],
+      analysisStrategy: 'native_video',
+      requiresReuploadAuthorization: false,
+      invalidationReasons: [],
+      checkpoints: [],
+    };
+  }
+
+  const rawRows = db
+    .prepare(
+      `SELECT * FROM ai_analysis_checkpoints
+       WHERE job_id = ? AND status = 'valid'
+       ORDER BY segment_index ASC, created_at ASC`
+    )
+    .all(resumableJob.id) as Array<Record<string, unknown>>;
+
+  if (rawRows.length === 0) {
+    return {
+      canResume: false,
+      sourceJobId: null,
+      completedStageCount: 0,
+      completedSegmentIndices: [],
+      analysisStrategy: (resumableJob.analysis_strategy as AnalysisStrategy) ?? 'native_video',
+      requiresReuploadAuthorization: false,
+      invalidationReasons: [],
+      checkpoints: [],
+    };
+  }
+
+  const invalidationReasons: string[] = [];
+  const validCheckpoints: AnalysisCheckpointRecord[] = [];
+  const validSegs = (targetSession?.segments ?? []).filter(
+    (s) => ['finalized', 'recovered'].includes(s.status) && s.sizeBytes > 0 && s.durationSeconds > 0
+  );
+  const segByIndex = new Map(validSegs.map((s) => [s.segmentIndex, s]));
+
+  for (const r of rawRows) {
+    const cp = mapCheckpointRow(r);
+    if (targetSession && cp.sessionId && cp.sessionId !== targetSession.id) {
+      invalidationReasons.push(`Checkpoint session (${cp.sessionId.slice(0, 8)}) no longer matches active recording session.`);
+      continue;
+    }
+    if (cp.promptVersion !== PROMPT_VERSION || cp.schemaVersion !== SCHEMA_VERSION) {
+      invalidationReasons.push(`Checkpoint schema/prompt version (${cp.schemaVersion}) differs from current (${SCHEMA_VERSION}).`);
+      continue;
+    }
+    if (options?.analysisMode && cp.proxySignature && cp.proxySignature !== expectedProxySig) {
+      invalidationReasons.push(`Checkpoint proxy/mode signature (${cp.proxySignature}) differs from requested (${expectedProxySig}).`);
+      continue;
+    }
+    if (cp.segmentIndex > 0) {
+      const seg = segByIndex.get(cp.segmentIndex);
+      if (!seg) {
+        invalidationReasons.push(`Segment #${cp.segmentIndex} is no longer present in the recording session.`);
+        continue;
+      }
+      if (cp.segmentChecksum && seg.checksum && cp.segmentChecksum !== seg.checksum) {
+        invalidationReasons.push(`Segment #${cp.segmentIndex} checksum changed since checkpoint was saved.`);
+        continue;
+      }
+    }
+    validCheckpoints.push(cp);
+  }
+
+  const uniqueReasons = Array.from(new Set(invalidationReasons));
+  const completedSegIndices = Array.from(
+    new Set(
+      validCheckpoints
+        .filter((c) => c.stageName === 'analyzing_gameplay' && c.segmentIndex > 0)
+        .map((c) => c.segmentIndex)
+    )
+  ).sort((a, b) => a - b);
+
+  const allSegsDone = validSegs.length > 0 && validSegs.every((s) => completedSegIndices.includes(s.segmentIndex));
+
+  return {
+    canResume: validCheckpoints.length > 0,
+    sourceJobId: validCheckpoints.length > 0 ? resumableJob.id : null,
+    completedStageCount: validCheckpoints.length,
+    completedSegmentIndices: completedSegIndices,
+    analysisStrategy:
+      (validCheckpoints[0]?.analysisStrategy ?? resumableJob.analysis_strategy ?? 'native_video') as AnalysisStrategy,
+    requiresReuploadAuthorization: !allSegsDone,
+    invalidationReasons: uniqueReasons,
+    checkpoints: validCheckpoints,
   };
 }
 
@@ -514,6 +817,23 @@ export function listMatchAnalysisBundle(
     jobs[0] ??
     null;
 
+  const checkpointRows = db
+    .prepare(
+      `SELECT * FROM ai_analysis_checkpoints
+       WHERE match_id = ? AND status = 'valid'
+       ORDER BY updated_at DESC LIMIT 30`
+    )
+    .all(matchId) as Array<Record<string, unknown>>;
+  const checkpoints = checkpointRows.map(mapCheckpointRow);
+
+  const firstHalfResume = getResumableCheckpointsForMatchHalf(matchId, 'first_half', { db });
+  const secondHalfResume = getResumableCheckpointsForMatchHalf(matchId, 'second_half', { db });
+  const resumableCheckpoint = firstHalfResume.canResume
+    ? firstHalfResume
+    : secondHalfResume.canResume
+      ? secondHalfResume
+      : null;
+
   if (!targetJob) {
     return {
       matchId,
@@ -528,6 +848,8 @@ export function listMatchAnalysisBundle(
       recommendations: [],
       assets: [],
       secondHalfComparison: null,
+      checkpoints,
+      resumableCheckpoint,
     };
   }
 
@@ -593,6 +915,8 @@ export function listMatchAnalysisBundle(
     recommendations: recRows.map((r) => mapRecommendationRow(r, decByRecId.get(String(r.id)) ?? null)),
     assets: assetRows.map(mapAssetRow),
     secondHalfComparison,
+    checkpoints,
+    resumableCheckpoint,
   };
 }
 
@@ -783,6 +1107,11 @@ function updateJobProgress(
     status: AnalysisJobStatus;
     currentStage: string;
     progressDetail: AiAnalysisJobRecord['progressDetail'];
+    analysisStrategy: AnalysisStrategy;
+    stageModelsUsed: Record<string, string>;
+    fallbackHistory: ModelFailoverEvent[];
+    validationSummary: ValidationAuditSummary;
+    checkpointResumedFromJobId: string | null;
     segmentsTotal: number;
     segmentsProcessed: number;
     currentSegmentIndex: number | null;
@@ -826,6 +1155,11 @@ function updateJobProgress(
     SET status = ?,
         current_stage = ?,
         progress_detail_json = ?,
+        analysis_strategy = ?,
+        stage_models_json = ?,
+        fallback_history_json = ?,
+        validation_summary_json = ?,
+        checkpoint_resumed_from_job_id = ?,
         segments_total = ?,
         segments_processed = ?,
         current_segment_index = ?,
@@ -851,6 +1185,19 @@ function updateJobProgress(
     patch.progressDetail
       ? JSON.stringify(patch.progressDetail)
       : String(existing.progress_detail_json ?? '{}'),
+    patch.analysisStrategy ?? String(existing.analysis_strategy ?? 'native_video'),
+    patch.stageModelsUsed !== undefined
+      ? JSON.stringify(patch.stageModelsUsed)
+      : existing.stage_models_json ?? null,
+    patch.fallbackHistory !== undefined
+      ? JSON.stringify(patch.fallbackHistory)
+      : existing.fallback_history_json ?? null,
+    patch.validationSummary !== undefined
+      ? JSON.stringify(patch.validationSummary)
+      : existing.validation_summary_json ?? null,
+    patch.checkpointResumedFromJobId !== undefined
+      ? patch.checkpointResumedFromJobId
+      : existing.checkpoint_resumed_from_job_id ?? null,
     patch.segmentsTotal ?? Number(existing.segments_total ?? 0),
     patch.segmentsProcessed ?? Number(existing.segments_processed ?? 0),
     patch.currentSegmentIndex !== undefined
@@ -890,6 +1237,10 @@ export interface StartAnalysisJobInput {
   privacyAuthorized: boolean;
   entireDisplayAcknowledged?: boolean;
   forceReanalyze?: boolean;
+  /** Phase 3.0.3 opt-in checkpoint resume (never automatic) */
+  resumeFromCheckpoint?: boolean;
+  /** Phase 3.0.3 explicit strategy override */
+  analysisStrategy?: AnalysisStrategy;
   /** Test/runtime injection options */
   provider?: GeminiVideoProvider;
   preflightClientOverride?: GeminiDiscoveryClientLike | null;
@@ -1077,6 +1428,19 @@ export async function startAnalysisJob(
   }
   const visionCatalog = getTacticalVisionCatalog(db);
 
+  const resumeSummary: AnalysisCheckpointResumeSummary | null = input.resumeFromCheckpoint
+    ? getResumableCheckpointsForMatchHalf(input.matchId, input.half, {
+        sessionId: targetSession.id,
+        analysisMode,
+        db,
+      })
+    : null;
+  const checkpointResumedFromJobId =
+    resumeSummary && resumeSummary.canResume ? resumeSummary.sourceJobId : null;
+  const initialStrategy: AnalysisStrategy =
+    input.analysisStrategy ??
+    (resumeSummary && resumeSummary.canResume ? resumeSummary.analysisStrategy : 'native_video');
+
   // Build deterministic request fingerprint for cache reuse
   const fingerprintInput = JSON.stringify({
     matchId: input.matchId,
@@ -1084,6 +1448,7 @@ export async function startAnalysisJob(
     segmentKeys: validSegments.map((s) => `${s.id}:${s.checksum ?? s.sizeBytes}:${s.durationSeconds}`),
     half: input.half,
     analysisMode,
+    analysisStrategy: initialStrategy,
     language,
     modelVideoId,
     modelSynthesisId,
@@ -1095,7 +1460,7 @@ export async function startAnalysisJob(
   });
   const requestFingerprint = crypto.createHash('sha256').update(fingerprintInput).digest('hex');
 
-  if (!input.forceReanalyze) {
+  if (!input.forceReanalyze && !checkpointResumedFromJobId) {
     const cachedRow = db
       .prepare(
         `SELECT * FROM ai_analysis_jobs
@@ -1114,11 +1479,14 @@ export async function startAnalysisJob(
   db.prepare(`
     INSERT INTO ai_analysis_jobs (
       id, match_id, session_id, half, analysis_mode, language, status, current_stage,
-      progress_detail_json, model_video_id, model_synthesis_id, prompt_version, schema_version,
+      progress_detail_json, model_video_id, model_synthesis_id,
+      analysis_strategy, stage_models_json, fallback_history_json, validation_summary_json,
+      checkpoint_resumed_from_job_id,
+      prompt_version, schema_version,
       tactical_vision_dataset_version, request_fingerprint, privacy_authorized, entire_display_acknowledged,
       estimated_cost_usd, actual_cost_usd, budget_cap_usd, segments_total, segments_processed,
       sampling_fps, coverage_summary, created_at, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, 'queued', 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, 0, ?, '', ?, ?)
+    ) VALUES (?, ?, ?, ?, ?, ?, 'queued', 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, 0, ?, '', ?, ?)
   `).run(
     jobId,
     input.matchId,
@@ -1129,10 +1497,17 @@ export async function startAnalysisJob(
     JSON.stringify({
       segmentsTotal: validSegments.length,
       segmentsProcessed: 0,
-      stageLabel: 'Queued for video validation',
+      stageLabel: checkpointResumedFromJobId
+        ? 'Queued to resume from saved stage checkpoints'
+        : 'Queued for video validation',
     }),
     modelVideoId,
     modelSynthesisId,
+    initialStrategy,
+    JSON.stringify({}),
+    JSON.stringify([]),
+    JSON.stringify(createEmptyValidationAuditSummary()),
+    checkpointResumedFromJobId,
     PROMPT_VERSION,
     SCHEMA_VERSION,
     visionCatalog.datasetVersion,
@@ -1153,6 +1528,8 @@ export async function startAnalysisJob(
     sessionId: targetSession.id,
     half: input.half,
     analysisMode,
+    initialStrategy,
+    resumeSummary,
     language,
     modelVideoId,
     modelSynthesisId,
@@ -1173,12 +1550,75 @@ export async function startAnalysisJob(
   return { job: getAnalysisJob(jobId, db)!, reusedFromCache: false };
 }
 
+interface PreparedSegmentAsset {
+  assetId: string;
+  segmentId: string;
+  segmentIndex: number;
+  sessionOffsetSeconds: number;
+  localFilePath: string;
+  preparedFilePath: string;
+  sha256Hash: string;
+  durationSeconds: number;
+  sizeBytes: number;
+  originalSizeBytes: number;
+  processedSizeBytes: number;
+  proxyApplied: boolean;
+}
+
+interface ClassificationCheckpointPayload {
+  classifications: Array<{
+    startSeconds: number;
+    endSeconds: number;
+    contentType: AiVideoClassificationRecord['contentType'];
+    confidence: AiVideoClassificationRecord['confidence'];
+    evidenceDescription: string;
+    inGameClock: string | null;
+  }>;
+  readableHudStats: VideoClassificationOutput['readableHudStats'];
+  liveWindows: Array<{ startSeconds: number; endSeconds: number }>;
+  replayWindows: Array<{ startSeconds: number; endSeconds: number }>;
+}
+
+interface ObservationCheckpointPayload {
+  observations: Array<{
+    startSeconds: number;
+    endSeconds: number;
+    inGameClock: string | null;
+    categoryGroup: AiGameplayObservationRecord['categoryGroup'];
+    category: string;
+    teamAttribution: AiGameplayObservationRecord['teamAttribution'];
+    playerAttribution: string;
+    description: string;
+    supportingVisualEvidence: string;
+    evidenceType: AiGameplayObservationRecord['evidenceType'];
+    confidence: AiGameplayObservationRecord['confidence'];
+    severity: AiGameplayObservationRecord['severity'];
+    limitations: string;
+    evidenceFramePath: string | null;
+    isFromReplay: boolean;
+  }>;
+}
+
+const FRAME_FALLBACK_ELIGIBLE_CODES = new Set<GeminiErrorCode>([
+  'MODEL_VIDEO_UNSUPPORTED',
+  'VIDEO_PROCESSING_FAILED',
+  'VIDEO_PROCESSING_TIMEOUT',
+  'INFERENCE_TIMEOUT',
+  'UPSTREAM_SERVICE_UNAVAILABLE',
+  'INVALID_MODEL_RESPONSE',
+  'RATE_LIMIT_EXCEEDED',
+  'MODEL_NOT_FOUND',
+  'MODEL_ACCESS_DENIED',
+]);
+
 async function executeAnalysisJobPipeline(params: {
   jobId: string;
   matchId: string;
   sessionId: string;
   half: 'first_half' | 'second_half';
   analysisMode: VideoAnalysisMode;
+  initialStrategy: AnalysisStrategy;
+  resumeSummary: AnalysisCheckpointResumeSummary | null;
   language: AnalysisLanguage;
   modelVideoId: string;
   modelSynthesisId: string;
@@ -1201,6 +1641,11 @@ async function executeAnalysisJobPipeline(params: {
   const inferenceTimeoutMs =
     (settings.ai.inferenceTimeoutSeconds ?? settings.ai.maxAnalysisDurationSeconds ?? 180) * 1000;
   const maxRetries = settings.ai.maxRetryAttempts ?? 2;
+  const proxyEnabled =
+    settings.ai.proxyEnabled !== undefined
+      ? Boolean(settings.ai.proxyEnabled)
+      : Boolean(settings.ai.downscaleForAnalysis);
+  const proxySignature = buildProxySignature(params.analysisMode, proxyEnabled);
 
   const timing: AnalysisTimingBreakdown = {
     recordingDurationSeconds: 0,
@@ -1214,6 +1659,11 @@ async function executeAnalysisJobPipeline(params: {
     resultValidationMs: 0,
     totalElapsedMs: 0,
   };
+
+  const validationSummary: ValidationAuditSummary = createEmptyValidationAuditSummary();
+  const stageModelsUsed: Record<string, string> = {};
+  const fallbackHistory: ModelFailoverEvent[] = [];
+  let activeStrategy: AnalysisStrategy = params.initialStrategy;
 
   let cumulativeCostUsd = 0;
   let totalRetryCount = 0;
@@ -1260,6 +1710,262 @@ async function executeAnalysisJobPipeline(params: {
     }
   };
 
+  const validateAndRepairStageOutput = async <T>(opts: {
+    stageName: string;
+    modelId: string;
+    raw: unknown;
+    validator: (raw: unknown) => StageValidationResult<T>;
+    canonicalSchema: Record<string, unknown>;
+  }): Promise<T> => {
+    const mergeResult = (res: StageValidationResult<T>) => {
+      mergeValidationAuditSummary(validationSummary, {
+        totalValidatedItems: res.totalValidatedItems,
+        validItemsCount: res.validItemsCount,
+        rejectedItemsCount: res.rejectedItemsCount,
+        normalizedFields: res.normalizedFields,
+        rejectedItems: res.rejectedItems,
+        warnings: res.warnings,
+      });
+    };
+
+    const first = opts.validator(opts.raw);
+    mergeResult(first);
+    if (first.valid && first.data !== null) {
+      return first.data;
+    }
+
+    const firstPrimary = first.rejectedItems[0];
+    const firstErrorMsg =
+      first.blockingError?.message ??
+      firstPrimary?.reason ??
+      `Stage ${opts.stageName} failed schema/enum validation.`;
+
+    // Attempt at most ONE bounded structured JSON repair pass if provider supports it
+    if (typeof provider.repairStageJsonResponse === 'function') {
+      validationSummary.repairedAttemptsCount += 1;
+      try {
+        const repaired = await provider.repairStageJsonResponse({
+          modelId: opts.modelId,
+          stage: opts.stageName,
+          rawPayload: opts.raw,
+          validationErrorMessage: firstErrorMsg,
+          responseSchema: opts.canonicalSchema,
+          inferenceTimeoutMs: Math.min(inferenceTimeoutMs, 60_000),
+          abortSignal: jobController.signal,
+        });
+        cumulativeCostUsd += repaired.usage.estimatedCostUsd;
+        insertApiUsageLog({
+          matchId,
+          analysisJobId: jobId,
+          modelId: repaired.usage.modelId,
+          stage: `${opts.stageName}_json_repair`,
+          inputTokens: repaired.usage.inputTokens,
+          outputTokens: repaired.usage.outputTokens,
+          requestDurationMs: repaired.usage.durationMs,
+          estimatedCostUsd: repaired.usage.estimatedCostUsd,
+          pricingSource: 'local_registry_indicative_estimate',
+          isEstimate: true,
+          status: 'success',
+        });
+
+        const second = opts.validator(repaired.repairedPayload);
+        mergeResult(second);
+        if (second.valid && second.data !== null) {
+          return second.data;
+        }
+
+        const primaryIssue = second.rejectedItems[0] ?? firstPrimary;
+        throw new AiResponseValidationError({
+          code: 'AI_RESPONSE_REPAIR_FAILED',
+          stage: opts.stageName,
+          message: `AI response for ${opts.stageName} remained invalid after 1 bounded repair pass: ${second.blockingError?.message ?? primaryIssue?.reason ?? 'schema/enum mismatch'}`,
+          fieldName: second.blockingError?.fieldName ?? primaryIssue?.fieldName ?? null,
+          expectedValues: second.blockingError?.expectedValues ?? primaryIssue?.expectedValues ?? null,
+          receivedValuePreview:
+            second.blockingError?.receivedValuePreview ?? primaryIssue?.receivedValuePreview ?? null,
+          rejectedItems: second.rejectedItems.length > 0 ? second.rejectedItems : first.rejectedItems,
+        });
+      } catch (repairErr) {
+        if (isAiResponseValidationError(repairErr)) {
+          throw repairErr;
+        }
+        throw new AiResponseValidationError({
+          code: 'AI_RESPONSE_REPAIR_FAILED',
+          stage: opts.stageName,
+          message: `AI response for ${opts.stageName} failed validation (${firstErrorMsg}) and the 1-pass repair attempt failed: ${repairErr instanceof Error ? repairErr.message : String(repairErr)}`,
+          fieldName: first.blockingError?.fieldName ?? firstPrimary?.fieldName ?? null,
+          expectedValues: first.blockingError?.expectedValues ?? firstPrimary?.expectedValues ?? null,
+          receivedValuePreview:
+            first.blockingError?.receivedValuePreview ?? firstPrimary?.receivedValuePreview ?? null,
+          rejectedItems: first.rejectedItems,
+        });
+      }
+    }
+
+    if (first.blockingError) {
+      throw first.blockingError;
+    }
+
+    throw new AiResponseValidationError({
+      code:
+        firstPrimary?.code === 'AI_RESPONSE_ENUM_INVALID'
+          ? 'AI_RESPONSE_ENUM_INVALID'
+          : 'AI_RESPONSE_SCHEMA_INVALID',
+      stage: opts.stageName,
+      message: `AI response validation rejected ${opts.stageName} output before database persistence: ${firstErrorMsg}`,
+      fieldName: firstPrimary?.fieldName ?? null,
+      expectedValues: firstPrimary?.expectedValues ?? null,
+      receivedValuePreview: firstPrimary?.receivedValuePreview ?? null,
+      rejectedItems: first.rejectedItems,
+    });
+  };
+
+  const runStageWithModelFailover = async <T>(opts: {
+    stageKey: string;
+    stageLabel: string;
+    capability: 'video' | 'image' | 'synthesis';
+    initialModelId: string;
+    reusedRemoteMedia: boolean;
+    segmentIndex: number | null;
+    invoke: (modelId: string) => Promise<T>;
+  }): Promise<{ result: T; modelUsed: string }> => {
+    const attempted = new Set<string>([opts.initialModelId]);
+    let activeModelId = opts.initialModelId;
+    let failoverCount = 0;
+    const maxFailovers = 3;
+
+    while (true) {
+      checkCancelledOrThrow();
+      currentModelInUse = activeModelId;
+
+      try {
+        const result = await opts.invoke(activeModelId);
+        recordModelSuccess({
+          modelId: activeModelId,
+          capability: opts.capability,
+          stage: currentStageName,
+          db,
+        });
+        stageModelsUsed[opts.stageKey] = activeModelId;
+        updateJobProgress(db, jobId, {
+          stageModelsUsed,
+          fallbackHistory,
+        });
+        return { result, modelUsed: activeModelId };
+      } catch (err) {
+        if (
+          (err instanceof Error && err.message === '__JOB_CANCELLED__') ||
+          isCancelled() ||
+          isMediaPathError(err) ||
+          isAiResponseValidationError(err)
+        ) {
+          throw err;
+        }
+
+        const classified = isGeminiStageError(err)
+          ? {
+              code: err.geminiErrorCode,
+              userMessage: err.message,
+              diagnostic: err.diagnostic,
+            }
+          : classifyGeminiError(err, {
+              stage: currentStageName,
+              modelId: activeModelId,
+              segmentIndex: opts.segmentIndex,
+              elapsedMs: Date.now() - startedWallMs,
+            });
+
+        // Never penalize model health or trigger Gemini failover on local database errors
+        if (classified.diagnostic.errorDomain === 'database') {
+          throw err;
+        }
+
+        recordModelFailure({
+          modelId: activeModelId,
+          capability: opts.capability,
+          stage: currentStageName,
+          errorCode: classified.code,
+          errorMessage: classified.diagnostic.upstreamMessage,
+          retryAfterMs: classified.diagnostic.retryAfterMs,
+          db,
+        });
+
+        if (failoverCount >= maxFailovers) {
+          throw err;
+        }
+
+        const discoveredModels = getGeminiStatus(activeModelId, settings.ai).models;
+        const selection = selectFailoverCandidate({
+          failedModelId: activeModelId,
+          triedModelIds: attempted,
+          stage: currentStageName,
+          capability: opts.capability,
+          errorCode: classified.code,
+          aiSettings: settings.ai,
+          discoveredModels,
+          db,
+        });
+
+        if (!selection.selectedModelId) {
+          throw err;
+        }
+
+        const event: ModelFailoverEvent = {
+          stage: opts.stageKey,
+          segmentIndex: opts.segmentIndex,
+          fromModelId: activeModelId,
+          toModelId: selection.selectedModelId,
+          reasonCode: classified.code,
+          reasonMessage: sanitizeDiagnosticText(classified.userMessage),
+          reusedRemoteMedia: opts.reusedRemoteMedia,
+          costDeltaAuthorized: selection.costDeltaAuthorized,
+          occurredAt: new Date().toISOString(),
+        };
+        fallbackHistory.push(event);
+        failoverCount += 1;
+        activeModelId = selection.selectedModelId;
+        attempted.add(activeModelId);
+
+        updateJobProgress(db, jobId, {
+          fallbackHistory,
+          stageModelsUsed,
+          elapsedMs: Date.now() - startedWallMs,
+          progressDetail: {
+            segmentsTotal: Math.max(1, Number(params.resumeSummary?.completedSegmentIndices.length ?? 0)),
+            segmentsProcessed: Math.max(0, (opts.segmentIndex ?? 1) - 1),
+            currentSegmentIndex: opts.segmentIndex,
+            stageLabel: `Adaptive failover: switching ${opts.stageLabel} to ${activeModelId} after ${classified.code}`,
+            proxyAppliedCount,
+            originalBytesTotal,
+            processedBytesTotal,
+          },
+        });
+      }
+    }
+  };
+
+  const canAttemptSequentialFrameFallback = (err: unknown): boolean => {
+    if (!settings.ai.allowSequentialFrameFallback) return false;
+    if (
+      typeof provider.classifySequentialFrames !== 'function' ||
+      typeof provider.extractObservationsFromFrames !== 'function'
+    ) {
+      return false;
+    }
+    if (
+      (err instanceof Error && err.message === '__JOB_CANCELLED__') ||
+      isCancelled() ||
+      isMediaPathError(err) ||
+      isAiResponseValidationError(err)
+    ) {
+      return false;
+    }
+    const code: GeminiErrorCode = isGeminiStageError(err)
+      ? err.geminiErrorCode
+      : classifyGeminiError(err, { stage: currentStageName, modelId: currentModelInUse }).code;
+    return FRAME_FALLBACK_ELIGIBLE_CODES.has(code);
+  };
+
   try {
     const session = getMatchSessionById(sessionId);
     if (!session) {
@@ -1275,6 +1981,7 @@ async function executeAnalysisJobPipeline(params: {
     updateJobProgress(db, jobId, {
       status: 'validating_recording',
       currentStage: 'validating_recording',
+      analysisStrategy: activeStrategy,
       startedAt: startedAtIso,
       lastHeartbeatAt: startedAtIso,
       stageStartedAt: startedAtIso,
@@ -1287,20 +1994,7 @@ async function executeAnalysisJobPipeline(params: {
       },
     });
 
-    const preparedAssets: Array<{
-      assetId: string;
-      segmentId: string;
-      segmentIndex: number;
-      sessionOffsetSeconds: number;
-      localFilePath: string;
-      preparedFilePath: string;
-      durationSeconds: number;
-      sizeBytes: number;
-      originalSizeBytes: number;
-      processedSizeBytes: number;
-      proxyApplied: boolean;
-    }> = [];
-
+    const preparedAssets: PreparedSegmentAsset[] = [];
     const segmentDurationById = new Map<string, number>();
     let runningOffsetSeconds = 0;
 
@@ -1343,10 +2037,6 @@ async function executeAnalysisJobPipeline(params: {
       });
 
       const pStart = Date.now();
-      const proxyEnabled =
-        settings.ai.proxyEnabled !== undefined
-          ? Boolean(settings.ai.proxyEnabled)
-          : Boolean(settings.ai.downscaleForAnalysis);
       const prepared = await prepareAnalysisVideoAsset({
         jobId,
         filePath: resolvedMedia.resolvedPath,
@@ -1404,6 +2094,7 @@ async function executeAnalysisJobPipeline(params: {
         sessionOffsetSeconds: runningOffsetSeconds,
         localFilePath: prepared.localFilePath,
         preparedFilePath: prepared.preparedFilePath,
+        sha256Hash: seg.checksum || prepared.metadata.sha256Hash,
         durationSeconds: prepared.metadata.durationSeconds,
         sizeBytes: prepared.metadata.sizeBytes,
         originalSizeBytes: prepared.originalSizeBytes,
@@ -1418,7 +2109,7 @@ async function executeAnalysisJobPipeline(params: {
       throw new Error('Match context unavailable.');
     }
 
-    // Per-segment Upload -> Classify -> Extract Observations
+    // Per-segment state
     const allClassifications: AiVideoClassificationRecord[] = [];
     const allObservations: AiGameplayObservationRecord[] = [];
     const mergedHudStats: VideoClassificationOutput['readableHudStats'] = {
@@ -1430,183 +2121,236 @@ async function executeAnalysisJobPipeline(params: {
     };
     let liveGameplaySeconds = 0;
 
-    for (let i = 0; i < preparedAssets.length; i++) {
-      checkCancelledOrThrow();
-      const asset = preparedAssets[i];
-      currentSegmentNumber = i + 1;
-      currentModelInUse = params.modelVideoId;
-
-      currentStageName = 'uploading';
-      updateJobProgress(db, jobId, {
-        status: 'uploading',
-        currentStage: 'uploading',
-        segmentsProcessed: i,
-        currentSegmentIndex: i + 1,
-        retryAttempt: 0,
-        elapsedMs: Date.now() - startedWallMs,
-        progressDetail: {
-          segmentsTotal: preparedAssets.length,
-          segmentsProcessed: i,
-          currentSegmentIndex: i + 1,
-          stageLabel: `Uploading segment ${i + 1} of ${preparedAssets.length} to Gemini Files API (${(
-            asset.sizeBytes /
-            (1024 * 1024)
-          ).toFixed(2)} MB)`,
-          uploadBytesTotal: asset.sizeBytes,
-          uploadIndeterminate: true,
-          proxyAppliedCount,
-          originalBytesTotal,
-          processedBytesTotal,
-        },
-      });
-
-      const uploaded = await provider.uploadAndAwaitActive({
-        filePath: asset.preparedFilePath,
-        mimeType: 'video/mp4',
-        displayName: `fc26_${matchId.slice(0, 8)}_${half}_seg${asset.segmentIndex}.mp4`,
-        isCancelled,
-        abortSignal: jobController.signal,
-        segmentIndex: i + 1,
-        uploadTimeoutMs,
-        processingTimeoutMs,
-        maxWaitMs: processingTimeoutMs,
-        onRemoteFileUploaded: ({ remoteFileName, remoteFileUri, remoteState }) => {
-          // Immediately persist remote_file_name BEFORE processing poll so cleanup is guaranteed even on failure/timeout/cancel!
-          uploadedAssetsMap.set(asset.assetId, remoteFileName);
-          db.prepare(`
-            UPDATE ai_analysis_assets
-            SET remote_file_name = ?, remote_file_uri = ?, remote_state = ?, cleanup_status = 'uploaded', updated_at = ?
-            WHERE id = ?
-          `).run(
-            remoteFileName,
-            remoteFileUri,
-            remoteState ?? 'PROCESSING',
-            new Date().toISOString(),
-            asset.assetId
-          );
-        },
-        onWaitingForProcessing: () => {
-          currentStageName = 'waiting_for_media_processing';
-          updateJobProgress(db, jobId, {
-            status: 'waiting_for_media_processing',
-            currentStage: 'waiting_for_media_processing',
-            currentSegmentIndex: i + 1,
-            elapsedMs: Date.now() - startedWallMs,
-            progressDetail: {
-              segmentsTotal: preparedAssets.length,
-              segmentsProcessed: i,
-              currentSegmentIndex: i + 1,
-              stageLabel: `Waiting for Gemini media processing (segment ${i + 1}/${preparedAssets.length})`,
-              uploadIndeterminate: true,
-              proxyAppliedCount,
-              originalBytesTotal,
-              processedBytesTotal,
-            },
-          });
-        },
-      });
-
-      timing.uploadMs += uploaded.uploadMs;
-      timing.mediaProcessingMs += uploaded.mediaProcessingMs;
-      uploadedAssetsMap.set(asset.assetId, uploaded.remoteFileName);
-
-      db.prepare(`
-        UPDATE ai_analysis_assets
-        SET remote_file_name = ?, remote_file_uri = ?, remote_state = ?, cleanup_status = 'uploaded', updated_at = ?
-        WHERE id = ?
-      `).run(
-        uploaded.remoteFileName,
-        uploaded.remoteFileUri,
-        uploaded.remoteState,
-        new Date().toISOString(),
-        asset.assetId
-      );
-
-      checkCancelledOrThrow();
-
-      // Stage 1: Gameplay Content Classification
-      currentStageName = 'classifying_gameplay';
-      updateJobProgress(db, jobId, {
-        status: 'classifying_gameplay',
-        currentStage: 'classifying_gameplay',
-        currentSegmentIndex: i + 1,
-        retryAttempt: 0,
-        elapsedMs: Date.now() - startedWallMs,
-        progressDetail: {
-          segmentsTotal: preparedAssets.length,
-          segmentsProcessed: i,
-          currentSegmentIndex: i + 1,
-          stageLabel: `Classifying gameplay vs menus/replays (segment ${i + 1}/${preparedAssets.length})`,
-          proxyAppliedCount,
-          originalBytesTotal,
-          processedBytesTotal,
-        },
-      });
-
-      const classRes = await provider.classifyVideoSegment({
-        modelId: params.modelVideoId,
-        remoteFileUri: uploaded.remoteFileUri,
-        mimeType: 'video/mp4',
-        segmentDurationSeconds: asset.durationSeconds,
-        samplingFps: params.samplingFps,
-        half,
-        maxRetries,
-        segmentIndex: i + 1,
-        inferenceTimeoutMs,
-        abortSignal: jobController.signal,
-        onRetryAttempt: ({ attemptNumber, errorCode }) => {
-          totalRetryCount += 1;
-          updateJobProgress(db, jobId, {
-            retryCount: totalRetryCount,
-            retryAttempt: attemptNumber,
-            elapsedMs: Date.now() - startedWallMs,
-            progressDetail: {
-              segmentsTotal: preparedAssets.length,
-              segmentsProcessed: i,
-              currentSegmentIndex: i + 1,
-              retryAttempt: attemptNumber,
-              maxRetries,
-              stageLabel: `Retrying gameplay classification (segment ${i + 1}/${preparedAssets.length}, attempt ${attemptNumber + 1} after ${errorCode})`,
-              proxyAppliedCount,
-              originalBytesTotal,
-              processedBytesTotal,
-            },
-          });
-        },
-      });
-
-      timing.classificationMs += classRes.usage.durationMs;
-      cumulativeCostUsd += classRes.usage.estimatedCostUsd;
-
-      insertApiUsageLog({
-        matchId,
-        analysisJobId: jobId,
-        modelId: classRes.usage.modelId,
-        stage: 'stage1_classify_gameplay',
-        inputTokens: classRes.usage.inputTokens,
-        outputTokens: classRes.usage.outputTokens,
-        fileSizeBytes: asset.sizeBytes,
-        videoDurationSeconds: asset.durationSeconds,
-        requestDurationMs: classRes.usage.durationMs,
-        estimatedCostUsd: classRes.usage.estimatedCostUsd,
-        pricingSource: 'local_registry_indicative_estimate',
-        isEstimate: true,
-        status: 'success',
-      });
-
-      if (classRes.readableHudStats.scoreline) mergedHudStats.scoreline = classRes.readableHudStats.scoreline;
-      if (classRes.readableHudStats.matchClock) mergedHudStats.matchClock = classRes.readableHudStats.matchClock;
-      if (classRes.readableHudStats.possessionLabel)
-        mergedHudStats.possessionLabel = classRes.readableHudStats.possessionLabel;
-      if (classRes.readableHudStats.shotsLabel) mergedHudStats.shotsLabel = classRes.readableHudStats.shotsLabel;
-      for (const st of classRes.readableHudStats.otherVerifiedStats) {
+    const mergeHudStats = (hud: VideoClassificationOutput['readableHudStats']) => {
+      if (hud.scoreline) mergedHudStats.scoreline = hud.scoreline;
+      if (hud.matchClock) mergedHudStats.matchClock = hud.matchClock;
+      if (hud.possessionLabel) mergedHudStats.possessionLabel = hud.possessionLabel;
+      if (hud.shotsLabel) mergedHudStats.shotsLabel = hud.shotsLabel;
+      for (const st of hud.otherVerifiedStats) {
         if (!mergedHudStats.otherVerifiedStats.some((x) => x.label === st.label)) {
           mergedHudStats.otherVerifiedStats.push(st);
         }
       }
+    };
+
+    // Opt-in checkpoint restoration for previously completed segments
+    const resumedSegmentIndices = new Set<number>();
+    if (params.resumeSummary?.canResume && params.resumeSummary.sourceJobId) {
+      const priorCheckpointRows = db
+        .prepare(
+          `SELECT * FROM ai_analysis_checkpoints
+           WHERE job_id = ? AND status = 'valid'
+           ORDER BY segment_index ASC, created_at ASC`
+        )
+        .all(params.resumeSummary.sourceJobId) as Array<Record<string, unknown>>;
+
+      const priorClassBySeg = new Map<number, Record<string, unknown>>();
+      const priorObsBySeg = new Map<number, Record<string, unknown>>();
+      for (const row of priorCheckpointRows) {
+        const sIdx = Number(row.segment_index ?? 0);
+        if (String(row.stage_name) === 'classifying_gameplay') priorClassBySeg.set(sIdx, row);
+        if (String(row.stage_name) === 'analyzing_gameplay') priorObsBySeg.set(sIdx, row);
+      }
+
+      const insertClassStmt = db.prepare(`
+        INSERT INTO ai_video_classifications (
+          id, job_id, match_id, segment_id, start_seconds, end_seconds,
+          session_start_seconds, session_end_seconds, content_type, confidence,
+          evidence_description, in_game_clock, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `);
+      const insertObsStmt = db.prepare(`
+        INSERT INTO ai_gameplay_observations (
+          id, job_id, match_id, half, segment_id, start_seconds, end_seconds,
+          session_start_seconds, session_end_seconds, in_game_clock,
+          category_group, category, team_attribution, player_attribution,
+          description, supporting_visual_evidence, evidence_type, confidence,
+          severity, limitations, evidence_frame_path, is_from_replay, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `);
+
+      for (const asset of preparedAssets) {
+        const classCp = priorClassBySeg.get(asset.segmentIndex);
+        if (!classCp) continue;
+        const cpChecksum = String(classCp.segment_checksum ?? '');
+        if (cpChecksum && cpChecksum !== asset.sha256Hash) continue;
+
+        const classPayload = safeJsonParse<ClassificationCheckpointPayload | null>(
+          String(classCp.payload_json ?? ''),
+          null
+        );
+        if (!classPayload || !Array.isArray(classPayload.classifications)) continue;
+
+        const hasLive = classPayload.liveWindows.length > 0;
+        const obsCp = priorObsBySeg.get(asset.segmentIndex);
+        if (hasLive && !obsCp) continue;
+
+        const obsPayload = obsCp
+          ? safeJsonParse<ObservationCheckpointPayload | null>(String(obsCp.payload_json ?? ''), null)
+          : null;
+        if (hasLive && (!obsPayload || !Array.isArray(obsPayload.observations))) continue;
+
+        const restoredClassRows: AiVideoClassificationRecord[] = [];
+        const restoredObsRows: AiGameplayObservationRecord[] = [];
+        const restoredAt = new Date().toISOString();
+
+        const restoreTx = db.transaction(() => {
+          for (const c of classPayload.classifications) {
+            const cid = crypto.randomUUID();
+            insertClassStmt.run(
+              cid,
+              jobId,
+              matchId,
+              asset.segmentId,
+              c.startSeconds,
+              c.endSeconds,
+              asset.sessionOffsetSeconds + c.startSeconds,
+              asset.sessionOffsetSeconds + c.endSeconds,
+              c.contentType,
+              c.confidence,
+              c.evidenceDescription,
+              c.inGameClock ?? null,
+              restoredAt
+            );
+            restoredClassRows.push({
+              id: cid,
+              jobId,
+              matchId,
+              segmentId: asset.segmentId,
+              startSeconds: c.startSeconds,
+              endSeconds: c.endSeconds,
+              sessionStartSeconds: asset.sessionOffsetSeconds + c.startSeconds,
+              sessionEndSeconds: asset.sessionOffsetSeconds + c.endSeconds,
+              contentType: c.contentType,
+              confidence: c.confidence,
+              evidenceDescription: c.evidenceDescription,
+              inGameClock: c.inGameClock ?? null,
+              createdAt: restoredAt,
+            });
+          }
+
+          upsertStageCheckpoint(db, {
+            jobId,
+            matchId,
+            sessionId,
+            half,
+            stageName: 'classifying_gameplay',
+            segmentId: asset.segmentId,
+            segmentIndex: asset.segmentIndex,
+            segmentChecksum: asset.sha256Hash,
+            proxySignature,
+            modelUsed: String(classCp.model_used ?? params.modelVideoId),
+            analysisStrategy: (String(classCp.analysis_strategy ?? activeStrategy) as AnalysisStrategy),
+            payload: classPayload,
+          });
+
+          if (obsPayload && obsCp) {
+            for (const o of obsPayload.observations) {
+              const oid = crypto.randomUUID();
+              insertObsStmt.run(
+                oid,
+                jobId,
+                matchId,
+                half,
+                asset.segmentId,
+                o.startSeconds,
+                o.endSeconds,
+                asset.sessionOffsetSeconds + o.startSeconds,
+                asset.sessionOffsetSeconds + o.endSeconds,
+                o.inGameClock ?? null,
+                o.categoryGroup,
+                o.category,
+                o.teamAttribution,
+                o.playerAttribution,
+                o.description,
+                o.supportingVisualEvidence,
+                o.evidenceType,
+                o.confidence,
+                o.severity,
+                o.limitations ?? '',
+                o.evidenceFramePath ?? null,
+                o.isFromReplay ? 1 : 0,
+                restoredAt
+              );
+              restoredObsRows.push({
+                id: oid,
+                jobId,
+                matchId,
+                half,
+                segmentId: asset.segmentId,
+                startSeconds: o.startSeconds,
+                endSeconds: o.endSeconds,
+                sessionStartSeconds: asset.sessionOffsetSeconds + o.startSeconds,
+                sessionEndSeconds: asset.sessionOffsetSeconds + o.endSeconds,
+                inGameClock: o.inGameClock ?? null,
+                categoryGroup: o.categoryGroup,
+                category: o.category,
+                teamAttribution: o.teamAttribution,
+                playerAttribution: o.playerAttribution,
+                description: o.description,
+                supportingVisualEvidence: o.supportingVisualEvidence,
+                evidenceType: o.evidenceType,
+                confidence: o.confidence,
+                severity: o.severity,
+                limitations: o.limitations ?? '',
+                evidenceFramePath: o.evidenceFramePath ?? null,
+                isFromReplay: Boolean(o.isFromReplay),
+                createdAt: restoredAt,
+              });
+            }
+
+            upsertStageCheckpoint(db, {
+              jobId,
+              matchId,
+              sessionId,
+              half,
+              stageName: 'analyzing_gameplay',
+              segmentId: asset.segmentId,
+              segmentIndex: asset.segmentIndex,
+              segmentChecksum: asset.sha256Hash,
+              proxySignature,
+              modelUsed: String(obsCp.model_used ?? params.modelVideoId),
+              analysisStrategy: (String(obsCp.analysis_strategy ?? activeStrategy) as AnalysisStrategy),
+              payload: obsPayload,
+            });
+          }
+        });
+        restoreTx();
+
+        allClassifications.push(...restoredClassRows);
+        allObservations.push(...restoredObsRows);
+        mergeHudStats(classPayload.readableHudStats);
+        for (const lw of classPayload.liveWindows) {
+          liveGameplaySeconds += Math.max(0, lw.endSeconds - lw.startSeconds);
+        }
+        stageModelsUsed[`segment_${asset.segmentIndex}_classification`] = `${String(classCp.model_used ?? params.modelVideoId)} (resumed)`;
+        if (obsCp) {
+          stageModelsUsed[`segment_${asset.segmentIndex}_observations`] = `${String(obsCp.model_used ?? params.modelVideoId)} (resumed)`;
+        }
+        resumedSegmentIndices.add(asset.segmentIndex);
+      }
+    }
+
+    const persistValidatedClassificationsAndCheckpoint = (
+      asset: PreparedSegmentAsset,
+      validatedClass: ReturnType<typeof validateClassificationStageResponse> extends StageValidationResult<infer U>
+        ? U
+        : never,
+      modelUsed: string,
+      strategyUsed: AnalysisStrategy,
+      remoteFile?: { name: string; uri: string } | null
+    ): {
+      liveWindows: Array<{ startSeconds: number; endSeconds: number }>;
+      replayWindows: Array<{ startSeconds: number; endSeconds: number }>;
+    } => {
+      mergeHudStats(validatedClass.readableHudStats);
 
       const liveWindows: Array<{ startSeconds: number; endSeconds: number }> = [];
       const replayWindows: Array<{ startSeconds: number; endSeconds: number }> = [];
+      const newRows: AiVideoClassificationRecord[] = [];
+      const checkpointItems: ClassificationCheckpointPayload['classifications'] = [];
+      let segLiveSeconds = 0;
+
       const insertClassStmt = db.prepare(`
         INSERT INTO ai_video_classifications (
           id, job_id, match_id, segment_id, start_seconds, end_seconds,
@@ -1615,57 +2359,520 @@ async function executeAnalysisJobPipeline(params: {
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `);
 
-      for (const segWin of classRes.segments) {
-        const s0 = Math.max(0, Math.min(asset.durationSeconds, Number(segWin.startSeconds ?? 0)));
-        const s1 = Math.max(s0, Math.min(asset.durationSeconds, Number(segWin.endSeconds ?? s0)));
-        const cid = crypto.randomUUID();
-        const createdAt = new Date().toISOString();
-        insertClassStmt.run(
-          cid,
-          jobId,
-          matchId,
-          asset.segmentId,
-          s0,
-          s1,
-          asset.sessionOffsetSeconds + s0,
-          asset.sessionOffsetSeconds + s1,
-          segWin.contentType,
-          segWin.confidence,
-          segWin.evidenceDescription,
-          segWin.inGameClock ?? null,
-          createdAt
-        );
-        allClassifications.push({
-          id: cid,
-          jobId,
-          matchId,
-          segmentId: asset.segmentId,
-          startSeconds: s0,
-          endSeconds: s1,
-          sessionStartSeconds: asset.sessionOffsetSeconds + s0,
-          sessionEndSeconds: asset.sessionOffsetSeconds + s1,
-          contentType: segWin.contentType,
-          confidence: segWin.confidence,
-          evidenceDescription: segWin.evidenceDescription,
-          inGameClock: segWin.inGameClock ?? null,
-          createdAt,
-        });
+      const stage1Tx = db.transaction(() => {
+        for (const segWin of validatedClass.segments) {
+          const s0 = segWin.startSeconds;
+          const s1 = segWin.endSeconds;
+          const cid = crypto.randomUUID();
+          const createdAt = new Date().toISOString();
 
-        if (segWin.contentType === 'live_gameplay' || segWin.contentType === 'set_piece') {
-          liveGameplaySeconds += Math.max(0, s1 - s0);
-          liveWindows.push({ startSeconds: s0, endSeconds: s1 });
-        } else if (segWin.contentType === 'replay') {
-          replayWindows.push({ startSeconds: s0, endSeconds: s1 });
+          insertClassStmt.run(
+            cid,
+            jobId,
+            matchId,
+            asset.segmentId,
+            s0,
+            s1,
+            asset.sessionOffsetSeconds + s0,
+            asset.sessionOffsetSeconds + s1,
+            segWin.contentType,
+            segWin.confidence,
+            segWin.evidenceDescription,
+            segWin.inGameClock ?? null,
+            createdAt
+          );
+
+          newRows.push({
+            id: cid,
+            jobId,
+            matchId,
+            segmentId: asset.segmentId,
+            startSeconds: s0,
+            endSeconds: s1,
+            sessionStartSeconds: asset.sessionOffsetSeconds + s0,
+            sessionEndSeconds: asset.sessionOffsetSeconds + s1,
+            contentType: segWin.contentType,
+            confidence: segWin.confidence,
+            evidenceDescription: segWin.evidenceDescription,
+            inGameClock: segWin.inGameClock ?? null,
+            createdAt,
+          });
+          checkpointItems.push({
+            startSeconds: s0,
+            endSeconds: s1,
+            contentType: segWin.contentType,
+            confidence: segWin.confidence,
+            evidenceDescription: segWin.evidenceDescription,
+            inGameClock: segWin.inGameClock ?? null,
+          });
+
+          if (segWin.contentType === 'live_gameplay' || segWin.contentType === 'set_piece') {
+            segLiveSeconds += Math.max(0, s1 - s0);
+            liveWindows.push({ startSeconds: s0, endSeconds: s1 });
+          } else if (segWin.contentType === 'replay') {
+            replayWindows.push({ startSeconds: s0, endSeconds: s1 });
+          }
         }
+
+        const cpPayload: ClassificationCheckpointPayload = {
+          classifications: checkpointItems,
+          readableHudStats: validatedClass.readableHudStats,
+          liveWindows,
+          replayWindows,
+        };
+        upsertStageCheckpoint(db, {
+          jobId,
+          matchId,
+          sessionId,
+          half,
+          stageName: 'classifying_gameplay',
+          segmentId: asset.segmentId,
+          segmentIndex: asset.segmentIndex,
+          segmentChecksum: asset.sha256Hash,
+          proxySignature,
+          modelUsed,
+          analysisStrategy: strategyUsed,
+          remoteFileName: remoteFile?.name ?? null,
+          remoteFileUri: remoteFile?.uri ?? null,
+          payload: cpPayload,
+        });
+      });
+
+      stage1Tx();
+      allClassifications.push(...newRows);
+      liveGameplaySeconds += segLiveSeconds;
+      return { liveWindows, replayWindows };
+    };
+
+    const persistValidatedObservationsAndCheckpoint = async (
+      asset: PreparedSegmentAsset,
+      validatedObs: ReturnType<typeof validateObservationStageResponse> extends StageValidationResult<infer U>
+        ? U
+        : never,
+      replayWindows: Array<{ startSeconds: number; endSeconds: number }>,
+      modelUsed: string,
+      strategyUsed: AnalysisStrategy,
+      remoteFile?: { name: string; uri: string } | null
+    ): Promise<void> => {
+      const maxFrames = Math.min(12, settings.ai.maxEvidenceFrames ?? 12);
+      let framesExtracted = 0;
+
+      // Prepare observation records & extract evidence frames OUTSIDE the SQLite transaction
+      const preparedObsRows: Array<{
+        oid: string;
+        clampedStart: number;
+        clampedEnd: number;
+        inGameClock: string | null;
+        categoryGroup: AiGameplayObservationRecord['categoryGroup'];
+        category: string;
+        teamAttribution: AiGameplayObservationRecord['teamAttribution'];
+        cleanPlayerAttr: string;
+        description: string;
+        supportingVisualEvidence: string;
+        evidenceType: AiGameplayObservationRecord['evidenceType'];
+        confidence: AiGameplayObservationRecord['confidence'];
+        severity: AiGameplayObservationRecord['severity'];
+        limitations: string;
+        frameFileName: string | null;
+        overlapsReplay: boolean;
+        createdAt: string;
+      }> = [];
+
+      for (const rawObs of validatedObs.observations) {
+        const clampedStart = rawObs.startSeconds;
+        const clampedEnd = rawObs.endSeconds;
+
+        // Replay deduplication: detect overlap with classified replay window
+        const overlapsReplay =
+          Boolean(rawObs.isFromReplay) ||
+          replayWindows.some((rw) => clampedStart >= rw.startSeconds && clampedEnd <= rw.endSeconds);
+
+        // Skip duplicate replay match_events so replay footage never doubles event counts
+        if (overlapsReplay && rawObs.categoryGroup === 'match_events') {
+          continue;
+        }
+
+        let frameFileName: string | null = null;
+        if (!overlapsReplay && framesExtracted < maxFrames) {
+          frameFileName = await extractEvidenceFrame({
+            matchId,
+            half,
+            videoFilePath: asset.localFilePath,
+            timestampSeconds: clampedStart,
+            labelSlug: `${jobId.slice(0, 6)}_s${asset.segmentIndex}_${framesExtracted}`,
+            allowedBaseDirs: params.allowedMediaDirs,
+          });
+          if (frameFileName) framesExtracted += 1;
+        }
+
+        preparedObsRows.push({
+          oid: crypto.randomUUID(),
+          clampedStart,
+          clampedEnd,
+          inGameClock: rawObs.inGameClock ?? null,
+          categoryGroup: rawObs.categoryGroup,
+          category: rawObs.category,
+          teamAttribution: rawObs.teamAttribution,
+          cleanPlayerAttr: rawObs.playerAttribution?.trim() || 'Unknown',
+          description: rawObs.description,
+          supportingVisualEvidence: rawObs.supportingVisualEvidence,
+          evidenceType: rawObs.evidenceType,
+          confidence: rawObs.confidence,
+          severity: rawObs.severity,
+          limitations: rawObs.limitations ?? '',
+          frameFileName,
+          overlapsReplay,
+          createdAt: new Date().toISOString(),
+        });
       }
 
-      // Stage 2: Extract Gameplay Observations ONLY if this segment has live gameplay / set pieces
+      const insertObsStmt = db.prepare(`
+        INSERT INTO ai_gameplay_observations (
+          id, job_id, match_id, half, segment_id, start_seconds, end_seconds,
+          session_start_seconds, session_end_seconds, in_game_clock,
+          category_group, category, team_attribution, player_attribution,
+          description, supporting_visual_evidence, evidence_type, confidence,
+          severity, limitations, evidence_frame_path, is_from_replay, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `);
+
+      const stage2Tx = db.transaction(() => {
+        for (const row of preparedObsRows) {
+          insertObsStmt.run(
+            row.oid,
+            jobId,
+            matchId,
+            half,
+            asset.segmentId,
+            row.clampedStart,
+            row.clampedEnd,
+            asset.sessionOffsetSeconds + row.clampedStart,
+            asset.sessionOffsetSeconds + row.clampedEnd,
+            row.inGameClock,
+            row.categoryGroup,
+            row.category,
+            row.teamAttribution,
+            row.cleanPlayerAttr,
+            row.description,
+            row.supportingVisualEvidence,
+            row.evidenceType,
+            row.confidence,
+            row.severity,
+            row.limitations,
+            row.frameFileName,
+            row.overlapsReplay ? 1 : 0,
+            row.createdAt
+          );
+        }
+
+        const cpPayload: ObservationCheckpointPayload = {
+          observations: preparedObsRows.map((row) => ({
+            startSeconds: row.clampedStart,
+            endSeconds: row.clampedEnd,
+            inGameClock: row.inGameClock,
+            categoryGroup: row.categoryGroup,
+            category: row.category,
+            teamAttribution: row.teamAttribution,
+            playerAttribution: row.cleanPlayerAttr,
+            description: row.description,
+            supportingVisualEvidence: row.supportingVisualEvidence,
+            evidenceType: row.evidenceType,
+            confidence: row.confidence,
+            severity: row.severity,
+            limitations: row.limitations,
+            evidenceFramePath: row.frameFileName,
+            isFromReplay: row.overlapsReplay,
+          })),
+        };
+        upsertStageCheckpoint(db, {
+          jobId,
+          matchId,
+          sessionId,
+          half,
+          stageName: 'analyzing_gameplay',
+          segmentId: asset.segmentId,
+          segmentIndex: asset.segmentIndex,
+          segmentChecksum: asset.sha256Hash,
+          proxySignature,
+          modelUsed,
+          analysisStrategy: strategyUsed,
+          remoteFileName: remoteFile?.name ?? null,
+          remoteFileUri: remoteFile?.uri ?? null,
+          payload: cpPayload,
+        });
+      });
+
+      stage2Tx();
+
+      for (const row of preparedObsRows) {
+        allObservations.push({
+          id: row.oid,
+          jobId,
+          matchId,
+          half,
+          segmentId: asset.segmentId,
+          startSeconds: row.clampedStart,
+          endSeconds: row.clampedEnd,
+          sessionStartSeconds: asset.sessionOffsetSeconds + row.clampedStart,
+          sessionEndSeconds: asset.sessionOffsetSeconds + row.clampedEnd,
+          inGameClock: row.inGameClock,
+          categoryGroup: row.categoryGroup,
+          category: row.category,
+          teamAttribution: row.teamAttribution,
+          playerAttribution: row.cleanPlayerAttr,
+          description: row.description,
+          supportingVisualEvidence: row.supportingVisualEvidence,
+          evidenceType: row.evidenceType,
+          confidence: row.confidence,
+          severity: row.severity,
+          limitations: row.limitations,
+          evidenceFramePath: row.frameFileName,
+          isFromReplay: row.overlapsReplay,
+          createdAt: row.createdAt,
+        });
+      }
+    };
+
+    const runSegmentViaSequentialFrames = async (
+      asset: PreparedSegmentAsset,
+      segArrayIdx: number,
+      triggerReason?: string
+    ): Promise<void> => {
+      activeStrategy = 'sequential_frames';
+      currentStageName = 'classifying_gameplay';
+      updateJobProgress(db, jobId, {
+        status: 'classifying_gameplay',
+        currentStage: 'classifying_gameplay',
+        analysisStrategy: 'sequential_frames',
+        currentSegmentIndex: segArrayIdx + 1,
+        elapsedMs: Date.now() - startedWallMs,
+        progressDetail: {
+          segmentsTotal: preparedAssets.length,
+          segmentsProcessed: segArrayIdx,
+          currentSegmentIndex: segArrayIdx + 1,
+          stageLabel: triggerReason
+            ? `Sequential Frame Fallback (${triggerReason}): extracting local keyframes for segment ${segArrayIdx + 1}/${preparedAssets.length}`
+            : `Extracting local sequential keyframes (segment ${segArrayIdx + 1}/${preparedAssets.length})`,
+          proxyAppliedCount,
+          originalBytesTotal,
+          processedBytesTotal,
+        },
+      });
+
+      const { frames } = await extractSequentialFallbackFrames({
+        jobId,
+        videoFilePath: asset.localFilePath,
+        segmentIndex: asset.segmentIndex,
+        durationSeconds: asset.durationSeconds,
+        intervalSeconds: settings.ai.frameFallbackIntervalSeconds ?? 8,
+        maxFrames: settings.ai.maxFallbackFramesPerSegment ?? 18,
+        allowedBaseDirs: params.allowedMediaDirs,
+      });
+
+      if (frames.length === 0) {
+        throw new Error(
+          `Sequential Frame Fallback could not extract any JPEG keyframes from segment #${asset.segmentIndex}.`
+        );
+      }
+
+      const { result: frameClassRes, modelUsed: classModelUsed } = await runStageWithModelFailover({
+        stageKey: `segment_${asset.segmentIndex}_classification`,
+        stageLabel: `frame classification (segment ${segArrayIdx + 1})`,
+        capability: 'image',
+        initialModelId: params.modelVideoId,
+        reusedRemoteMedia: false,
+        segmentIndex: segArrayIdx + 1,
+        invoke: (mId) =>
+          provider.classifySequentialFrames!({
+            modelId: mId,
+            frames: frames.map((f) => ({
+              timestampSeconds: f.timestampSeconds,
+              filePath: f.filePath,
+              mimeType: f.mimeType,
+            })),
+            segmentDurationSeconds: asset.durationSeconds,
+            half,
+            maxRetries,
+            segmentIndex: segArrayIdx + 1,
+            inferenceTimeoutMs,
+            abortSignal: jobController.signal,
+          }),
+      });
+
+      timing.classificationMs += frameClassRes.usage.durationMs;
+      cumulativeCostUsd += frameClassRes.usage.estimatedCostUsd;
+
+      insertApiUsageLog({
+        matchId,
+        analysisJobId: jobId,
+        modelId: frameClassRes.usage.modelId,
+        stage: 'stage1_classify_sequential_frames',
+        inputTokens: frameClassRes.usage.inputTokens,
+        outputTokens: frameClassRes.usage.outputTokens,
+        evidenceFramesCount: frames.length,
+        videoDurationSeconds: asset.durationSeconds,
+        requestDurationMs: frameClassRes.usage.durationMs,
+        estimatedCostUsd: frameClassRes.usage.estimatedCostUsd,
+        pricingSource: 'local_registry_indicative_estimate',
+        isEstimate: true,
+        status: 'success',
+      });
+
+      const validatedClass = await validateAndRepairStageOutput({
+        stageName: 'stage1_classify_gameplay',
+        modelId: classModelUsed,
+        raw: frameClassRes,
+        validator: (raw) =>
+          validateClassificationStageResponse(raw, {
+            segmentIndex: asset.segmentIndex,
+            segmentDurationSeconds: asset.durationSeconds,
+          }),
+        canonicalSchema: buildStage1ClassificationSchema(),
+      });
+
+      const { liveWindows, replayWindows } = persistValidatedClassificationsAndCheckpoint(
+        asset,
+        validatedClass,
+        classModelUsed,
+        'sequential_frames',
+        null
+      );
+
       if (liveWindows.length > 0) {
         checkCancelledOrThrow();
         currentStageName = 'analyzing_gameplay';
         updateJobProgress(db, jobId, {
           status: 'analyzing_gameplay',
           currentStage: 'analyzing_gameplay',
+          analysisStrategy: 'sequential_frames',
+          currentSegmentIndex: segArrayIdx + 1,
+          elapsedMs: Date.now() - startedWallMs,
+          progressDetail: {
+            segmentsTotal: preparedAssets.length,
+            segmentsProcessed: segArrayIdx,
+            currentSegmentIndex: segArrayIdx + 1,
+            stageLabel: `Extracting tactical observations from ${frames.length} keyframes (segment ${segArrayIdx + 1}/${preparedAssets.length})`,
+            proxyAppliedCount,
+            originalBytesTotal,
+            processedBytesTotal,
+          },
+        });
+
+        const { result: frameObsRes, modelUsed: obsModelUsed } = await runStageWithModelFailover({
+          stageKey: `segment_${asset.segmentIndex}_observations`,
+          stageLabel: `frame observations (segment ${segArrayIdx + 1})`,
+          capability: 'image',
+          initialModelId: classModelUsed,
+          reusedRemoteMedia: false,
+          segmentIndex: segArrayIdx + 1,
+          invoke: (mId) =>
+            provider.extractObservationsFromFrames!({
+              modelId: mId,
+              frames: frames.map((f) => ({
+                timestampSeconds: f.timestampSeconds,
+                filePath: f.filePath,
+                mimeType: f.mimeType,
+              })),
+              segmentDurationSeconds: asset.durationSeconds,
+              analysisMode: params.analysisMode,
+              half,
+              clubName: matchContext.clubName,
+              opponentName: matchContext.opponentName,
+              language: params.language,
+              liveWindows,
+              maxRetries,
+              segmentIndex: segArrayIdx + 1,
+              inferenceTimeoutMs,
+              abortSignal: jobController.signal,
+            }),
+        });
+
+        timing.observationAnalysisMs += frameObsRes.usage.durationMs;
+        cumulativeCostUsd += frameObsRes.usage.estimatedCostUsd;
+
+        insertApiUsageLog({
+          matchId,
+          analysisJobId: jobId,
+          modelId: frameObsRes.usage.modelId,
+          stage: 'stage2_extract_observations_frames',
+          inputTokens: frameObsRes.usage.inputTokens,
+          outputTokens: frameObsRes.usage.outputTokens,
+          evidenceFramesCount: frames.length,
+          videoDurationSeconds: asset.durationSeconds,
+          requestDurationMs: frameObsRes.usage.durationMs,
+          estimatedCostUsd: frameObsRes.usage.estimatedCostUsd,
+          pricingSource: 'local_registry_indicative_estimate',
+          isEstimate: true,
+          status: 'success',
+        });
+
+        const validatedObs = await validateAndRepairStageOutput({
+          stageName: 'stage2_extract_observations',
+          modelId: obsModelUsed,
+          raw: frameObsRes,
+          validator: (raw) =>
+            validateObservationStageResponse(raw, {
+              segmentIndex: asset.segmentIndex,
+              segmentDurationSeconds: asset.durationSeconds,
+            }),
+          canonicalSchema: buildStage2ObservationSchema(),
+        });
+
+        await persistValidatedObservationsAndCheckpoint(
+          asset,
+          validatedObs,
+          replayWindows,
+          obsModelUsed,
+          'sequential_frames',
+          null
+        );
+      }
+    };
+
+    // Per-segment Upload -> Classify -> Extract Observations (with checkpoint skip, adaptive failover, and sequential frame fallback)
+    for (let i = 0; i < preparedAssets.length; i++) {
+      checkCancelledOrThrow();
+      const asset = preparedAssets[i];
+      currentSegmentNumber = i + 1;
+      currentModelInUse = params.modelVideoId;
+
+      if (resumedSegmentIndices.has(asset.segmentIndex)) {
+        updateJobProgress(db, jobId, {
+          segmentsProcessed: i + 1,
+          currentSegmentIndex: i + 1,
+          elapsedMs: Date.now() - startedWallMs,
+          progressDetail: {
+            segmentsTotal: preparedAssets.length,
+            segmentsProcessed: i + 1,
+            currentSegmentIndex: i + 1,
+            stageLabel: `Restored segment ${i + 1} of ${preparedAssets.length} from verified checkpoint`,
+            proxyAppliedCount,
+            originalBytesTotal,
+            processedBytesTotal,
+          },
+        });
+        continue;
+      }
+
+      if (activeStrategy === 'sequential_frames') {
+        await runSegmentViaSequentialFrames(asset, i);
+        updateJobProgress(db, jobId, {
+          segmentsProcessed: i + 1,
+          actualCostUsd: Number(cumulativeCostUsd.toFixed(6)),
+          analysisStrategy: activeStrategy,
+          stageModelsUsed,
+          fallbackHistory,
+          validationSummary,
+        });
+        continue;
+      }
+
+      try {
+        currentStageName = 'uploading';
+        updateJobProgress(db, jobId, {
+          status: 'uploading',
+          currentStage: 'uploading',
+          segmentsProcessed: i,
           currentSegmentIndex: i + 1,
           retryAttempt: 0,
           elapsedMs: Date.now() - startedWallMs,
@@ -1673,42 +2880,56 @@ async function executeAnalysisJobPipeline(params: {
             segmentsTotal: preparedAssets.length,
             segmentsProcessed: i,
             currentSegmentIndex: i + 1,
-            stageLabel: `Extracting tactical observations (segment ${i + 1}/${preparedAssets.length})`,
+            stageLabel: `Uploading segment ${i + 1} of ${preparedAssets.length} to Gemini Files API (${(
+              asset.sizeBytes /
+              (1024 * 1024)
+            ).toFixed(2)} MB)`,
+            uploadBytesTotal: asset.sizeBytes,
+            uploadIndeterminate: true,
             proxyAppliedCount,
             originalBytesTotal,
             processedBytesTotal,
           },
         });
 
-        const obsRes = await provider.extractGameplayObservations({
-          modelId: params.modelVideoId,
-          remoteFileUri: uploaded.remoteFileUri,
+        const uploaded = await provider.uploadAndAwaitActive({
+          filePath: asset.preparedFilePath,
           mimeType: 'video/mp4',
-          segmentDurationSeconds: asset.durationSeconds,
-          samplingFps: params.samplingFps,
-          analysisMode: params.analysisMode,
-          half,
-          clubName: matchContext.clubName,
-          opponentName: matchContext.opponentName,
-          language: params.language,
-          liveWindows,
-          maxRetries,
-          segmentIndex: i + 1,
-          inferenceTimeoutMs,
+          displayName: `fc26_${matchId.slice(0, 8)}_${half}_seg${asset.segmentIndex}.mp4`,
+          isCancelled,
           abortSignal: jobController.signal,
-          onRetryAttempt: ({ attemptNumber, errorCode }) => {
-            totalRetryCount += 1;
+          segmentIndex: i + 1,
+          uploadTimeoutMs,
+          processingTimeoutMs,
+          maxWaitMs: processingTimeoutMs,
+          onRemoteFileUploaded: ({ remoteFileName, remoteFileUri, remoteState }) => {
+            // Immediately persist remote_file_name BEFORE processing poll so cleanup is guaranteed even on failure/timeout/cancel!
+            uploadedAssetsMap.set(asset.assetId, remoteFileName);
+            db.prepare(`
+              UPDATE ai_analysis_assets
+              SET remote_file_name = ?, remote_file_uri = ?, remote_state = ?, cleanup_status = 'uploaded', updated_at = ?
+              WHERE id = ?
+            `).run(
+              remoteFileName,
+              remoteFileUri,
+              remoteState ?? 'PROCESSING',
+              new Date().toISOString(),
+              asset.assetId
+            );
+          },
+          onWaitingForProcessing: () => {
+            currentStageName = 'waiting_for_media_processing';
             updateJobProgress(db, jobId, {
-              retryCount: totalRetryCount,
-              retryAttempt: attemptNumber,
+              status: 'waiting_for_media_processing',
+              currentStage: 'waiting_for_media_processing',
+              currentSegmentIndex: i + 1,
               elapsedMs: Date.now() - startedWallMs,
               progressDetail: {
                 segmentsTotal: preparedAssets.length,
                 segmentsProcessed: i,
                 currentSegmentIndex: i + 1,
-                retryAttempt: attemptNumber,
-                maxRetries,
-                stageLabel: `Retrying observation extraction (segment ${i + 1}/${preparedAssets.length}, attempt ${attemptNumber + 1} after ${errorCode})`,
+                stageLabel: `Waiting for Gemini media processing (segment ${i + 1}/${preparedAssets.length})`,
+                uploadIndeterminate: true,
                 proxyAppliedCount,
                 originalBytesTotal,
                 processedBytesTotal,
@@ -1717,132 +2938,259 @@ async function executeAnalysisJobPipeline(params: {
           },
         });
 
-        timing.observationAnalysisMs += obsRes.usage.durationMs;
-        cumulativeCostUsd += obsRes.usage.estimatedCostUsd;
+        timing.uploadMs += uploaded.uploadMs;
+        timing.mediaProcessingMs += uploaded.mediaProcessingMs;
+        uploadedAssetsMap.set(asset.assetId, uploaded.remoteFileName);
+
+        db.prepare(`
+          UPDATE ai_analysis_assets
+          SET remote_file_name = ?, remote_file_uri = ?, remote_state = ?, cleanup_status = 'uploaded', updated_at = ?
+          WHERE id = ?
+        `).run(
+          uploaded.remoteFileName,
+          uploaded.remoteFileUri,
+          uploaded.remoteState,
+          new Date().toISOString(),
+          asset.assetId
+        );
+
+        checkCancelledOrThrow();
+
+        // Stage 1: Gameplay Content Classification (with adaptive failover reusing remoteFileUri + runtime validation)
+        currentStageName = 'classifying_gameplay';
+        updateJobProgress(db, jobId, {
+          status: 'classifying_gameplay',
+          currentStage: 'classifying_gameplay',
+          currentSegmentIndex: i + 1,
+          retryAttempt: 0,
+          elapsedMs: Date.now() - startedWallMs,
+          progressDetail: {
+            segmentsTotal: preparedAssets.length,
+            segmentsProcessed: i,
+            currentSegmentIndex: i + 1,
+            stageLabel: `Classifying gameplay vs menus/replays (segment ${i + 1}/${preparedAssets.length})`,
+            proxyAppliedCount,
+            originalBytesTotal,
+            processedBytesTotal,
+          },
+        });
+
+        const { result: classRes, modelUsed: stage1ModelUsed } = await runStageWithModelFailover({
+          stageKey: `segment_${asset.segmentIndex}_classification`,
+          stageLabel: `gameplay classification (segment ${i + 1})`,
+          capability: 'video',
+          initialModelId: params.modelVideoId,
+          reusedRemoteMedia: true,
+          segmentIndex: i + 1,
+          invoke: (mId) =>
+            provider.classifyVideoSegment({
+              modelId: mId,
+              remoteFileUri: uploaded.remoteFileUri,
+              mimeType: 'video/mp4',
+              segmentDurationSeconds: asset.durationSeconds,
+              samplingFps: params.samplingFps,
+              half,
+              maxRetries,
+              segmentIndex: i + 1,
+              inferenceTimeoutMs,
+              abortSignal: jobController.signal,
+              onRetryAttempt: ({ attemptNumber, errorCode }) => {
+                totalRetryCount += 1;
+                updateJobProgress(db, jobId, {
+                  retryCount: totalRetryCount,
+                  retryAttempt: attemptNumber,
+                  elapsedMs: Date.now() - startedWallMs,
+                  progressDetail: {
+                    segmentsTotal: preparedAssets.length,
+                    segmentsProcessed: i,
+                    currentSegmentIndex: i + 1,
+                    retryAttempt: attemptNumber,
+                    maxRetries,
+                    stageLabel: `Retrying gameplay classification (segment ${i + 1}/${preparedAssets.length}, attempt ${attemptNumber + 1} after ${errorCode})`,
+                    proxyAppliedCount,
+                    originalBytesTotal,
+                    processedBytesTotal,
+                  },
+                });
+              },
+            }),
+        });
+
+        timing.classificationMs += classRes.usage.durationMs;
+        cumulativeCostUsd += classRes.usage.estimatedCostUsd;
 
         insertApiUsageLog({
           matchId,
           analysisJobId: jobId,
-          modelId: obsRes.usage.modelId,
-          stage: 'stage2_extract_observations',
-          inputTokens: obsRes.usage.inputTokens,
-          outputTokens: obsRes.usage.outputTokens,
+          modelId: classRes.usage.modelId,
+          stage: 'stage1_classify_gameplay',
+          inputTokens: classRes.usage.inputTokens,
+          outputTokens: classRes.usage.outputTokens,
           fileSizeBytes: asset.sizeBytes,
           videoDurationSeconds: asset.durationSeconds,
-          requestDurationMs: obsRes.usage.durationMs,
-          estimatedCostUsd: obsRes.usage.estimatedCostUsd,
+          requestDurationMs: classRes.usage.durationMs,
+          estimatedCostUsd: classRes.usage.estimatedCostUsd,
           pricingSource: 'local_registry_indicative_estimate',
           isEstimate: true,
           status: 'success',
         });
 
-        const insertObsStmt = db.prepare(`
-          INSERT INTO ai_gameplay_observations (
-            id, job_id, match_id, half, segment_id, start_seconds, end_seconds,
-            session_start_seconds, session_end_seconds, in_game_clock,
-            category_group, category, team_attribution, player_attribution,
-            description, supporting_visual_evidence, evidence_type, confidence,
-            severity, limitations, evidence_frame_path, is_from_replay, created_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        `);
+        const validatedClass = await validateAndRepairStageOutput({
+          stageName: 'stage1_classify_gameplay',
+          modelId: stage1ModelUsed,
+          raw: classRes,
+          validator: (raw) =>
+            validateClassificationStageResponse(raw, {
+              segmentIndex: asset.segmentIndex,
+              segmentDurationSeconds: asset.durationSeconds,
+            }),
+          canonicalSchema: buildStage1ClassificationSchema(),
+        });
 
-        const maxFrames = Math.min(12, settings.ai.maxEvidenceFrames ?? 12);
-        let framesExtracted = 0;
+        const { liveWindows, replayWindows } = persistValidatedClassificationsAndCheckpoint(
+          asset,
+          validatedClass,
+          stage1ModelUsed,
+          'native_video',
+          { name: uploaded.remoteFileName, uri: uploaded.remoteFileUri }
+        );
 
-        for (const rawObs of obsRes.observations) {
-          const s0 = Number(rawObs.startSeconds);
-          const s1 = Number(rawObs.endSeconds);
-          if (!Number.isFinite(s0) || !Number.isFinite(s1) || s0 < 0 || s1 < s0 || s0 > asset.durationSeconds + 2) {
-            continue; // Reject out-of-range fabricated timestamps
-          }
-
-          const clampedStart = Math.max(0, Math.min(asset.durationSeconds, s0));
-          const clampedEnd = Math.max(clampedStart, Math.min(asset.durationSeconds, s1));
-
-          // Replay deduplication: detect overlap with classified replay window
-          const overlapsReplay =
-            Boolean(rawObs.isFromReplay) ||
-            replayWindows.some((rw) => clampedStart >= rw.startSeconds && clampedEnd <= rw.endSeconds);
-
-          // Skip duplicate replay match_events so replay footage never doubles event counts
-          if (overlapsReplay && rawObs.categoryGroup === 'match_events') {
-            continue;
-          }
-
-          let frameFileName: string | null = null;
-          if (!overlapsReplay && framesExtracted < maxFrames) {
-            frameFileName = await extractEvidenceFrame({
-              matchId,
-              half,
-              videoFilePath: asset.localFilePath,
-              timestampSeconds: clampedStart,
-              labelSlug: `${jobId.slice(0, 6)}_s${asset.segmentIndex}_${framesExtracted}`,
-              allowedBaseDirs: params.allowedMediaDirs,
-            });
-            if (frameFileName) framesExtracted += 1;
-          }
-
-          const oid = crypto.randomUUID();
-          const createdAt = new Date().toISOString();
-          const cleanPlayerAttr = rawObs.playerAttribution?.trim() || 'Unknown';
-
-          insertObsStmt.run(
-            oid,
-            jobId,
-            matchId,
-            half,
-            asset.segmentId,
-            clampedStart,
-            clampedEnd,
-            asset.sessionOffsetSeconds + clampedStart,
-            asset.sessionOffsetSeconds + clampedEnd,
-            rawObs.inGameClock ?? null,
-            rawObs.categoryGroup,
-            rawObs.category,
-            rawObs.teamAttribution,
-            cleanPlayerAttr,
-            rawObs.description,
-            rawObs.supportingVisualEvidence,
-            rawObs.evidenceType,
-            rawObs.confidence,
-            rawObs.severity,
-            rawObs.limitations ?? '',
-            frameFileName,
-            overlapsReplay ? 1 : 0,
-            createdAt
-          );
-
-          allObservations.push({
-            id: oid,
-            jobId,
-            matchId,
-            half,
-            segmentId: asset.segmentId,
-            startSeconds: clampedStart,
-            endSeconds: clampedEnd,
-            sessionStartSeconds: asset.sessionOffsetSeconds + clampedStart,
-            sessionEndSeconds: asset.sessionOffsetSeconds + clampedEnd,
-            inGameClock: rawObs.inGameClock ?? null,
-            categoryGroup: rawObs.categoryGroup,
-            category: rawObs.category,
-            teamAttribution: rawObs.teamAttribution,
-            playerAttribution: cleanPlayerAttr,
-            description: rawObs.description,
-            supportingVisualEvidence: rawObs.supportingVisualEvidence,
-            evidenceType: rawObs.evidenceType,
-            confidence: rawObs.confidence,
-            severity: rawObs.severity,
-            limitations: rawObs.limitations ?? '',
-            evidenceFramePath: frameFileName,
-            isFromReplay: overlapsReplay,
-            createdAt,
+        // Stage 2: Extract Gameplay Observations ONLY if this segment has live gameplay / set pieces
+        if (liveWindows.length > 0) {
+          checkCancelledOrThrow();
+          currentStageName = 'analyzing_gameplay';
+          updateJobProgress(db, jobId, {
+            status: 'analyzing_gameplay',
+            currentStage: 'analyzing_gameplay',
+            currentSegmentIndex: i + 1,
+            retryAttempt: 0,
+            elapsedMs: Date.now() - startedWallMs,
+            progressDetail: {
+              segmentsTotal: preparedAssets.length,
+              segmentsProcessed: i,
+              currentSegmentIndex: i + 1,
+              stageLabel: `Extracting tactical observations (segment ${i + 1}/${preparedAssets.length})`,
+              proxyAppliedCount,
+              originalBytesTotal,
+              processedBytesTotal,
+            },
           });
+
+          const { result: obsRes, modelUsed: stage2ModelUsed } = await runStageWithModelFailover({
+            stageKey: `segment_${asset.segmentIndex}_observations`,
+            stageLabel: `observation extraction (segment ${i + 1})`,
+            capability: 'video',
+            initialModelId: stage1ModelUsed,
+            reusedRemoteMedia: true,
+            segmentIndex: i + 1,
+            invoke: (mId) =>
+              provider.extractGameplayObservations({
+                modelId: mId,
+                remoteFileUri: uploaded.remoteFileUri,
+                mimeType: 'video/mp4',
+                segmentDurationSeconds: asset.durationSeconds,
+                samplingFps: params.samplingFps,
+                analysisMode: params.analysisMode,
+                half,
+                clubName: matchContext.clubName,
+                opponentName: matchContext.opponentName,
+                language: params.language,
+                liveWindows,
+                maxRetries,
+                segmentIndex: i + 1,
+                inferenceTimeoutMs,
+                abortSignal: jobController.signal,
+                onRetryAttempt: ({ attemptNumber, errorCode }) => {
+                  totalRetryCount += 1;
+                  updateJobProgress(db, jobId, {
+                    retryCount: totalRetryCount,
+                    retryAttempt: attemptNumber,
+                    elapsedMs: Date.now() - startedWallMs,
+                    progressDetail: {
+                      segmentsTotal: preparedAssets.length,
+                      segmentsProcessed: i,
+                      currentSegmentIndex: i + 1,
+                      retryAttempt: attemptNumber,
+                      maxRetries,
+                      stageLabel: `Retrying observation extraction (segment ${i + 1}/${preparedAssets.length}, attempt ${attemptNumber + 1} after ${errorCode})`,
+                      proxyAppliedCount,
+                      originalBytesTotal,
+                      processedBytesTotal,
+                    },
+                  });
+                },
+              }),
+          });
+
+          timing.observationAnalysisMs += obsRes.usage.durationMs;
+          cumulativeCostUsd += obsRes.usage.estimatedCostUsd;
+
+          insertApiUsageLog({
+            matchId,
+            analysisJobId: jobId,
+            modelId: obsRes.usage.modelId,
+            stage: 'stage2_extract_observations',
+            inputTokens: obsRes.usage.inputTokens,
+            outputTokens: obsRes.usage.outputTokens,
+            fileSizeBytes: asset.sizeBytes,
+            videoDurationSeconds: asset.durationSeconds,
+            requestDurationMs: obsRes.usage.durationMs,
+            estimatedCostUsd: obsRes.usage.estimatedCostUsd,
+            pricingSource: 'local_registry_indicative_estimate',
+            isEstimate: true,
+            status: 'success',
+          });
+
+          const validatedObs = await validateAndRepairStageOutput({
+            stageName: 'stage2_extract_observations',
+            modelId: stage2ModelUsed,
+            raw: obsRes,
+            validator: (raw) =>
+              validateObservationStageResponse(raw, {
+                segmentIndex: asset.segmentIndex,
+                segmentDurationSeconds: asset.durationSeconds,
+              }),
+            canonicalSchema: buildStage2ObservationSchema(),
+          });
+
+          await persistValidatedObservationsAndCheckpoint(
+            asset,
+            validatedObs,
+            replayWindows,
+            stage2ModelUsed,
+            'native_video',
+            { name: uploaded.remoteFileName, uri: uploaded.remoteFileUri }
+          );
+        }
+      } catch (segErr) {
+        if (canAttemptSequentialFrameFallback(segErr)) {
+          const triggerCode: GeminiErrorCode = isGeminiStageError(segErr)
+            ? segErr.geminiErrorCode
+            : classifyGeminiError(segErr, { stage: currentStageName, modelId: currentModelInUse }).code;
+          fallbackHistory.push({
+            stage: `segment_${asset.segmentIndex}_strategy_fallback`,
+            segmentIndex: i + 1,
+            fromModelId: currentModelInUse,
+            toModelId: `${params.modelVideoId} (sequential_frames)`,
+            reasonCode: triggerCode,
+            reasonMessage: `Native video failed (${triggerCode}); switched to opt-in Sequential Keyframe Fallback.`,
+            reusedRemoteMedia: false,
+            costDeltaAuthorized: true,
+            occurredAt: new Date().toISOString(),
+          });
+          await runSegmentViaSequentialFrames(asset, i, triggerCode);
+        } else {
+          throw segErr;
         }
       }
 
       updateJobProgress(db, jobId, {
         segmentsProcessed: i + 1,
         actualCostUsd: Number(cumulativeCostUsd.toFixed(6)),
+        analysisStrategy: activeStrategy,
+        stageModelsUsed,
+        fallbackHistory,
+        validationSummary,
       });
     }
 
@@ -1912,6 +3260,10 @@ async function executeAnalysisJobPipeline(params: {
       updateJobProgress(db, jobId, {
         status: 'insufficient_gameplay',
         currentStage: 'insufficient_gameplay',
+        analysisStrategy: activeStrategy,
+        stageModelsUsed,
+        fallbackHistory,
+        validationSummary,
         coverageSummary,
         actualCostUsd: Number(cumulativeCostUsd.toFixed(6)),
         completedAt: finishedAt,
@@ -1983,55 +3335,72 @@ async function executeAnalysisJobPipeline(params: {
       },
     });
 
-    const synthRes = await provider.synthesizeTacticalBriefing({
-      modelId: params.modelSynthesisId,
-      language: params.language,
-      half,
-      matchContext,
-      threeLayerEval,
-      observations: allObservations,
-      readableHudStats: mergedHudStats,
-      coverageSummary,
-      userPreMatchNotes: matchNotesRow?.pre_match_notes ?? '',
-      maxRetries,
-      inferenceTimeoutMs,
-      abortSignal: jobController.signal,
-      onRetryAttempt: ({ attemptNumber, errorCode }) => {
-        totalRetryCount += 1;
-        updateJobProgress(db, jobId, {
-          retryCount: totalRetryCount,
-          retryAttempt: attemptNumber,
-          elapsedMs: Date.now() - startedWallMs,
-          progressDetail: {
-            segmentsTotal: preparedAssets.length,
-            segmentsProcessed: preparedAssets.length,
-            retryAttempt: attemptNumber,
-            maxRetries,
-            stageLabel: `Retrying tactical synthesis (attempt ${attemptNumber + 1} after ${errorCode})`,
-            proxyAppliedCount,
-            originalBytesTotal,
-            processedBytesTotal,
+    const { result: synthResRaw, modelUsed: stage3ModelUsed } = await runStageWithModelFailover({
+      stageKey: 'stage3_tactical_synthesis',
+      stageLabel: 'tactical synthesis',
+      capability: 'synthesis',
+      initialModelId: params.modelSynthesisId,
+      reusedRemoteMedia: false,
+      segmentIndex: null,
+      invoke: (mId) =>
+        provider.synthesizeTacticalBriefing({
+          modelId: mId,
+          language: params.language,
+          half,
+          matchContext,
+          threeLayerEval,
+          observations: allObservations,
+          readableHudStats: mergedHudStats,
+          coverageSummary,
+          userPreMatchNotes: matchNotesRow?.pre_match_notes ?? '',
+          maxRetries,
+          inferenceTimeoutMs,
+          abortSignal: jobController.signal,
+          onRetryAttempt: ({ attemptNumber, errorCode }) => {
+            totalRetryCount += 1;
+            updateJobProgress(db, jobId, {
+              retryCount: totalRetryCount,
+              retryAttempt: attemptNumber,
+              elapsedMs: Date.now() - startedWallMs,
+              progressDetail: {
+                segmentsTotal: preparedAssets.length,
+                segmentsProcessed: preparedAssets.length,
+                retryAttempt: attemptNumber,
+                maxRetries,
+                stageLabel: `Retrying tactical synthesis (attempt ${attemptNumber + 1} after ${errorCode})`,
+                proxyAppliedCount,
+                originalBytesTotal,
+                processedBytesTotal,
+              },
+            });
           },
-        });
-      },
+        }),
     });
 
-    timing.tacticalSynthesisMs += synthRes.usage.durationMs;
-    cumulativeCostUsd += synthRes.usage.estimatedCostUsd;
+    timing.tacticalSynthesisMs += synthResRaw.usage.durationMs;
+    cumulativeCostUsd += synthResRaw.usage.estimatedCostUsd;
 
     insertApiUsageLog({
       matchId,
       analysisJobId: jobId,
-      modelId: synthRes.usage.modelId,
+      modelId: synthResRaw.usage.modelId,
       stage: 'stage3_tactical_synthesis',
-      inputTokens: synthRes.usage.inputTokens,
-      outputTokens: synthRes.usage.outputTokens,
+      inputTokens: synthResRaw.usage.inputTokens,
+      outputTokens: synthResRaw.usage.outputTokens,
       evidenceFramesCount: allObservations.filter((o) => Boolean(o.evidenceFramePath)).length,
-      requestDurationMs: synthRes.usage.durationMs,
-      estimatedCostUsd: synthRes.usage.estimatedCostUsd,
+      requestDurationMs: synthResRaw.usage.durationMs,
+      estimatedCostUsd: synthResRaw.usage.estimatedCostUsd,
       pricingSource: 'local_registry_indicative_estimate',
       isEstimate: true,
       status: 'success',
+    });
+
+    const synthRes = await validateAndRepairStageOutput({
+      stageName: 'stage3_tactical_synthesis',
+      modelId: stage3ModelUsed,
+      raw: synthResRaw,
+      validator: (raw) => validateSynthesisStageResponse(raw),
+      canonicalSchema: buildStage3SynthesisSchema(),
     });
 
     // Stage: validating_results (Deterministic Server-Side FC26 Validation)
@@ -2060,6 +3429,11 @@ async function executeAnalysisJobPipeline(params: {
     const completedAt = new Date().toISOString();
     const hasInvalidRecs = validatedRecs.some((r) => r.validationStatus === 'invalid_unsupported');
     const limitations = [...(synthRes.limitations ?? [])];
+    if (activeStrategy === 'sequential_frames') {
+      limitations.push(
+        'Analyzed using Sequential Keyframe Fallback (periodic local JPEG keyframes) rather than continuous native video; rapid micro-transitions between sampled frames may not be captured.'
+      );
+    }
     if (hasInvalidRecs) {
       limitations.push(
         'One or more AI proposals failed deterministic FC 26 catalog/eligibility validation and were flagged as Unsupported without silent mutation.'
@@ -2160,7 +3534,7 @@ async function executeAnalysisJobPipeline(params: {
         matchId,
         half,
         language: params.language,
-        modelUsed: params.modelSynthesisId,
+        modelUsed: stage3ModelUsed,
         promptVersion: PROMPT_VERSION,
         schemaVersion: SCHEMA_VERSION,
         evidenceQuality: synthRes.evidenceQuality,
@@ -2183,7 +3557,7 @@ async function executeAnalysisJobPipeline(params: {
         matchId,
         half,
         params.language,
-        params.modelSynthesisId,
+        stage3ModelUsed,
         PROMPT_VERSION,
         SCHEMA_VERSION,
         JSON.stringify(briefingPayload),
@@ -2191,6 +3565,21 @@ async function executeAnalysisJobPipeline(params: {
         JSON.stringify(limitations),
         completedAt
       );
+
+      upsertStageCheckpoint(db, {
+        jobId,
+        matchId,
+        sessionId,
+        half,
+        stageName: 'generating_briefing',
+        segmentId: null,
+        segmentIndex: 0,
+        segmentChecksum: '',
+        proxySignature,
+        modelUsed: stage3ModelUsed,
+        analysisStrategy: activeStrategy,
+        payload: { briefingId: briefingPayload.id, recommendationCount: validatedRecs.length },
+      });
     });
 
     persistTx();
@@ -2227,36 +3616,53 @@ async function executeAnalysisJobPipeline(params: {
           applied_in_game: number;
         }>;
 
-        const compRes = await provider.synthesizeSecondHalfComparison({
-          modelId: params.modelSynthesisId,
-          language: params.language,
-          matchContext,
-          firstHalfObservations: firstHalfObs,
-          secondHalfObservations: allObservations,
-          reviewedRecommendations: firstHalfRecs.map((r) => ({
-            title: r.title,
-            proposedValue: r.proposed_value,
-            decisionStatus: r.decision_status,
-            appliedInGame: Boolean(r.applied_in_game),
-          })),
-          maxRetries,
-          inferenceTimeoutMs,
-          abortSignal: jobController.signal,
+        const { result: compResRaw, modelUsed: stage4ModelUsed } = await runStageWithModelFailover({
+          stageKey: 'stage4_second_half_comparison',
+          stageLabel: 'second-half comparison',
+          capability: 'synthesis',
+          initialModelId: stage3ModelUsed,
+          reusedRemoteMedia: false,
+          segmentIndex: null,
+          invoke: (mId) =>
+            provider.synthesizeSecondHalfComparison({
+              modelId: mId,
+              language: params.language,
+              matchContext,
+              firstHalfObservations: firstHalfObs,
+              secondHalfObservations: allObservations,
+              reviewedRecommendations: firstHalfRecs.map((r) => ({
+                title: r.title,
+                proposedValue: r.proposed_value,
+                decisionStatus: r.decision_status,
+                appliedInGame: Boolean(r.applied_in_game),
+              })),
+              maxRetries,
+              inferenceTimeoutMs,
+              abortSignal: jobController.signal,
+            }),
         });
 
-        cumulativeCostUsd += compRes.usage.estimatedCostUsd;
+        cumulativeCostUsd += compResRaw.usage.estimatedCostUsd;
         insertApiUsageLog({
           matchId,
           analysisJobId: jobId,
-          modelId: compRes.usage.modelId,
+          modelId: compResRaw.usage.modelId,
           stage: 'stage4_second_half_comparison',
-          inputTokens: compRes.usage.inputTokens,
-          outputTokens: compRes.usage.outputTokens,
-          requestDurationMs: compRes.usage.durationMs,
-          estimatedCostUsd: compRes.usage.estimatedCostUsd,
+          inputTokens: compResRaw.usage.inputTokens,
+          outputTokens: compResRaw.usage.outputTokens,
+          requestDurationMs: compResRaw.usage.durationMs,
+          estimatedCostUsd: compResRaw.usage.estimatedCostUsd,
           pricingSource: 'local_registry_indicative_estimate',
           isEstimate: true,
           status: 'success',
+        });
+
+        const compRes = await validateAndRepairStageOutput({
+          stageName: 'stage4_second_half_comparison',
+          modelId: stage4ModelUsed,
+          raw: compResRaw,
+          validator: (raw) => validateComparisonStageResponse(raw),
+          canonicalSchema: buildStage4ComparisonSchema(),
         });
 
         const compPayload: AiSecondHalfComparisonPayload = {
@@ -2264,7 +3670,7 @@ async function executeAnalysisJobPipeline(params: {
           jobId,
           matchId,
           firstHalfJobId: firstHalfJobRow.id,
-          modelUsed: params.modelSynthesisId,
+          modelUsed: stage4ModelUsed,
           summary: compRes.summary,
           appliedAdjustmentsReviewed: compRes.appliedAdjustmentsReviewed,
           attackingComparison: compRes.attackingComparison,
@@ -2284,7 +3690,7 @@ async function executeAnalysisJobPipeline(params: {
           jobId,
           matchId,
           firstHalfJobRow.id,
-          params.modelSynthesisId,
+          stage4ModelUsed,
           JSON.stringify(compPayload),
           compPayload.createdAt
         );
@@ -2307,7 +3713,11 @@ async function executeAnalysisJobPipeline(params: {
           jobId,
           half,
           modelVideoId: params.modelVideoId,
-          modelSynthesisId: params.modelSynthesisId,
+          modelSynthesisId: stage3ModelUsed,
+          analysisStrategy: activeStrategy,
+          stageModelsUsed,
+          fallbackHistory,
+          validationSummary,
           briefing: bundleSnapshot.briefing,
           visionAssessment: bundleSnapshot.visionAssessment,
           classifications: bundleSnapshot.classifications,
@@ -2323,7 +3733,7 @@ async function executeAnalysisJobPipeline(params: {
     // Mark session analysis_state completed & finalize job status truthfully
     updateMatchSession(sessionId, { analysisState: 'analysis_completed' });
     const finalStatus: AnalysisJobStatus =
-      hasInvalidRecs || synthRes.evidenceQuality === 'limited'
+      hasInvalidRecs || synthRes.evidenceQuality === 'limited' || activeStrategy === 'sequential_frames'
         ? 'completed_with_limitations'
         : 'completed';
 
@@ -2334,6 +3744,10 @@ async function executeAnalysisJobPipeline(params: {
       {
         status: finalStatus,
         currentStage: finalStatus,
+        analysisStrategy: activeStrategy,
+        stageModelsUsed,
+        fallbackHistory,
+        validationSummary,
         coverageSummary,
         actualCostUsd: Number(cumulativeCostUsd.toFixed(6)),
         completedAt,
@@ -2362,6 +3776,7 @@ async function executeAnalysisJobPipeline(params: {
     if (isCancel || isCancelled()) {
       const cancelDiag: SanitizedGeminiErrorDiagnostic = {
         code: 'ANALYSIS_CANCELLED',
+        errorDomain: 'internal',
         httpStatus: null,
         apiStatus: null,
         upstreamMessage: 'Analysis job was cancelled by the user.',
@@ -2380,6 +3795,10 @@ async function executeAnalysisJobPipeline(params: {
         {
           status: 'cancelled',
           currentStage: 'cancelled',
+          analysisStrategy: activeStrategy,
+          stageModelsUsed,
+          fallbackHistory,
+          validationSummary,
           actualCostUsd: Number(cumulativeCostUsd.toFixed(6)),
           completedAt: finishedAt,
           elapsedMs: timing.totalElapsedMs,
@@ -2392,6 +3811,21 @@ async function executeAnalysisJobPipeline(params: {
       );
     } else if (isMediaPathError(err)) {
       // Local recording media path / security / integrity error — NEVER misclassify as Gemini error!
+      const mediaDiag: SanitizedGeminiErrorDiagnostic = {
+        code: 'INVALID_MODEL_RESPONSE',
+        errorDomain: 'ffmpeg',
+        httpStatus: null,
+        apiStatus: err.code,
+        upstreamMessage: sanitizeDiagnosticText(err.message),
+        stage: currentStageName,
+        modelId: currentModelInUse,
+        segmentIndex: currentSegmentNumber,
+        attemptNumber: totalRetryCount + 1,
+        elapsedMs: timing.totalElapsedMs,
+        retryable: false,
+        retryAfterMs: null,
+        occurredAt: finishedAt,
+      };
       insertApiUsageLog({
         matchId,
         analysisJobId: jobId,
@@ -2409,12 +3843,17 @@ async function executeAnalysisJobPipeline(params: {
         {
           status: 'failed',
           currentStage: 'failed',
+          analysisStrategy: activeStrategy,
+          stageModelsUsed,
+          fallbackHistory,
+          validationSummary,
           actualCostUsd: Number(cumulativeCostUsd.toFixed(6)),
           completedAt: finishedAt,
           elapsedMs: timing.totalElapsedMs,
           timingBreakdown: timing,
           errorCode: err.code,
           errorMessage: err.message,
+          diagnostics: mediaDiag,
         },
         { allowTerminalTransition: false }
       );
@@ -2439,11 +3878,26 @@ async function executeAnalysisJobPipeline(params: {
             elapsedMs: timing.totalElapsedMs,
           });
 
+      if (classified.diagnostic.errorDomain === 'database') {
+        validationSummary.databaseErrors.push({
+          stage: currentStageName,
+          code: classified.code,
+          sqliteCode: classified.diagnostic.sqliteCode ?? null,
+          message: sanitizeDiagnosticText(classified.userMessage),
+          occurredAt: finishedAt,
+        });
+      }
+
       insertApiUsageLog({
         matchId,
         analysisJobId: jobId,
         modelId: currentModelInUse,
-        stage: currentStageName || 'pipeline_error',
+        stage:
+          classified.diagnostic.errorDomain === 'database'
+            ? 'local_database_persistence_error'
+            : classified.diagnostic.errorDomain === 'ai_validation'
+              ? 'ai_response_validation_error'
+              : currentStageName || 'pipeline_error',
         inputTokens: 0,
         outputTokens: 0,
         requestDurationMs: timing.totalElapsedMs,
@@ -2456,6 +3910,10 @@ async function executeAnalysisJobPipeline(params: {
         {
           status: 'failed',
           currentStage: 'failed',
+          analysisStrategy: activeStrategy,
+          stageModelsUsed,
+          fallbackHistory,
+          validationSummary,
           actualCostUsd: Number(cumulativeCostUsd.toFixed(6)),
           completedAt: finishedAt,
           elapsedMs: timing.totalElapsedMs,

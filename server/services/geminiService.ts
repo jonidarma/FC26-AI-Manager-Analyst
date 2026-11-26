@@ -10,23 +10,32 @@ import type {
   AiSettings,
   AnalysisPreflightCheck,
   AnalysisPreflightResult,
+  CapabilityProbeType,
   EffectiveModelRouting,
+  ErrorDomain,
   GeminiConnectionTestResult,
   GeminiErrorCode,
   GeminiModelAccessStatus,
   GeminiModelCapability,
   GeminiModelDiscoveryResult,
   GeminiServiceStatus,
+  ModelHealthRecord,
   SanitizedGeminiErrorDiagnostic,
   VideoAnalysisMode,
 } from '../../src/types/domain.ts';
 import { getDb } from '../db/database.ts';
+import { isAiResponseValidationError } from './aiResponseValidationService.ts';
 import {
   isDeprecatedGeminiModelId,
   isLikelyVideoCapableModelId,
   normalizeModelId,
   resolveEffectiveModelRouting,
 } from './geminiModelRouter.ts';
+import {
+  listAllModelHealth,
+  recordModelFailure,
+  recordModelSuccess,
+} from './modelHealthService.ts';
 import { resolveRecordingSegmentMediaPath } from './recordingMediaResolver.ts';
 import {
   getDailyApiSpendUsd,
@@ -148,7 +157,11 @@ export const PERMANENT_NON_RETRYABLE_ERROR_CODES = new Set<GeminiErrorCode>([
   'MODEL_VIDEO_UNSUPPORTED',
   'MODEL_STRUCTURED_OUTPUT_UNSUPPORTED',
   'BILLING_REQUIRED',
+  'DATABASE_CONSTRAINT_VIOLATION',
+  'DATABASE_PERSISTENCE_FAILED',
+  'AI_RESPONSE_REPAIR_FAILED',
   'ANALYSIS_CANCELLED',
+  'ANALYSIS_INTERRUPTED',
 ]);
 
 export interface GeminiErrorClassificationContext {
@@ -161,6 +174,7 @@ export interface GeminiErrorClassificationContext {
 
 export interface ClassifiedGeminiError {
   code: GeminiErrorCode;
+  errorDomain: ErrorDomain;
   retryable: boolean;
   userMessage: string;
   retryAfterMs: number | null;
@@ -528,9 +542,67 @@ function extractErrorFields(err: unknown): {
   };
 }
 
+function resolveErrorDomainForCode(code: GeminiErrorCode): ErrorDomain {
+  if (code === 'DATABASE_CONSTRAINT_VIOLATION' || code === 'DATABASE_PERSISTENCE_FAILED') {
+    return 'database';
+  }
+  if (
+    code === 'AI_RESPONSE_SCHEMA_INVALID' ||
+    code === 'AI_RESPONSE_ENUM_INVALID' ||
+    code === 'AI_RESPONSE_REPAIR_FAILED' ||
+    code === 'ANALYSIS_STAGE_VALIDATION_FAILED'
+  ) {
+    return 'ai_validation';
+  }
+  if (code === 'NETWORK_CONNECTION_FAILED') {
+    return 'network';
+  }
+  if (code === 'ANALYSIS_CANCELLED' || code === 'ANALYSIS_INTERRUPTED') {
+    return 'internal';
+  }
+  return 'gemini_api';
+}
+
+function detectSqliteErrorInfo(err: unknown, rawMessage: string): {
+  isSqlite: boolean;
+  isConstraint: boolean;
+  sqliteCode: string | null;
+} {
+  let sqliteCode: string | null = null;
+  let errorName = '';
+  if (err && typeof err === 'object') {
+    const rec = err as Record<string, unknown>;
+    if (typeof rec.name === 'string') errorName = rec.name;
+    if (typeof rec.code === 'string' && rec.code.toUpperCase().startsWith('SQLITE_')) {
+      sqliteCode = rec.code.toUpperCase();
+    }
+  }
+  const lower = rawMessage.toLowerCase();
+  const isConstraintText =
+    lower.includes('check constraint failed') ||
+    lower.includes('foreign key constraint failed') ||
+    lower.includes('not null constraint failed') ||
+    lower.includes('unique constraint failed') ||
+    lower.includes('sqlite_constraint');
+  const isSqlite =
+    errorName === 'SqliteError' ||
+    Boolean(sqliteCode) ||
+    isConstraintText ||
+    lower.includes('sqlite_') ||
+    lower.includes('database is locked') ||
+    lower.includes('no such table') ||
+    lower.includes('no such column');
+
+  const isConstraint =
+    isConstraintText || Boolean(sqliteCode && sqliteCode.startsWith('SQLITE_CONSTRAINT'));
+
+  return { isSqlite, isConstraint, sqliteCode };
+}
+
 /**
- * Classifies any Gemini API, Files API, timeout, cancellation, or network error into
- * the exact 19 Phase 3.0.2 error codes with sanitized diagnostic metadata.
+ * Classifies any local SQLite persistence error, AI response validation error, Gemini API error,
+ * Files API error, timeout, cancellation, or network error into canonical Phase 3.0.3 error codes
+ * with explicit `errorDomain` separation and sanitized diagnostic metadata.
  */
 export function classifyGeminiError(
   err: unknown,
@@ -545,19 +617,29 @@ export function classifyGeminiError(
   const build = (
     code: GeminiErrorCode,
     userMessage: string,
-    retryableOverride?: boolean
+    retryableOverride?: boolean,
+    extra?: {
+      errorDomain?: ErrorDomain;
+      fieldName?: string | null;
+      expectedValues?: string[] | null;
+      receivedValuePreview?: string | null;
+      sqliteCode?: string | null;
+    }
   ): ClassifiedGeminiError => {
     const retryable =
       retryableOverride !== undefined
         ? retryableOverride
         : !PERMANENT_NON_RETRYABLE_ERROR_CODES.has(code);
+    const errorDomain = extra?.errorDomain ?? resolveErrorDomainForCode(code);
     return {
       code,
+      errorDomain,
       retryable,
       userMessage,
       retryAfterMs,
       diagnostic: {
         code,
+        errorDomain,
         httpStatus,
         apiStatus,
         upstreamMessage: sanitizedUpstream || userMessage,
@@ -568,12 +650,56 @@ export function classifyGeminiError(
         elapsedMs: context.elapsedMs ?? null,
         retryable,
         retryAfterMs,
+        fieldName: extra?.fieldName ?? null,
+        expectedValues: extra?.expectedValues ?? null,
+        receivedValuePreview: extra?.receivedValuePreview ?? null,
+        sqliteCode: extra?.sqliteCode ?? null,
         occurredAt: new Date().toISOString(),
       },
     };
   };
 
-  // Explicit known Phase 3.0.2 error codes passed through from inner stage guards
+  // 0a. Local AI Response Runtime Validation Errors — NEVER misclassify as upstream Gemini API failures
+  if (isAiResponseValidationError(err)) {
+    return build(
+      err.code,
+      `AI response validation failed during stage "${err.stage || context.stage || 'inference'}": ${sanitizeDiagnosticText(err.message)}`,
+      false,
+      {
+        errorDomain: 'ai_validation',
+        fieldName: err.fieldName,
+        expectedValues: err.expectedValues,
+        receivedValuePreview: err.receivedValuePreview,
+      }
+    );
+  }
+
+  // 0b. Local SQLite Constraint / Persistence Errors — MUST NEVER be classified as upstream Gemini failures!
+  const sqliteInfo = detectSqliteErrorInfo(err, rawMessage);
+  if (sqliteInfo.isSqlite) {
+    if (sqliteInfo.isConstraint) {
+      return build(
+        'DATABASE_CONSTRAINT_VIOLATION',
+        `Local SQLite database constraint violation during stage "${context.stage ?? 'persistence'}": ${sanitizedUpstream}. This is a local persistence error, not a Google Gemini service outage.`,
+        false,
+        {
+          errorDomain: 'database',
+          sqliteCode: sqliteInfo.sqliteCode ?? 'SQLITE_CONSTRAINT',
+        }
+      );
+    }
+    return build(
+      'DATABASE_PERSISTENCE_FAILED',
+      `Local SQLite database persistence error during stage "${context.stage ?? 'persistence'}": ${sanitizedUpstream}.`,
+      false,
+      {
+        errorDomain: 'database',
+        sqliteCode: sqliteInfo.sqliteCode ?? 'SQLITE_ERROR',
+      }
+    );
+  }
+
+  // Explicit known Phase 3.0.3 error codes passed through from inner stage guards
   const VALID_CODES = new Set<GeminiErrorCode>([
     'INVALID_API_KEY',
     'API_KEY_REVOKED',
@@ -592,13 +718,19 @@ export function classifyGeminiError(
     'NETWORK_CONNECTION_FAILED',
     'UPSTREAM_SERVICE_UNAVAILABLE',
     'INVALID_MODEL_RESPONSE',
+    'AI_RESPONSE_SCHEMA_INVALID',
+    'AI_RESPONSE_ENUM_INVALID',
+    'AI_RESPONSE_REPAIR_FAILED',
+    'DATABASE_CONSTRAINT_VIOLATION',
+    'DATABASE_PERSISTENCE_FAILED',
+    'ANALYSIS_STAGE_VALIDATION_FAILED',
     'ANALYSIS_CANCELLED',
     'ANALYSIS_INTERRUPTED',
   ]);
 
   if (explicitCode && VALID_CODES.has(explicitCode as GeminiErrorCode)) {
     const typed = explicitCode as GeminiErrorCode;
-    return build(typed, sanitizedUpstream || `Gemini analysis failed (${typed}).`);
+    return build(typed, sanitizedUpstream || `Analysis stage failed (${typed}).`);
   }
 
   // 1. Cancellation & Interruption
@@ -880,11 +1012,21 @@ interface CachedModelCapabilityRow {
   display_name: string;
   source: string;
   access_status: GeminiModelAccessStatus;
+  model_listed?: number;
   supports_generate_content: number;
   supports_video_input: number;
   supports_structured_output: number;
+  text_verified?: number;
+  text_verified_at?: string | null;
   video_verified: number;
   structured_json_verified: number;
+  structured_json_verified_at?: string | null;
+  image_verified?: number;
+  image_verified_at?: string | null;
+  inline_video_verified?: number;
+  inline_video_verified_at?: string | null;
+  files_api_video_verified?: number;
+  files_api_video_verified_at?: string | null;
   input_token_limit: number | null;
   output_token_limit: number | null;
   last_error_code: string | null;
@@ -940,11 +1082,16 @@ function writeCachedCapability(
     displayName?: string;
     source?: 'discovered' | 'configured' | 'registry';
     accessStatus: GeminiModelAccessStatus;
+    modelListed?: boolean;
     supportsGenerateContent: boolean;
     supportsVideoInput: boolean;
     supportsStructuredOutput: boolean;
-    videoVerified: boolean;
-    structuredJsonVerified: boolean;
+    textVerified?: boolean;
+    structuredJsonVerified?: boolean;
+    imageVerified?: boolean;
+    inlineVideoVerified?: boolean;
+    filesApiVideoVerified?: boolean;
+    videoVerified?: boolean;
     inputTokenLimit?: number | null;
     outputTokenLimit?: number | null;
     lastErrorCode?: GeminiErrorCode | null;
@@ -962,22 +1109,88 @@ function writeCachedCapability(
     const verifiedAt = new Date(nowMs).toISOString();
     const expiresAt = new Date(nowMs + (entry.ttlMs ?? MODEL_CAPABILITY_CACHE_TTL_MS)).toISOString();
 
+    const prev = db
+      .prepare('SELECT * FROM gemini_model_capabilities_cache WHERE cache_key = ?')
+      .get(cacheKey) as CachedModelCapabilityRow | undefined;
+
+    const nextTextVerified =
+      entry.textVerified !== undefined ? (entry.textVerified ? 1 : 0) : Number(prev?.text_verified ?? 0);
+    const nextTextVerifiedAt =
+      entry.textVerified === true ? verifiedAt : prev?.text_verified_at ?? null;
+
+    const nextStructuredVerified =
+      entry.structuredJsonVerified !== undefined
+        ? entry.structuredJsonVerified
+          ? 1
+          : 0
+        : Number(prev?.structured_json_verified ?? 0);
+    const nextStructuredVerifiedAt =
+      entry.structuredJsonVerified === true ? verifiedAt : prev?.structured_json_verified_at ?? null;
+
+    const nextImageVerified =
+      entry.imageVerified !== undefined ? (entry.imageVerified ? 1 : 0) : Number(prev?.image_verified ?? 0);
+    const nextImageVerifiedAt =
+      entry.imageVerified === true ? verifiedAt : prev?.image_verified_at ?? null;
+
+    const nextInlineVideoVerified =
+      entry.inlineVideoVerified !== undefined
+        ? entry.inlineVideoVerified
+          ? 1
+          : 0
+        : Number(prev?.inline_video_verified ?? 0);
+    const nextInlineVideoVerifiedAt =
+      entry.inlineVideoVerified === true ? verifiedAt : prev?.inline_video_verified_at ?? null;
+
+    const nextFilesApiVideoVerified =
+      entry.filesApiVideoVerified !== undefined
+        ? entry.filesApiVideoVerified
+          ? 1
+          : 0
+        : Number(prev?.files_api_video_verified ?? 0);
+    const nextFilesApiVideoVerifiedAt =
+      entry.filesApiVideoVerified === true ? verifiedAt : prev?.files_api_video_verified_at ?? null;
+
+    const nextVideoVerified =
+      entry.videoVerified === true || nextInlineVideoVerified === 1 || nextFilesApiVideoVerified === 1
+        ? 1
+        : entry.videoVerified === false && nextInlineVideoVerified === 0 && nextFilesApiVideoVerified === 0
+          ? 0
+          : Number(prev?.video_verified ?? 0);
+
+    const nextModelListed =
+      entry.modelListed !== undefined ? (entry.modelListed ? 1 : 0) : Number(prev?.model_listed ?? 1);
+
     db.prepare(`
       INSERT INTO gemini_model_capabilities_cache (
         cache_key, api_key_fingerprint, model_id, display_name, source, access_status,
-        supports_generate_content, supports_video_input, supports_structured_output,
-        video_verified, structured_json_verified, input_token_limit, output_token_limit,
+        model_listed, supports_generate_content, supports_video_input, supports_structured_output,
+        text_verified, text_verified_at,
+        video_verified, structured_json_verified, structured_json_verified_at,
+        image_verified, image_verified_at,
+        inline_video_verified, inline_video_verified_at,
+        files_api_video_verified, files_api_video_verified_at,
+        input_token_limit, output_token_limit,
         last_error_code, last_error_message, verified_at, expires_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(cache_key) DO UPDATE SET
         display_name = COALESCE(NULLIF(excluded.display_name, ''), gemini_model_capabilities_cache.display_name),
         source = excluded.source,
         access_status = excluded.access_status,
+        model_listed = excluded.model_listed,
         supports_generate_content = excluded.supports_generate_content,
         supports_video_input = excluded.supports_video_input,
         supports_structured_output = excluded.supports_structured_output,
-        video_verified = CASE WHEN excluded.video_verified = 1 THEN 1 ELSE gemini_model_capabilities_cache.video_verified END,
+        text_verified = excluded.text_verified,
+        text_verified_at = excluded.text_verified_at,
+        video_verified = excluded.video_verified,
         structured_json_verified = excluded.structured_json_verified,
+        structured_json_verified_at = excluded.structured_json_verified_at,
+        image_verified = excluded.image_verified,
+        image_verified_at = excluded.image_verified_at,
+        inline_video_verified = excluded.inline_video_verified,
+        inline_video_verified_at = excluded.inline_video_verified_at,
+        files_api_video_verified = excluded.files_api_video_verified,
+        files_api_video_verified_at = excluded.files_api_video_verified_at,
         input_token_limit = COALESCE(excluded.input_token_limit, gemini_model_capabilities_cache.input_token_limit),
         output_token_limit = COALESCE(excluded.output_token_limit, gemini_model_capabilities_cache.output_token_limit),
         last_error_code = excluded.last_error_code,
@@ -988,16 +1201,26 @@ function writeCachedCapability(
       cacheKey,
       fp,
       normalized,
-      entry.displayName ?? normalized,
-      entry.source ?? 'discovered',
+      entry.displayName ?? prev?.display_name ?? normalized,
+      entry.source ?? prev?.source ?? 'discovered',
       entry.accessStatus,
+      nextModelListed,
       entry.supportsGenerateContent ? 1 : 0,
       entry.supportsVideoInput ? 1 : 0,
       entry.supportsStructuredOutput ? 1 : 0,
-      entry.videoVerified ? 1 : 0,
-      entry.structuredJsonVerified ? 1 : 0,
-      entry.inputTokenLimit ?? null,
-      entry.outputTokenLimit ?? null,
+      nextTextVerified,
+      nextTextVerifiedAt,
+      nextVideoVerified,
+      nextStructuredVerified,
+      nextStructuredVerifiedAt,
+      nextImageVerified,
+      nextImageVerifiedAt,
+      nextInlineVideoVerified,
+      nextInlineVideoVerifiedAt,
+      nextFilesApiVideoVerified,
+      nextFilesApiVideoVerifiedAt,
+      entry.inputTokenLimit ?? prev?.input_token_limit ?? null,
+      entry.outputTokenLimit ?? prev?.output_token_limit ?? null,
       entry.lastErrorCode ?? null,
       entry.lastErrorMessage ? sanitizeDiagnosticText(entry.lastErrorMessage) : null,
       verifiedAt,
@@ -1010,24 +1233,61 @@ function writeCachedCapability(
 
 function mergeCachedStatusIntoModel(
   model: GeminiModelCapability,
-  cachedMap: Map<string, CachedModelCapabilityRow>
+  cachedMap: Map<string, CachedModelCapabilityRow>,
+  healthByModel?: Map<string, ModelHealthRecord[]>
 ): GeminiModelCapability {
-  const cached = cachedMap.get(normalizeModelId(model.modelId));
-  if (!cached) return model;
+  const normId = normalizeModelId(model.modelId);
+  const cached = cachedMap.get(normId);
+  const health = healthByModel?.get(normId) ?? model.health;
+  if (!cached) {
+    return health ? { ...model, health } : model;
+  }
+  const inlineVerified = Boolean(cached.inline_video_verified);
+  const filesApiVerified = Boolean(cached.files_api_video_verified);
   return {
     ...model,
     accessStatus: cached.access_status,
+    modelListed: cached.model_listed !== undefined ? Boolean(cached.model_listed) : model.modelListed,
     supportsGenerateContent: Boolean(cached.supports_generate_content),
     supportsVideoInput: Boolean(cached.supports_video_input),
     supportsStructuredOutput: Boolean(cached.supports_structured_output),
-    videoVerified: Boolean(cached.video_verified),
+    textVerified: Boolean(cached.text_verified ?? cached.structured_json_verified),
+    textVerifiedAt: cached.text_verified_at ?? null,
     structuredJsonVerified: Boolean(cached.structured_json_verified),
+    structuredJsonVerifiedAt: cached.structured_json_verified_at ?? null,
+    imageVerified: Boolean(cached.image_verified),
+    imageVerifiedAt: cached.image_verified_at ?? null,
+    videoVerified: Boolean(cached.video_verified) || inlineVerified || filesApiVerified,
+    inlineVideoVerified: inlineVerified,
+    inlineVideoVerifiedAt: cached.inline_video_verified_at ?? null,
+    filesApiVideoVerified: filesApiVerified,
+    filesApiVideoVerifiedAt: cached.files_api_video_verified_at ?? null,
     inputTokenLimit: cached.input_token_limit ?? model.inputTokenLimit ?? null,
     outputTokenLimit: cached.output_token_limit ?? model.outputTokenLimit ?? null,
     lastVerifiedAt: cached.verified_at,
     lastErrorCode: (cached.last_error_code as GeminiErrorCode | null) ?? null,
     lastErrorMessage: cached.last_error_message ?? null,
+    health,
   };
+}
+
+function buildHealthMap(dbArg?: Database.Database): {
+  list: ModelHealthRecord[];
+  byModel: Map<string, ModelHealthRecord[]>;
+} {
+  try {
+    const list = listAllModelHealth(dbArg);
+    const byModel = new Map<string, ModelHealthRecord[]>();
+    for (const h of list) {
+      const key = normalizeModelId(h.modelId);
+      const arr = byModel.get(key) ?? [];
+      arr.push(h);
+      byModel.set(key, arr);
+    }
+    return { list, byModel };
+  } catch {
+    return { list: [], byModel: new Map() };
+  }
 }
 
 // ============================================================
@@ -1042,6 +1302,7 @@ export async function discoverAvailableGeminiModels(options: {
   db?: Database.Database;
 } = {}): Promise<GeminiModelDiscoveryResult> {
   const cachedMap = listAllCachedCapabilities(options.db);
+  const { byModel: healthByModel } = buildHealthMap(options.db);
   const configuredIds = (options.configuredModelIds ?? [])
     .map(normalizeModelId)
     .filter((id) => id.length > 0);
@@ -1053,14 +1314,19 @@ export async function discoverAvailableGeminiModels(options: {
 
   if (!client) {
     const fallbackModels = GEMINI_MODEL_REGISTRY.map((m) =>
-      mergeCachedStatusIntoModel({ ...m, source: 'registry', accessStatus: 'unverified' }, cachedMap)
+      mergeCachedStatusIntoModel(
+        { ...m, source: 'registry', accessStatus: 'unverified', modelListed: false },
+        cachedMap,
+        healthByModel
+      )
     );
     for (const cid of configuredIds) {
       if (!fallbackModels.some((m) => m.modelId === cid)) {
         fallbackModels.push(
           mergeCachedStatusIntoModel(
-            { ...getModelCapability(cid), source: 'configured', accessStatus: 'unverified' },
-            cachedMap
+            { ...getModelCapability(cid), source: 'configured', accessStatus: 'unverified', modelListed: false },
+            cachedMap,
+            healthByModel
           )
         );
       }
@@ -1082,7 +1348,9 @@ export async function discoverAvailableGeminiModels(options: {
     inMemoryDiscoveryCache.keyFingerprint === keyFp &&
     Date.now() - inMemoryDiscoveryCache.fetchedAtMs < MODEL_DISCOVERY_CACHE_TTL_MS
   ) {
-    const models = inMemoryDiscoveryCache.models.map((m) => mergeCachedStatusIntoModel(m, cachedMap));
+    const models = inMemoryDiscoveryCache.models.map((m) =>
+      mergeCachedStatusIntoModel(m, cachedMap, healthByModel)
+    );
     return {
       configured: true,
       discoveredAt: inMemoryDiscoveryCache.discoveredAt,
@@ -1126,6 +1394,7 @@ export async function discoverAvailableGeminiModels(options: {
         availability: regMatch?.availability ?? inferred.availability,
         source: 'discovered',
         accessStatus: 'unverified',
+        modelListed: true,
         supportsGenerateContent: true,
         supportsVideoInput: true,
         supportsStructuredOutput: true,
@@ -1143,7 +1412,7 @@ export async function discoverAvailableGeminiModels(options: {
           regMatch?.description ||
           'Dynamically discovered Gemini multimodal model available on this API key.',
       };
-      discovered.push(mergeCachedStatusIntoModel(cap, cachedMap));
+      discovered.push(mergeCachedStatusIntoModel(cap, cachedMap, healthByModel));
     }
 
     // Include any currently configured model IDs that were NOT returned by models.list()
@@ -1156,13 +1425,15 @@ export async function discoverAvailableGeminiModels(options: {
             {
               ...getModelCapability(cid),
               source: 'configured',
+              modelListed: false,
               accessStatus: cached?.access_status ?? 'inaccessible',
               lastErrorCode: (cached?.last_error_code as GeminiErrorCode | null) ?? 'MODEL_NOT_FOUND',
               lastErrorMessage:
                 cached?.last_error_message ??
                 `Model "${cid}" was not listed as available by your Gemini API key.`,
             },
-            cachedMap
+            cachedMap,
+            healthByModel
           )
         );
       }
@@ -1203,7 +1474,9 @@ export async function discoverAvailableGeminiModels(options: {
       stage: 'model_discovery',
       elapsedMs: Date.now() - started,
     });
-    const fallbackModels = GEMINI_MODEL_REGISTRY.map((m) => mergeCachedStatusIntoModel(m, cachedMap));
+    const fallbackModels = GEMINI_MODEL_REGISTRY.map((m) =>
+      mergeCachedStatusIntoModel(m, cachedMap, healthByModel)
+    );
     return {
       configured: true,
       discoveredAt: inMemoryDiscoveryCache?.discoveredAt ?? null,
@@ -1219,6 +1492,7 @@ export async function discoverAvailableGeminiModels(options: {
 export function getGeminiStatus(selectedModel: string, aiSettings?: AiSettings): GeminiServiceStatus {
   const configured = isGeminiApiConfigured();
   const cachedMap = listAllCachedCapabilities();
+  const { list: healthList, byModel: healthByModel } = buildHealthMap();
   const normalizedSelected = normalizeModelId(selectedModel);
 
   const baseModels =
@@ -1226,12 +1500,13 @@ export function getGeminiStatus(selectedModel: string, aiSettings?: AiSettings):
       ? inMemoryDiscoveryCache.models
       : GEMINI_MODEL_REGISTRY;
 
-  const models = baseModels.map((m) => mergeCachedStatusIntoModel(m, cachedMap));
+  const models = baseModels.map((m) => mergeCachedStatusIntoModel(m, cachedMap, healthByModel));
   if (normalizedSelected && !models.some((m) => m.modelId === normalizedSelected)) {
     models.push(
       mergeCachedStatusIntoModel(
         { ...getModelCapability(normalizedSelected), source: 'configured' },
-        cachedMap
+        cachedMap,
+        healthByModel
       )
     );
   }
@@ -1247,8 +1522,9 @@ export function getGeminiStatus(selectedModel: string, aiSettings?: AiSettings):
     models,
     routing: effectiveRouting,
     discoveredAt: inMemoryDiscoveryCache?.discoveredAt ?? null,
+    health: healthList,
     phaseNote: configured
-      ? 'Server-side GEMINI_API_KEY detected. Use "Refresh Available Models" and "Test Selected Model" to verify live access before running video analysis.'
+      ? 'Server-side GEMINI_API_KEY detected. Use "Refresh Available Models" and separate capability probes (Text/JSON, Image, Inline Video, Files API Video) to verify live access.'
       : 'GEMINI_API_KEY is not configured in the server environment. Configure GEMINI_API_KEY in .env (server-side) before running real Gemini video analysis.',
   };
 }
@@ -1286,8 +1562,41 @@ async function createTinySyntheticProbeMp4(): Promise<string> {
   return tmpFile;
 }
 
+async function createTinySyntheticProbeImage(): Promise<{ filePath: string; mimeType: 'image/jpeg' | 'image/png'; bytes: Buffer }> {
+  const bins = resolveServerFfmpegBinaries();
+  if (bins.ffmpegPath) {
+    const tmpFile = path.join(os.tmpdir(), `fc26_gemini_image_probe_${crypto.randomUUID().slice(0, 8)}.jpg`);
+    await execFileAsync(
+      bins.ffmpegPath,
+      [
+        '-y',
+        '-f',
+        'lavfi',
+        '-i',
+        'color=c=green:s=160x120:d=0.1',
+        '-frames:v',
+        '1',
+        '-q:v',
+        '5',
+        tmpFile,
+      ],
+      { timeout: 10_000, maxBuffer: 1024 * 1024 }
+    );
+    return { filePath: tmpFile, mimeType: 'image/jpeg', bytes: fs.readFileSync(tmpFile) };
+  }
+  // Minimal valid 1x1 green PNG fallback when FFmpeg is absent
+  const pngBytes = Buffer.from(
+    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M/wHwAEBgIApD5fRAAAAABJRU5ErkJggg==',
+    'base64'
+  );
+  const tmpFile = path.join(os.tmpdir(), `fc26_gemini_image_probe_${crypto.randomUUID().slice(0, 8)}.png`);
+  fs.writeFileSync(tmpFile, pngBytes);
+  return { filePath: tmpFile, mimeType: 'image/png', bytes: pngBytes };
+}
+
 export async function verifyModelCapabilities(input: {
   modelId: string;
+  probeType?: CapabilityProbeType;
   testVideo?: boolean;
   forceRefresh?: boolean;
   timeoutMs?: number;
@@ -1295,6 +1604,9 @@ export async function verifyModelCapabilities(input: {
   db?: Database.Database;
 }): Promise<GeminiConnectionTestResult> {
   const modelId = normalizeModelId(input.modelId);
+  const probeType: CapabilityProbeType =
+    input.probeType ?? (input.testVideo ? 'inline_video' : 'text_json');
+  const isVideoProbe = probeType === 'inline_video' || probeType === 'files_api_video';
   const started = Date.now();
 
   if (!modelId) {
@@ -1302,9 +1614,14 @@ export async function verifyModelCapabilities(input: {
       ok: false,
       configured: isGeminiApiConfigured(),
       modelId: '',
+      probeType,
       latencyMs: 0,
+      textVerified: false,
+      imageVerified: false,
+      inlineVideoVerified: false,
+      filesApiVideoVerified: false,
       videoSupported: false,
-      videoTested: Boolean(input.testVideo),
+      videoTested: isVideoProbe,
       structuredOutputSupported: false,
       accessStatus: 'unsupported',
       message: 'No Gemini model ID is selected. Choose a model in Settings first.',
@@ -1317,9 +1634,14 @@ export async function verifyModelCapabilities(input: {
       ok: false,
       configured: isGeminiApiConfigured(),
       modelId,
+      probeType,
       latencyMs: 0,
+      textVerified: false,
+      imageVerified: false,
+      inlineVideoVerified: false,
+      filesApiVideoVerified: false,
       videoSupported: false,
-      videoTested: Boolean(input.testVideo),
+      videoTested: isVideoProbe,
       structuredOutputSupported: false,
       accessStatus: 'unsupported',
       message: `Model "${modelId}" is deprecated and unsupported. Select an active Gemini model.`,
@@ -1337,9 +1659,14 @@ export async function verifyModelCapabilities(input: {
       ok: false,
       configured: false,
       modelId,
+      probeType,
       latencyMs: Date.now() - started,
+      textVerified: false,
+      imageVerified: false,
+      inlineVideoVerified: false,
+      filesApiVideoVerified: false,
       videoSupported: false,
-      videoTested: Boolean(input.testVideo),
+      videoTested: isVideoProbe,
       structuredOutputSupported: false,
       accessStatus: 'unverified',
       message:
@@ -1348,76 +1675,118 @@ export async function verifyModelCapabilities(input: {
     };
   }
 
-  // Return short-lived cached verification when still fresh & matching requested scope
+  // Return short-lived cached verification ONLY when the exact requested probeType was already verified
   if (!input.forceRefresh && !input.clientOverride) {
     const cached = readCachedCapability(modelId, input.db);
-    if (
-      cached &&
-      cached.access_status === 'verified' &&
-      cached.structured_json_verified === 1 &&
-      (!input.testVideo || cached.video_verified === 1)
-    ) {
-      return {
-        ok: true,
-        configured: true,
-        modelId,
-        latencyMs: 0,
-        videoSupported: Boolean(cached.supports_video_input),
-        videoTested: Boolean(cached.video_verified),
-        structuredOutputSupported: Boolean(cached.supports_structured_output),
-        accessStatus: 'verified',
-        verifiedAt: cached.verified_at,
-        message: `Cached verification valid for ${modelId} (verified at ${cached.verified_at}).`,
-      };
+    if (cached && cached.access_status === 'verified') {
+      const probeAlreadyVerified =
+        (probeType === 'text_json' && Boolean(cached.structured_json_verified) && Boolean(cached.text_verified ?? cached.structured_json_verified)) ||
+        (probeType === 'image' && Boolean(cached.image_verified)) ||
+        (probeType === 'inline_video' && Boolean(cached.inline_video_verified)) ||
+        (probeType === 'files_api_video' && Boolean(cached.files_api_video_verified));
+
+      if (probeAlreadyVerified) {
+        return {
+          ok: true,
+          configured: true,
+          modelId,
+          probeType,
+          latencyMs: 0,
+          textVerified: Boolean(cached.text_verified ?? cached.structured_json_verified),
+          imageVerified: Boolean(cached.image_verified),
+          inlineVideoVerified: Boolean(cached.inline_video_verified),
+          filesApiVideoVerified: Boolean(cached.files_api_video_verified),
+          videoSupported: Boolean(cached.supports_video_input),
+          videoTested: Boolean(cached.inline_video_verified) || Boolean(cached.files_api_video_verified),
+          structuredOutputSupported: Boolean(cached.supports_structured_output),
+          accessStatus: 'verified',
+          verifiedAt: cached.verified_at,
+          message: `Cached ${probeType} verification valid for ${modelId} (verified at ${cached.verified_at}).`,
+        };
+      }
     }
   }
 
   const controller = new AbortController();
-  const timeoutMs = input.timeoutMs ?? (input.testVideo ? 45_000 : 25_000);
+  const timeoutMs =
+    input.timeoutMs ?? (probeType === 'files_api_video' ? 60_000 : isVideoProbe ? 45_000 : 25_000);
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   let tempProbePath: string | null = null;
   let uploadedRemoteName: string | null = null;
+  let remoteCleanupConfirmed: boolean | null = probeType === 'files_api_video' ? false : null;
 
   try {
-    let contents: unknown = 'Respond with JSON {"ok": true, "note": "connected"}.';
+    let contents: unknown = 'Respond with JSON {"ok": true, "note": "text_json_verified"}.';
 
-    if (input.testVideo) {
+    if (probeType === 'image') {
+      const img = await createTinySyntheticProbeImage();
+      tempProbePath = img.filePath;
+      contents = [
+        {
+          inlineData: {
+            mimeType: img.mimeType,
+            data: img.bytes.toString('base64'),
+          },
+        },
+        'Inspect this solid test image and respond with JSON {"ok": true, "note": "image_verified", "dominantColor": "<color>"}.',
+      ];
+    } else if (probeType === 'inline_video') {
       tempProbePath = await createTinySyntheticProbeMp4();
       const videoBytes = fs.readFileSync(tempProbePath);
-      if (client.files && videoBytes.length > 4 * 1024 * 1024) {
-        const up = await client.files.upload({
-          file: tempProbePath,
-          config: {
+      contents = [
+        {
+          inlineData: {
             mimeType: 'video/mp4',
-            displayName: 'fc26_video_capability_probe.mp4',
-            abortSignal: controller.signal,
+            data: videoBytes.toString('base64'),
           },
-        });
-        uploadedRemoteName = up.name ?? null;
-        let cur = up;
-        while (cur.state === 'PROCESSING' && cur.name) {
-          await new Promise((r) => setTimeout(r, 1000));
-          cur = await client.files.get({ name: cur.name, config: { abortSignal: controller.signal } });
-        }
-        if (cur.state !== 'ACTIVE' || !cur.uri) {
-          throw new Error(`Gemini media processing ended in unexpected state "${String(cur.state)}".`);
-        }
-        contents = [
-          createPartFromUri(cur.uri, 'video/mp4'),
-          'Confirm you can inspect this 1-second test video and return JSON {"ok": true, "note": "video_verified"}.',
-        ];
-      } else {
-        // Inline tiny 1-second MP4 (~3 KB) directly avoids extra Files API wait during Settings check
-        contents = [
-          {
-            inlineData: {
-              mimeType: 'video/mp4',
-              data: videoBytes.toString('base64'),
-            },
-          },
-          'Confirm you can inspect this 1-second test video and return JSON {"ok": true, "note": "video_verified"}.',
-        ];
+        },
+        'Confirm you can inspect this 1-second inline test video and return JSON {"ok": true, "note": "inline_video_verified"}.',
+      ];
+    } else if (probeType === 'files_api_video') {
+      if (!client.files) {
+        throw {
+          geminiErrorCode: 'MODEL_VIDEO_UNSUPPORTED',
+          message: 'Gemini Files API client is unavailable for files_api_video capability probe.',
+        };
       }
+      tempProbePath = await createTinySyntheticProbeMp4();
+      const up = await client.files.upload({
+        file: tempProbePath,
+        config: {
+          mimeType: 'video/mp4',
+          displayName: `fc26_files_api_probe_${crypto.randomUUID().slice(0, 6)}.mp4`,
+          abortSignal: controller.signal,
+        },
+      });
+      uploadedRemoteName = up.name ?? null;
+      if (!uploadedRemoteName) {
+        throw {
+          geminiErrorCode: 'VIDEO_UPLOAD_FAILED',
+          message: 'Files API probe upload did not return a remote file name.',
+        };
+      }
+      let cur = up;
+      const pollDeadline = Date.now() + Math.min(timeoutMs, 45_000);
+      while (cur.state === 'PROCESSING' && cur.name) {
+        if (Date.now() > pollDeadline) {
+          throw {
+            geminiErrorCode: 'VIDEO_PROCESSING_TIMEOUT',
+            message: 'Files API capability probe timed out waiting for ACTIVE state.',
+          };
+        }
+        await new Promise((r) => setTimeout(r, 750));
+        cur = await client.files.get({ name: cur.name, config: { abortSignal: controller.signal } });
+      }
+      if (cur.state !== 'ACTIVE' || !cur.uri) {
+        throw {
+          geminiErrorCode: 'VIDEO_PROCESSING_FAILED',
+          message: `Gemini Files API probe media ended in unexpected state "${String(cur.state ?? 'unknown')}".`,
+        };
+      }
+      contents = [
+        createPartFromUri(cur.uri, 'video/mp4'),
+        'Confirm you can inspect this 1-second Files API uploaded video and return JSON {"ok": true, "note": "files_api_video_verified"}.',
+      ];
     }
 
     const response = await client.models.generateContent({
@@ -1431,18 +1800,34 @@ export async function verifyModelCapabilities(input: {
           properties: {
             ok: { type: Type.BOOLEAN },
             note: { type: Type.STRING },
+            dominantColor: { type: Type.STRING, nullable: true },
           },
           required: ['ok', 'note'],
         },
       },
     });
 
-    const parsed = JSON.parse(response.text ?? '{}') as { ok?: boolean; note?: string };
+    const parsed = JSON.parse(response.text ?? '{}') as {
+      ok?: boolean;
+      note?: string;
+      dominantColor?: string | null;
+    };
     const latencyMs = Date.now() - started;
     const ok = Boolean(parsed.ok);
 
     if (!ok) {
-      throw new Error('Model returned structured JSON with ok=false during verification.');
+      throw new Error(`Model returned structured JSON with ok=false during ${probeType} probe.`);
+    }
+
+    // Delete Files API probe file BEFORE returning so remoteCleanupConfirmed is truthful
+    if (uploadedRemoteName && client.files) {
+      try {
+        await client.files.delete({ name: uploadedRemoteName });
+        remoteCleanupConfirmed = true;
+        uploadedRemoteName = null;
+      } catch {
+        remoteCleanupConfirmed = false;
+      }
     }
 
     const verifiedAt = new Date().toISOString();
@@ -1455,32 +1840,72 @@ export async function verifyModelCapabilities(input: {
         supportsGenerateContent: true,
         supportsVideoInput: true,
         supportsStructuredOutput: true,
-        videoVerified: Boolean(input.testVideo),
-        structuredJsonVerified: true,
+        textVerified: probeType === 'text_json' ? true : undefined,
+        structuredJsonVerified: probeType === 'text_json' ? true : undefined,
+        imageVerified: probeType === 'image' ? true : undefined,
+        inlineVideoVerified: probeType === 'inline_video' ? true : undefined,
+        filesApiVideoVerified: probeType === 'files_api_video' ? true : undefined,
+        videoVerified: isVideoProbe ? true : undefined,
         lastErrorCode: null,
         lastErrorMessage: null,
       },
       input.db
     );
 
+    const updatedCache = readCachedCapability(modelId, input.db);
+
+    try {
+      recordModelSuccess({
+        modelId,
+        capability: probeType,
+        stage: 'capability_probe',
+        db: input.db,
+      });
+    } catch {
+      // non-fatal health update
+    }
+
+    const probeLabelMap: Record<CapabilityProbeType, string> = {
+      text_json: 'Text & Structured JSON',
+      image: 'Image Multimodal Input',
+      inline_video: 'Inline Video Input',
+      files_api_video: 'Files API Video Upload & Inference',
+    };
+
+    const visualDetail =
+      parsed.dominantColor?.trim() || parsed.note?.trim() || null;
+
     return {
       ok: true,
       configured: true,
       modelId,
+      probeType,
       latencyMs,
+      textVerified: Boolean(updatedCache?.text_verified ?? (probeType === 'text_json')),
+      imageVerified: Boolean(updatedCache?.image_verified ?? (probeType === 'image')),
+      inlineVideoVerified: Boolean(updatedCache?.inline_video_verified ?? (probeType === 'inline_video')),
+      filesApiVideoVerified: Boolean(
+        updatedCache?.files_api_video_verified ?? (probeType === 'files_api_video')
+      ),
       videoSupported: true,
-      videoTested: Boolean(input.testVideo),
+      videoTested: isVideoProbe || Boolean(updatedCache?.video_verified),
       structuredOutputSupported: true,
+      visualRecognitionDetail: visualDetail,
+      remoteCleanupConfirmed,
       accessStatus: 'verified',
       verifiedAt,
-      message: input.testVideo
-        ? `Verified ${modelId} (${latencyMs} ms): video input + structured JSON output confirmed.`
-        : `Connected to ${modelId} (${latencyMs} ms): access and structured JSON output verified.`,
+      message: `Verified ${modelId} (${latencyMs} ms): ${probeLabelMap[probeType]} confirmed.${
+        probeType === 'files_api_video'
+          ? remoteCleanupConfirmed
+            ? ' Remote probe video cleaned up.'
+            : ' Warning: remote probe video cleanup could not be confirmed.'
+          : ''
+      }`,
     };
   } catch (err) {
     const latencyMs = Date.now() - started;
     const classified = classifyGeminiError(err, {
-      stage: input.testVideo ? 'verify_video_capability' : 'verify_model_access',
+      stage: `verify_${probeType}_capability`,
       modelId,
       elapsedMs: latencyMs,
     });
@@ -1495,7 +1920,21 @@ export async function verifyModelCapabilities(input: {
           ? 'inaccessible'
           : 'unverified';
 
-    // Cache deterministic permanent capability/access failures briefly (5 min) so repeated clicks/preflights stay informative
+    try {
+      recordModelFailure({
+        modelId,
+        capability: probeType,
+        stage: 'capability_probe',
+        errorCode: classified.code,
+        errorMessage: classified.userMessage,
+        retryAfterMs: classified.retryAfterMs,
+        db: input.db,
+      });
+    } catch {
+      // non-fatal health update
+    }
+
+    // Cache deterministic permanent capability/access failures briefly (5 min) without erasing other verified probes
     if (accessStatus === 'inaccessible' || accessStatus === 'unsupported') {
       writeCachedCapability(
         {
@@ -1506,8 +1945,12 @@ export async function verifyModelCapabilities(input: {
           supportsGenerateContent: accessStatus !== 'inaccessible',
           supportsVideoInput: classified.code !== 'MODEL_VIDEO_UNSUPPORTED',
           supportsStructuredOutput: classified.code !== 'MODEL_STRUCTURED_OUTPUT_UNSUPPORTED',
-          videoVerified: false,
-          structuredJsonVerified: false,
+          textVerified: probeType === 'text_json' ? false : undefined,
+          structuredJsonVerified: probeType === 'text_json' ? false : undefined,
+          imageVerified: probeType === 'image' ? false : undefined,
+          inlineVideoVerified: probeType === 'inline_video' ? false : undefined,
+          filesApiVideoVerified: probeType === 'files_api_video' ? false : undefined,
+          videoVerified: isVideoProbe ? false : undefined,
           lastErrorCode: classified.code,
           lastErrorMessage: classified.userMessage,
           ttlMs: 5 * 60 * 1000,
@@ -1516,14 +1959,22 @@ export async function verifyModelCapabilities(input: {
       );
     }
 
+    const updatedCache = readCachedCapability(modelId, input.db);
+
     return {
       ok: false,
       configured: true,
       modelId,
+      probeType,
       latencyMs,
+      textVerified: Boolean(updatedCache?.text_verified),
+      imageVerified: Boolean(updatedCache?.image_verified),
+      inlineVideoVerified: Boolean(updatedCache?.inline_video_verified),
+      filesApiVideoVerified: Boolean(updatedCache?.files_api_video_verified),
       videoSupported: classified.code !== 'MODEL_VIDEO_UNSUPPORTED',
-      videoTested: Boolean(input.testVideo),
+      videoTested: isVideoProbe,
       structuredOutputSupported: classified.code !== 'MODEL_STRUCTURED_OUTPUT_UNSUPPORTED',
+      remoteCleanupConfirmed,
       accessStatus,
       message: classified.userMessage,
       errorCode: classified.code,
@@ -1534,6 +1985,7 @@ export async function verifyModelCapabilities(input: {
     if (uploadedRemoteName && client.files) {
       try {
         await client.files.delete({ name: uploadedRemoteName });
+        remoteCleanupConfirmed = true;
       } catch {
         // best-effort probe cleanup
       }
@@ -1550,16 +2002,24 @@ export async function verifyModelCapabilities(input: {
 
 export async function testGeminiConnection(
   requestedModelId?: string,
-  options?: { testVideo?: boolean; forceRefresh?: boolean; clientOverride?: GeminiDiscoveryClientLike | null }
+  options?: {
+    probeType?: CapabilityProbeType;
+    testVideo?: boolean;
+    forceRefresh?: boolean;
+    clientOverride?: GeminiDiscoveryClientLike | null;
+    db?: Database.Database;
+  }
 ): Promise<GeminiConnectionTestResult> {
   const settings = getSettings();
   const routing = resolveEffectiveModelRouting(settings.ai);
   const modelId = normalizeModelId(requestedModelId) || routing.primaryModelId;
   return verifyModelCapabilities({
     modelId,
+    probeType: options?.probeType,
     testVideo: Boolean(options?.testVideo),
     forceRefresh: options?.forceRefresh ?? true,
     clientOverride: options?.clientOverride,
+    db: options?.db,
   });
 }
 

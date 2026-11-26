@@ -230,6 +230,7 @@ const OPERATIONAL_TABLES = [
   'ai_halftime_briefings',
   'ai_second_half_comparisons',
   'ai_analysis_checkpoints',
+  'gemini_model_health',
   'application_settings',
   'api_usage_logs',
   'tactical_catalog',

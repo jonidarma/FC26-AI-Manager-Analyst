@@ -1622,8 +1622,9 @@ test('D2: Non-destructive v5->v6 migration preserves existing rows & marks legac
   assert.ok(
     backupV6.format === 'fc26-ai-manager-backup-v6' ||
       backupV6.format === 'fc26-ai-manager-backup-v7' ||
-      backupV6.format === 'fc26-ai-manager-backup-v8',
-    `Expected backup format v6/v7/v8, got ${backupV6.format}`
+      backupV6.format === 'fc26-ai-manager-backup-v8' ||
+      backupV6.format === 'fc26-ai-manager-backup-v9',
+    `Expected backup format v6/v7/v8/v9, got ${backupV6.format}`
   );
   const clubCountBefore = listClubs().length;
   restoreDatabaseBackup(backupV6);

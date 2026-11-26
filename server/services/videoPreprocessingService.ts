@@ -699,6 +699,121 @@ export async function extractEvidenceFrame(input: {
   }
 }
 
+export interface ExtractedFallbackFrame {
+  timestampSeconds: number;
+  filePath: string;
+  mimeType: 'image/jpeg';
+  sizeBytes: number;
+}
+
+/**
+ * Extracts bounded timestamped JPEG keyframes into the job's temporary analysis directory
+ * for the opt-in Phase 3.0.3 Sequential Frame Fallback strategy.
+ * Original gameplay recordings are NEVER modified or deleted.
+ */
+export async function extractSequentialFallbackFrames(input: {
+  jobId: string;
+  videoFilePath: string;
+  durationSeconds: number;
+  intervalSeconds: number;
+  maxFrames: number;
+  segmentIndex: number;
+  abortSignal?: AbortSignal;
+  allowedBaseDirs?: string[];
+}): Promise<{
+  frames: ExtractedFallbackFrame[];
+  intervalSeconds: number;
+  extractionMs: number;
+}> {
+  const started = Date.now();
+  const bins = resolveServerFfmpegBinaries();
+  if (!bins.ffmpegPath) {
+    throw new Error('FFmpeg binary is unavailable to extract sequential fallback frames.');
+  }
+
+  const confinedVideo = assertConfinedMediaPath(input.videoFilePath, input.allowedBaseDirs);
+  if (!fs.existsSync(confinedVideo)) {
+    throw new Error(`Video file not found for frame fallback extraction: ${path.basename(confinedVideo)}`);
+  }
+
+  const duration = Math.max(0.5, Number(input.durationSeconds) || 1);
+  const maxFrames = Math.max(1, Math.min(48, Math.floor(input.maxFrames || 24)));
+  const requestedInterval = Math.max(1, Math.min(30, Number(input.intervalSeconds) || 6));
+  // Automatically widen interval if duration / interval exceeds maxFrames so we cover the full segment evenly
+  const effectiveInterval =
+    Math.ceil(duration / requestedInterval) > maxFrames
+      ? Number((duration / maxFrames).toFixed(2))
+      : requestedInterval;
+
+  const timestamps: number[] = [];
+  for (let t = Math.min(0.5, duration * 0.25); t < duration && timestamps.length < maxFrames; t += effectiveInterval) {
+    timestamps.push(Number(Math.min(Math.max(0, t), Math.max(0, duration - 0.1)).toFixed(2)));
+  }
+  if (timestamps.length === 0) {
+    timestamps.push(0);
+  }
+
+  const tempDir = getAnalysisTempDir(input.jobId);
+  const framesDir = path.join(tempDir, 'fallback_frames', `seg_${input.segmentIndex}`);
+  if (!fs.existsSync(framesDir)) {
+    fs.mkdirSync(framesDir, { recursive: true });
+  }
+
+  const frames: ExtractedFallbackFrame[] = [];
+  for (let idx = 0; idx < timestamps.length; idx++) {
+    if (input.abortSignal?.aborted) {
+      throw new Error('__JOB_CANCELLED__');
+    }
+    const ts = timestamps[idx];
+    const outPath = path.join(framesDir, `kf_${String(idx + 1).padStart(3, '0')}_${Math.round(ts * 10)}ds.jpg`);
+    try {
+      await execFileAsync(
+        bins.ffmpegPath,
+        [
+          '-y',
+          '-ss',
+          String(ts),
+          '-i',
+          confinedVideo,
+          '-frames:v',
+          '1',
+          '-q:v',
+          '5',
+          '-vf',
+          'scale=min(1024\\,iw):-2',
+          outPath,
+        ],
+        { timeout: 20_000, maxBuffer: 2 * 1024 * 1024, signal: input.abortSignal }
+      );
+      if (fs.existsSync(outPath)) {
+        const stat = fs.statSync(outPath);
+        if (stat.size > 0) {
+          frames.push({
+            timestampSeconds: ts,
+            filePath: outPath,
+            mimeType: 'image/jpeg',
+            sizeBytes: stat.size,
+          });
+        }
+      }
+    } catch (err) {
+      if (input.abortSignal?.aborted) {
+        throw new Error('__JOB_CANCELLED__');
+      }
+      // Continue extracting remaining keyframes if a single seek timestamp fails near EOF
+      if (idx === 0 && frames.length === 0 && timestamps.length === 1) {
+        throw err;
+      }
+    }
+  }
+
+  return {
+    frames,
+    intervalSeconds: effectiveInterval,
+    extractionMs: Date.now() - started,
+  };
+}
+
 export function cleanupTempAnalysisDir(jobId: string): void {
   try {
     const { dataDir } = resolveDatabaseLocation();
